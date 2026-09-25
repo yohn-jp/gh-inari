@@ -174,7 +174,8 @@ test("accepts exact safe branch targets from any repository convention and refus
   const data = capability({
     async request(request) {
       requests.push(request.path);
-      return { status: 200, body: { ref: `refs/heads/${alternative}`, object: { type: "commit", sha: head } } };
+      const name = decodeURIComponent(request.path.split("/git/ref/heads/")[1] ?? "");
+      return { status: 200, body: { ref: `refs/heads/${name}`, object: { type: "commit", sha: head } } };
     },
     async requestGraphql(request) {
       graphql.push(request);
@@ -190,13 +191,15 @@ test("accepts exact safe branch targets from any repository convention and refus
     await data.compareAndAdvanceRef({ branch: alternative, beforeOid: head, afterOid: commit, force: false }),
     { status: "updated" },
   );
-  for (const unsafe of ["main", "story/../466", "story/466.lock", "-story", "story 466"]) {
+  for (const unsafe of ["story/../466", "story/466.lock", "-story", "story 466"]) {
     await assert.rejects(data.readRef(unsafe), GitDataCapabilityError);
     await assert.rejects(
       data.compareAndAdvanceRef({ branch: unsafe, beforeOid: head, afterOid: commit, force: false }),
       GitDataCapabilityError,
     );
   }
-  assert.equal(requests.length, 1);
+  // No branch literal is universally refused by the transport facade.
+  assert.equal((await data.readRef("main"))?.sha, head);
+  assert.equal(requests.length, 2);
   assert.equal(graphql.length, 1);
 });

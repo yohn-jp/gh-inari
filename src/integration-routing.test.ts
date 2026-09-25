@@ -175,7 +175,7 @@ test("ordinary Implementation routing consumes exact governed head and non-main 
   assert.equal(issue.branches.default, "trunk");
 });
 
-test("ordinary routing keeps reserved, default, historical and unsafe branch denials", () => {
+test("ordinary routing keeps reserved, default and unsafe branch denials", () => {
   const invalid = (input: Record<string, unknown>, path: string) => {
     const result = tryProjectIntegrationRouting(input);
     assert.equal(result.valid, false, JSON.stringify(input));
@@ -189,8 +189,6 @@ test("ordinary routing keeps reserved, default, historical and unsafe branch den
   invalid({ implementation, implementationBranch: "release/1.0.0", defaultBranch: "trunk" }, "$.implementationBranch");
   invalid({ implementation, implementationBranch: "issue/700-x", defaultBranch: "trunk" }, "$.implementationBranch");
   invalid({ implementation, implementationBranch: "trunk", defaultBranch: "trunk" }, "$.implementationBranch");
-  // A name recognized under the historical convention must still name this Implementation.
-  invalid({ implementation, implementationBranch: "feat/701-other", defaultBranch: "trunk" }, "$.implementationBranch");
   // Reserved integration branches keep their canonical grammar.
   invalid(issueRoute({ branches: { default: "main", issue: "issue/x", epic: "epic/640-dashboard" } }), "$.issueBranch");
 });
@@ -204,4 +202,31 @@ test("an already-projected route re-validates to the same projection and rejects
   });
   assert.equal(tampered.valid, false);
   assert.ok(tampered.diagnostics.some((entry) => entry.path === "$.pullRequest"));
+});
+
+test("an exactly policy-bound historical-looking branch naming another Issue number routes for its Implementation", () => {
+  const implementation42 = { ...repository, number: 42 } as const;
+  const route = projectIntegrationRouting({
+    implementation: implementation42,
+    implementationBranch: "feat/999-special",
+    defaultBranch: "trunk",
+  });
+  assert.deepEqual([route.expectedHead, route.expectedBase], ["feat/999-special", "trunk"]);
+  // Exact head/base equality still binds the route to the governed evidence.
+  const mismatch = tryProjectIntegrationRouting({
+    implementation: implementation42,
+    implementationBranch: "feat/999-special",
+    defaultBranch: "trunk",
+    head: "feat/42-other",
+  });
+  assert.equal(mismatch.valid, false);
+  assert.ok(mismatch.diagnostics.some((entry) => entry.code === "INTEGRATION_ROUTING_HEAD_MISMATCH"));
+});
+
+test("main is an ordinary Implementation head unless it is the actual default or base branch", () => {
+  const onTrunk = projectIntegrationRouting({ implementation, implementationBranch: "main", defaultBranch: "trunk" });
+  assert.deepEqual([onTrunk.expectedHead, onTrunk.expectedBase], ["main", "trunk"]);
+  const onMain = tryProjectIntegrationRouting({ implementation, implementationBranch: "main", defaultBranch: "main" });
+  assert.equal(onMain.valid, false);
+  assert.ok(onMain.diagnostics.some((entry) => entry.code === "INTEGRATION_ROUTING_HEAD_MISMATCH"));
 });

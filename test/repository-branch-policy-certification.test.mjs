@@ -40,9 +40,12 @@ const REPOSITORY = { repositoryHost: "github.com", repositoryId: REPOSITORY_ID, 
 const IDENTITY = { repositoryHost: "github.com", repositoryId: REPOSITORY_ID, nameWithOwner: NAME_WITH_OWNER };
 const IMPLEMENTATION = 42;
 // An alternative repository convention: not gh-inari's <feat|fix|...>/<issue>-<slug>.
-const BRANCH = "story/42-alternative-policy";
+const ALTERNATIVE_BRANCH = "story/42-alternative-policy";
+const ALTERNATIVE_PATTERN = "^story/[0-9]+-[a-z0-9-]+$";
+// The branch/policy under certification; each test selects one scenario (tests in a file run serially).
+const scenario = { branch: ALTERNATIVE_BRANCH, pattern: ALTERNATIVE_PATTERN };
 const DEFAULT_BRANCH = "trunk";
-const POLICY_SOURCE = 'version: 1\nsections: []\nbranch:\n  pattern: "^story/[0-9]+-[a-z0-9-]+$"\n';
+const policySource = () => `version: 1\nsections: []\nbranch:\n  pattern: ${JSON.stringify(scenario.pattern)}\n`;
 const GENERATION = { ref: DEFAULT_BRANCH, treeSha: "e".repeat(40) };
 const BASE_SHA = "a".repeat(40);
 const HEAD_SHA = "b".repeat(40);
@@ -67,7 +70,7 @@ function gitBlobSha(base64) {
     .digest("hex");
 }
 
-function implementationBody({ branch = BRANCH, repositoryId = REPOSITORY_ID } = {}) {
+function implementationBody({ branch = scenario.branch, repositoryId = REPOSITORY_ID } = {}) {
   const repository = { ...REPOSITORY, repositoryId };
   return renderImplementationIssueBody({
     version: 1,
@@ -114,7 +117,7 @@ function createProvider(options = {}) {
     ]),
   };
   const base = `repos/${NAME_WITH_OWNER}`;
-  const branchRef = () => ({ ref: `refs/heads/${BRANCH}`, object: { type: "commit", sha: state.branchSha } });
+  const branchRef = () => ({ ref: `refs/heads/${scenario.branch}`, object: { type: "commit", sha: state.branchSha } });
   const readTransport = {
     request: async (request) => {
       if (request.method !== "GET") throw new Error("Evidence reads cannot mutate.");
@@ -125,7 +128,8 @@ function createProvider(options = {}) {
           status: 200,
           body: { number: IMPLEMENTATION, title: "impl: certify alternative policy", state: "open", body: state.body },
         };
-      if (target === `${base}/git/ref/heads/${encodeURIComponent(BRANCH)}`) return { status: 200, body: branchRef() };
+      if (target === `${base}/git/ref/heads/${encodeURIComponent(scenario.branch)}`)
+        return { status: 200, body: branchRef() };
       if (target.startsWith(`${base}/git/ref/heads/`)) return { status: 404, body: {} };
       if (target === `${base}/git/matching-refs/heads/`) return { status: 200, body: [branchRef()] };
       if (target.startsWith(`${base}/pulls?state=all&head=`)) {
@@ -162,13 +166,13 @@ function createProvider(options = {}) {
       sha: GENERATION.treeSha,
       entries: [{ path: ".github/inari/pr-policy.yml", type: "blob", sha: "9".repeat(40) }],
     }),
-    getRepositoryBlob: async () => POLICY_SOURCE,
+    getRepositoryBlob: async () => policySource(),
   };
   const gitTransport = {
     request: async (request) => {
       const target = request.path.slice(base.length + 1);
       if (request.method === "GET" && target.startsWith("git/ref/heads/"))
-        return decodeURIComponent(target.slice("git/ref/heads/".length)) === BRANCH
+        return decodeURIComponent(target.slice("git/ref/heads/".length)) === scenario.branch
           ? { status: 200, body: branchRef() }
           : { status: 404, body: {} };
       if (request.method === "GET" && target.startsWith("git/commits/")) {
@@ -195,7 +199,7 @@ function createProvider(options = {}) {
     requestGraphql: async (request) => {
       const update = request.variables.input.refUpdates[0];
       state.mutations.push(`updateRefs ${update.name}`);
-      if (update.name === `refs/heads/${BRANCH}` && update.beforeOid === state.branchSha)
+      if (update.name === `refs/heads/${scenario.branch}` && update.beforeOid === state.branchSha)
         state.branchSha = update.afterOid;
       return { status: 200, body: { data: { updateRefs: { clientMutationId: null } } } };
     },
@@ -303,20 +307,24 @@ function policy(generation = GENERATION) {
       },
       ...generation,
     },
-    rule: { pattern: "^story/[0-9]+-[a-z0-9-]+$" },
+    rule: { pattern: scenario.pattern },
   });
   assert.equal(acquisition.status, "available");
   return acquisition.policy;
 }
 
-function observation({ generation = GENERATION, observedGeneration = GENERATION, observedBranch = BRANCH } = {}) {
+function observation({
+  generation = GENERATION,
+  observedGeneration = GENERATION,
+  observedBranch = scenario.branch,
+} = {}) {
   const repository = { repositoryHost: "github.com", repositoryId: REPOSITORY_ID };
   return {
     policy: policy(generation),
     target: { repository, implementation: IMPLEMENTATION },
     observedGeneration,
     observedBranch,
-    binding: { repository, implementation: IMPLEMENTATION, branch: BRANCH },
+    binding: { repository, implementation: IMPLEMENTATION, branch: scenario.branch },
   };
 }
 
@@ -338,8 +346,8 @@ function session(fixture, sessionId, branchObservation = observeLocalBranch(obse
     repository: { id: REPOSITORY_ID, name: NAME_WITH_OWNER },
     task: { kind: "issue", number: IMPLEMENTATION },
     capabilities: [
-      { kind: "branch.advance", branch: BRANCH },
-      { kind: "pullRequest.create", head: BRANCH, base: DEFAULT_BRANCH, max: 1 },
+      { kind: "branch.advance", branch: scenario.branch },
+      { kind: "pullRequest.create", head: scenario.branch, base: DEFAULT_BRANCH, max: 1 },
     ],
     ttlSeconds: 600,
     runtimeAuthority: fixture.authority,
@@ -362,7 +370,7 @@ function intent(requestId, operation, request, repositoryId = REPOSITORY_ID) {
 }
 
 function publishIntent(requestId, overrides = {}) {
-  const head = overrides.head ?? BRANCH;
+  const head = overrides.head ?? scenario.branch;
   const implementation = { ...REPOSITORY, number: overrides.implementation ?? IMPLEMENTATION };
   return intent(
     requestId,
@@ -398,7 +406,7 @@ function advanceIntent(requestId, overrides = {}) {
     {
       version: 1,
       issue: overrides.issue ?? IMPLEMENTATION,
-      branch: overrides.branch ?? BRANCH,
+      branch: overrides.branch ?? scenario.branch,
       expectedHead: HEAD_SHA,
       changes: [{ operation: "upsert", path: "src/policy.ts", mode: "100644", content: CONTENT }],
       commit: { message: "Advance the repository-governed branch" },
@@ -426,12 +434,14 @@ function admissionOptions(environment, fixture, provider, branchObservation = ob
   };
 }
 
-test("an alternative branch convention on a non-main default executes through Session, Admission, Executor, branch and PR capabilities", async () => {
+async function certifyExecution(branch, pattern) {
+  scenario.branch = branch;
+  scenario.pattern = pattern;
   await withAdmission(async (environment) => {
     const fixture = authorityFixture();
     const provider = createProvider();
     const binding = session(fixture, "session-alternative-policy");
-    assert.equal(binding.branchObservation.expectedBranch, BRANCH);
+    assert.equal(binding.branchObservation.expectedBranch, scenario.branch);
     assert.equal(binding.branchObservation.evidence.defaultBranch, DEFAULT_BRANCH);
     const options = admissionOptions(environment, fixture, provider);
     assert.equal((await admitSession(binding, options)).status, "active");
@@ -441,36 +451,88 @@ test("an alternative branch convention on a non-main default executes through Se
     assert.deepEqual(publish.subject, {
       kind: "pullRequest",
       issue: IMPLEMENTATION,
-      head: BRANCH,
+      head: scenario.branch,
       base: DEFAULT_BRANCH,
     });
     const published = await executeAuthorizedExecution(publish, executorDelegates(provider));
     assert.equal(published.status, "succeeded", JSON.stringify(published.failure ?? published.publication));
     assert.equal(published.publication.classification, "created");
     assert.equal(published.provenance.stage, "verified");
-    assert.deepEqual(provider.state.mutations, [`createPullRequest ${BRANCH} -> ${DEFAULT_BRANCH}`]);
+    assert.deepEqual(provider.state.mutations, [`createPullRequest ${scenario.branch} -> ${DEFAULT_BRANCH}`]);
 
     // Branch advance: the admitted branch is exactly the mutated branch.
     const advance = await authorizeExecutionIntent(advanceIntent("request-advance"), binding.sessionId, options);
-    assert.deepEqual(advance.subject, { kind: "branch", issue: IMPLEMENTATION, branch: BRANCH });
-    assert.deepEqual(advance.capability, { kind: "branch.advance", branch: BRANCH });
+    assert.deepEqual(advance.subject, { kind: "branch", issue: IMPLEMENTATION, branch: scenario.branch });
+    assert.deepEqual(advance.capability, { kind: "branch.advance", branch: scenario.branch });
     const advanced = await executeAuthorizedExecution(advance, executorDelegates(provider));
     assert.equal(advanced.status, "succeeded", JSON.stringify(advanced.failure ?? advanced.branchAdvance));
     assert.equal(advanced.branchAdvance.outcome, "advanced");
-    assert.equal(advanced.branchAdvance.branch, BRANCH);
+    assert.equal(advanced.branchAdvance.branch, scenario.branch);
     assert.equal(advanced.provenance.stage, "verified");
-    assert.deepEqual(advanced.provenance.subject, { kind: "branch", issue: IMPLEMENTATION, branch: BRANCH });
+    assert.deepEqual(advanced.provenance.subject, { kind: "branch", issue: IMPLEMENTATION, branch: scenario.branch });
     assert.equal(provider.state.branchSha, NEW_COMMIT);
     assert.deepEqual(provider.state.mutations.slice(1), [
       "POST git/blobs",
       "POST git/trees",
       "POST git/commits",
-      `updateRefs refs/heads/${BRANCH}`,
+      `updateRefs refs/heads/${scenario.branch}`,
     ]);
   });
+}
+
+test("an alternative branch convention on a non-main default executes through Session, Admission, Executor, branch and PR capabilities", async () => {
+  await certifyExecution(ALTERNATIVE_BRANCH, ALTERNATIVE_PATTERN);
+});
+
+test("an exactly policy-bound historical-looking branch naming another Issue executes for its Implementation", async () => {
+  // Implementation #42 is governed onto feat/999-special: spelling never re-derives Implementation identity.
+  await certifyExecution("feat/999-special", "^[a-z]+/[0-9]+-[a-z-]+$");
+});
+
+test("main is bound only by actual default-branch evidence at the Session policy and capability boundary", () => {
+  const fixture = authorityFixture();
+  const pattern = "^(main|story/[0-9]+-[a-z0-9-]+)$";
+  const repository = { repositoryHost: "github.com", repositoryId: REPOSITORY_ID };
+  const bound = (defaultBranch) => {
+    const generation = { ref: defaultBranch, treeSha: GENERATION.treeSha };
+    scenario.pattern = pattern;
+    return observeLocalBranch({
+      policy: policy(generation),
+      target: { repository, implementation: IMPLEMENTATION },
+      observedGeneration: generation,
+      observedBranch: "main",
+      binding: { repository, implementation: IMPLEMENTATION, branch: "main" },
+    });
+  };
+  try {
+    // Default trunk: `main` is an ordinary governed Implementation branch.
+    const observation = bound("trunk");
+    assert.equal(observation.expectedBranch, "main");
+    const binding = createLocalSessionBinding({
+      sessionId: "session-main-on-trunk",
+      repository: { id: REPOSITORY_ID, name: NAME_WITH_OWNER },
+      task: { kind: "issue", number: IMPLEMENTATION },
+      capabilities: [
+        { kind: "branch.advance", branch: "main" },
+        { kind: "pullRequest.create", head: "main", base: DEFAULT_BRANCH, max: 1 },
+      ],
+      ttlSeconds: 600,
+      runtimeAuthority: fixture.authority,
+      runtimeKey: fixture.keyPair,
+      now: NOW,
+      branchObservation: observation,
+    });
+    assert.deepEqual(binding.capabilities[0], { kind: "branch.advance", branch: "main" });
+    // Default main: the actual default branch is refused by the policy authority.
+    assert.throws(() => bound("main"), /unavailable: BRANCH_NAME_RESERVED/u);
+  } finally {
+    scenario.pattern = ALTERNATIVE_PATTERN;
+  }
 });
 
 test("wrong repository, Implementation, branch, and stale generation fail before provider mutation", async () => {
+  scenario.branch = ALTERNATIVE_BRANCH;
+  scenario.pattern = ALTERNATIVE_PATTERN;
   await withAdmission(async (environment) => {
     const fixture = authorityFixture();
     const provider = createProvider();

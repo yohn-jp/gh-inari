@@ -250,14 +250,11 @@ function branchMatchesReference(
 ): boolean {
   if (branch === undefined || reference === undefined) return false;
   if (expectedType === "ordinary") {
-    // An ordinary Implementation head is the exact governed branch. It never
-    // occupies a reserved namespace. A name that the historical
-    // `<type>/<issue>-<slug>` convention recognizes must still name this
-    // Implementation (historical compatibility); other repository conventions
-    // are bound by exact Implementation branch evidence, not by spelling.
-    if (RESERVED_INTEGRATION_NAMESPACE.test(branch) || RESERVED_RELEASE_NAMESPACE.test(branch)) return false;
-    const historical = recognizeBranchName(branch);
-    return historical === undefined || historical.issueNumber === reference.number;
+    // An ordinary Implementation head is the exact governed branch supplied
+    // by Implementation evidence. Its spelling never establishes or refutes
+    // Implementation identity; it only must stay outside the reserved
+    // integration/release namespaces (safe spelling is checked by parseBranch).
+    return !RESERVED_INTEGRATION_NAMESPACE.test(branch) && !RESERVED_RELEASE_NAMESPACE.test(branch);
   }
   const parts = recognizeBranchName(branch);
   if (parts === undefined || parts.issueNumber !== reference.number) return false;

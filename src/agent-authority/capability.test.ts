@@ -38,7 +38,8 @@ test("branch.create, branch.advance and PR head accept repository-neutral safe e
     true,
   );
   assert.equal(validateCapabilityClaim({ kind: "branch.advance", branch: "work/../unsafe" }).valid, false);
-  assert.equal(validateCapabilityClaim({ kind: "branch.advance", branch: "main" }).valid, false);
+  // No branch literal is universal: default-branch denial uses actual default/base evidence downstream.
+  assert.equal(validateCapabilityClaim({ kind: "branch.advance", branch: "main" }).valid, true);
   assert.equal(validateCapabilityClaim({ kind: "branch.create", branch: "work/375-session", max: 1 }).valid, true);
   assert.equal(validateCapabilityClaim({ kind: "branch.create", branch: "work/../unsafe", max: 1 }).valid, false);
   assert.equal(
@@ -47,7 +48,7 @@ test("branch.create, branch.advance and PR head accept repository-neutral safe e
   );
   assert.equal(
     validateCapabilityClaim({ kind: "pullRequest.create", head: "main", base: "trunk", max: 1 }).valid,
-    false,
+    true,
   );
   assert.equal(
     validateCapabilityClaim({ kind: "pullRequest.create", head: "work/375-session", base: "a..b", max: 1 }).valid,
@@ -80,9 +81,9 @@ test("rejects a change claim with a non-positive or non-integer issue", () => {
   assert.equal(validateCapabilityClaim({ kind: "change.implement", issue: "364" }).valid, false);
 });
 
-test("rejects branch.create with a non-canonical branch name", () => {
-  const result = validateCapabilityClaim({ kind: "branch.create", branch: "main", max: 1 });
-  assert.equal(result.valid, false);
+test("rejects branch.create with an unsafe branch name", () => {
+  assert.equal(validateCapabilityClaim({ kind: "branch.create", branch: "feat/../main", max: 1 }).valid, false);
+  assert.equal(validateCapabilityClaim({ kind: "branch.create", branch: "", max: 1 }).valid, false);
 });
 
 test("rejects branch.create/pullRequest.create with max other than 1", () => {

@@ -221,8 +221,8 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
     d.push(diag("$.issue", "Issue must be a positive bounded integer."));
   // Exact authorized target: repository-neutral safe spelling only. Ordinary
   // naming is decided by repository policy and bound through Admission.
-  if (!text(input.branch, 255) || input.branch === "main" || validateBranchSpelling(input.branch).length !== 0)
-    d.push(diag("$.branch", "Branch must be a safe non-default branch name."));
+  if (!text(input.branch, 255) || validateBranchSpelling(input.branch).length !== 0)
+    d.push(diag("$.branch", "Branch must be a safe branch name."));
   if (!text(input.expectedHead, 40) || !SHA.test(input.expectedHead))
     d.push(diag("$.expectedHead", "Expected head must be a lowercase commit SHA."));
   if (!record(input.commit)) d.push(diag("$.commit", "Commit metadata is required."));
@@ -589,11 +589,10 @@ export function authorizeBranchAdvance(options: BranchAdvanceAuthorizationOption
   }
   // Default/protected-branch denial is bound to the authoritative default
   // branch (the Runtime Authority policy ref) and the Implementation base,
-  // never to a fixed naming convention.
+  // never to a fixed naming convention or a universal branch literal.
   const defaultBranch = context.authority.ref.replace(/^refs\/heads\//u, "");
   if (
     request.branch === defaultBranch ||
-    request.branch === "main" ||
     request.branch === context.implementationBinding?.base.branch ||
     request.branch === context.implementationScope?.base.branch
   ) {

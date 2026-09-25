@@ -107,13 +107,14 @@ function isSafeIssueNumber(value: unknown): value is number {
 }
 
 /**
- * An agent-writable target is any repository-neutral safe branch spelling.
- * `main` stays refused as a conservative literal guard; the authoritative
- * default/protected-branch denial is applied against the provider-resolved
- * default branch by Admission and branch advancement, not by this vocabulary.
+ * An agent-writable target is any repository-neutral safe branch spelling. No
+ * branch name is universally forbidden here: default/protected-branch denial
+ * is applied against the actual provider-resolved default branch and the
+ * Implementation base by Admission and branch advancement, not by this
+ * vocabulary.
  */
 function validAgentBranchName(value: unknown): value is string {
-  return typeof value === "string" && value !== "main" && validateBranchSpelling(value).length === 0;
+  return typeof value === "string" && validateBranchSpelling(value).length === 0;
 }
 
 /** A PR base is a safe provider branch name; it may be a non-`main` default branch. */

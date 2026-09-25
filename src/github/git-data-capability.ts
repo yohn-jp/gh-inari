@@ -423,11 +423,10 @@ function validPath(value: unknown): value is string {
  * (`inari/runtime-authority/<id>`), which keep their own exact pattern in
  * `../runtime-authority-publication.js`. Default/protected-branch
  * denial is enforced upstream against the authoritative default branch and
- * exact authorization binding; the `main` literal stays refused here as a
- * conservative transport guard.
+ * exact authorization binding; no branch literal is universally refused here.
  */
 function validBranch(value: unknown): value is string {
-  if (!validText(value, MAX_CHANGE_BRANCH_LENGTH) || value === "main") return false;
+  if (!validText(value, MAX_CHANGE_BRANCH_LENGTH)) return false;
   return validateBranchSpelling(value).length === 0;
 }
 
