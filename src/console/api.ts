@@ -15,6 +15,8 @@ export interface SetupApiOptions {
   /** Exact browser authority, including dynamic port or SSH forwarded localhost port. */
   readonly origin: string;
 }
+/** Bound of the percent-encoded, secret-free typed request sent beside an enrollment upload. */
+export const MAX_ENROLLMENT_REQUEST_HEADER = 12 * 1024;
 const fail = (out: ServerResponse, status: number): void => {
   out.statusCode = status;
   out.end();
@@ -115,16 +117,38 @@ export function createSetupApiServer(options: SetupApiOptions): Server {
       }
       const match = /^\/api\/setup\/enrollment\/([A-Za-z0-9_-]{1,64})$/u.exec(url.pathname);
       if (match && request.method === "POST") {
+        const inputId = match[1]!;
         const actionId = request.headers["x-setup-action-id"];
         const confirmation = request.headers["x-setup-confirmation"];
-        if (typeof actionId !== "string" || typeof confirmation !== "string") return fail(out, 400);
+        const encoded = request.headers["x-setup-request"];
+        if (
+          typeof actionId !== "string" ||
+          typeof confirmation !== "string" ||
+          typeof encoded !== "string" ||
+          encoded.length > MAX_ENROLLMENT_REQUEST_HEADER
+        )
+          return fail(out, 400);
+        // The secret-free typed request travels beside the opaque upload; the
+        // secret bytes never enter this JSON.
+        const action = validateSetupActionRequest(JSON.parse(decodeURIComponent(encoded)) as unknown);
         const offered = state.actions.find(
-          (action) =>
-            action.id === actionId &&
-            action.inputs.some((input) => input.id === match[1] && input.kind === "enrollment"),
+          (item) =>
+            item.id === actionId && item.inputs.some((input) => input.id === inputId && input.kind === "enrollment"),
         );
-        if (offered === undefined || !options.session.consume(confirmation, actionId, state.generation))
+        if (
+          offered === undefined ||
+          action.actionId !== actionId ||
+          action.version !== offered.version ||
+          !action.confirmed ||
+          !sameSetupGeneration(action.generation, state.generation)
+        )
           return fail(out, 409);
+        const declared = new Map(offered.inputs.map((input) => [input.id, input.kind]));
+        if (
+          Object.keys(action.inputs).some((id) => declared.get(id) === undefined || declared.get(id) === "enrollment")
+        )
+          return fail(out, 400);
+        if (!options.session.consume(confirmation, actionId, state.generation)) return fail(out, 409);
         const upload = enrollmentUpload(request);
         const result = await options.application.perform(
           options.repository,
@@ -133,9 +157,9 @@ export function createSetupApiServer(options: SetupApiOptions): Server {
             actionId,
             generation: state.generation,
             confirmed: true,
-            inputs: {},
+            inputs: action.inputs,
           },
-          { enrollments: { [match[1]]: upload } },
+          { enrollments: { [inputId]: upload } },
         );
         return json(out, result);
       }

@@ -57,15 +57,21 @@ test("every canonical action has a control path with a typed invocation after fr
     assert.equal(confirm.actionId, action.id);
     const invoke = server.calls[2]!;
     assert.equal(invoke.confirmation, "confirmation-1");
+    const inputs = Object.fromEntries(action.inputs.filter((i) => i.kind === "text").map((i) => [i.id, "12345"]));
     if (enrollment) {
-      // Per the #1119 contract the enrollment transport carries only the declared
-      // enrollment input; no JSON request (and so no text input) accompanies it.
+      // The declared secret-free inputs travel beside the opaque upload in one action.
       assert.equal(invoke.inputId, enrollment.id);
       assert.equal(invoke.actionId, action.id);
       assert.ok(invoke.body instanceof OpaqueSecretBlob);
-      assert.equal(invoke.request, undefined, "enrollment carries no JSON action request");
+      assert.deepEqual(invoke.request, {
+        version: action.version,
+        actionId: action.id,
+        generation: server.current.generation,
+        confirmed: true,
+        inputs: { "app-id": "12345" },
+      });
+      assert.doesNotMatch(JSON.stringify(invoke.request), /BEGIN/u);
     } else {
-      const inputs = Object.fromEntries(action.inputs.filter((i) => i.kind === "text").map((i) => [i.id, "12345"]));
       assert.deepEqual(invoke.request, {
         version: action.version,
         actionId: action.id,

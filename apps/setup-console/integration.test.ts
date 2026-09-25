@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { test } from "node:test";
-import { createSetupApplication } from "../../src/application/setup/actions.js";
+import { createSetupApplication, type SetupApplication } from "../../src/application/setup/actions.js";
 import { createSetupApiServer } from "../../src/console/api.js";
 import { OperatorSession } from "../../src/console/operator-session.js";
 import type { SetupActionRequest, SetupJournalEntry } from "../../src/runtime-contracts/setup.js";
@@ -39,8 +39,9 @@ async function harness(overrides: Record<string, string>) {
   let current = observation("gen-1", overrides);
   const performed: SetupActionRequest[] = [];
   const journal: SetupJournalEntry[] = [];
-  let enrolled = 0;
-  const application = createSetupApplication({
+  const enrolledBytes: string[] = [];
+  const applicationCalls: { request: unknown; enrollments: string[] }[] = [];
+  const canonical = createSetupApplication({
     observation: { observe: async () => current as never },
     journal: { append: async (entry) => void journal.push(entry), read: async () => journal },
     action: {
@@ -59,14 +60,32 @@ async function harness(overrides: Record<string, string>) {
       {
         owner: "executor",
         kinds: ["executor-issuer-private-key"],
-        enroll: async () => {
-          enrolled += 1;
-          throw new Error("not reached in these tests");
+        enroll: async (request, secret) => {
+          const chunks: Uint8Array[] = [];
+          for await (const chunk of secret) chunks.push(chunk);
+          enrolledBytes.push(Buffer.concat(chunks).toString("utf8"));
+          return {
+            version: 1,
+            kind: request.kind,
+            operationId: request.operationId,
+            repository: request.repository,
+            outcome: "enrolled",
+            publicFingerprint: `sha256:${"a".repeat(64)}`,
+            diagnostics: [],
+          };
         },
       },
     ],
     now: () => NOW,
   });
+  // Records each canonical application invocation made by the real API.
+  const application: SetupApplication = {
+    state: (repositoryIdentity) => canonical.state(repositoryIdentity),
+    perform: (repositoryIdentity, request, performOptions) => {
+      applicationCalls.push({ request, enrollments: Object.keys(performOptions?.enrollments ?? {}) });
+      return canonical.perform(repositoryIdentity, request, performOptions);
+    },
+  };
   const session = new OperatorSession(repository, "gen-1");
   const options = { application, repository, configuration: "gen-1", session, origin: "http://127.0.0.1:1" };
   const server = createSetupApiServer(options);
@@ -99,7 +118,8 @@ async function harness(overrides: Record<string, string>) {
     controller,
     performed,
     journal,
-    enrolled: () => enrolled,
+    enrolledBytes,
+    applicationCalls,
     drift: (configuration: string) => (current = observation(configuration, overrides)),
     setAfterConfirm: (hook: (() => void) | undefined) => (afterConfirm = hook),
     close: () => server.close(),
@@ -143,7 +163,7 @@ test("generation drift after confirmation reaches no owner effect through the re
   }
 });
 
-test("enrollment streams only the declared enrollment input; the owner decides the outcome", async () => {
+test("app-id + PEM complete executor.configure as exactly one canonical action through the real API", async () => {
   const h = await harness({ configuration: "unconfigured" });
   try {
     await h.controller.start();
@@ -151,19 +171,50 @@ test("enrollment streams only the declared enrollment input; the owner decides t
     assert.equal(action.kind, "executor.configure");
     h.controller.setAcknowledged(action.id, true);
     h.controller.setDraft(action.id, "app-id", "12345");
+    const pem = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+    h.controller.selectEnrollment(action.id, "issuer-key", new Blob([pem]));
+    await h.controller.submit(action.id);
+    await settle();
+    assert.equal(h.controller.snapshot().lastResult?.outcome, "succeeded");
+    assert.equal(h.applicationCalls.length, 1, "exactly one canonical application invocation");
+    assert.deepEqual(h.applicationCalls[0], {
+      request: {
+        version: 1,
+        actionId: action.id,
+        generation: action.freshness.generation,
+        confirmed: true,
+        inputs: { "app-id": "12345" },
+      },
+      enrollments: ["issuer-key"],
+    });
+    assert.deepEqual(h.enrolledBytes, [pem], "the owner enrollment port received the opaque upload once");
+    assert.equal(h.performed.length, 1, "the owner action port ran once");
+    assert.deepEqual(h.performed[0]!.inputs, { "app-id": "12345" });
+    assert.doesNotMatch(JSON.stringify(h.performed[0]), /BEGIN/u);
+    assert.doesNotMatch(JSON.stringify(h.journal), /BEGIN/u);
+    assert.deepEqual(h.controller.snapshot().enrollments, {}, "the File reference is dropped");
+    assert.doesNotMatch(JSON.stringify(h.controller.snapshot()), /BEGIN/u);
+  } finally {
+    h.close();
+  }
+});
+
+test("a missing required app-id fails before any owner effect", async () => {
+  const h = await harness({ configuration: "unconfigured" });
+  try {
+    await h.controller.start();
+    const action = h.controller.snapshot().state!.actions[0]!;
+    h.controller.setAcknowledged(action.id, true);
     h.controller.selectEnrollment(action.id, "issuer-key", new Blob(["-----BEGIN PRIVATE KEY-----\n"]));
     await h.controller.submit(action.id);
     await settle();
-    // The #1118 enrollment route performs with no non-secret inputs, so the
-    // canonical application reports the required text input as missing before
-    // any owner effect. The wizard shows that server result verbatim.
     const result = h.controller.snapshot().lastResult;
     assert.equal(result?.outcome, "action-required");
     assert.equal(result?.diagnostics[0]?.code, "SETUP_INPUT_MISSING");
-    assert.equal(h.enrolled(), 0);
+    assert.deepEqual(h.enrolledBytes, []);
     assert.equal(h.performed.length, 0);
+    assert.equal(h.journal.length, 0);
     assert.deepEqual(h.controller.snapshot().enrollments, {}, "the File reference is dropped");
-    assert.doesNotMatch(JSON.stringify(h.controller.snapshot()), /BEGIN/u);
   } finally {
     h.close();
   }

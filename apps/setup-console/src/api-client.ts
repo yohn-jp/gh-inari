@@ -45,10 +45,15 @@ export interface SetupTransport {
   /** Short-lived single-use confirmation bound by the server to the action and current generation. */
   confirm(actionId: string): Promise<string>;
   perform(confirmation: string, request: SetupActionRequest): Promise<SetupActionResult>;
+  /**
+   * Streams one enrollment upload together with the action's secret-free typed
+   * request (declared non-enrollment inputs, generation). The file is the body;
+   * it never enters JSON.
+   */
   enroll(
     inputId: string,
-    actionId: string,
     confirmation: string,
+    request: SetupActionRequest,
     body: Blob,
     signal: AbortSignal,
   ): Promise<SetupActionResult>;
@@ -182,15 +187,17 @@ export function createSetupApiClient(context: SetupOperatorContext, fetchImpl: t
         throw new SetupApiError("response-invalid", 200);
       }
     },
-    async enroll(inputId: string, actionId: string, confirmation: string, file: Blob, signal: AbortSignal) {
+    async enroll(inputId: string, confirmation: string, request: SetupActionRequest, file: Blob, signal: AbortSignal) {
       if (!INPUT_ID.test(inputId)) throw new SetupApiError("invalid", 0);
       if (file.size < 1 || file.size > MAX_SECRET_ENROLLMENT_BYTES) throw new SetupApiError("invalid", 0);
       const value = await send(SETUP_API_PATHS.enrollment + inputId, {
         method: "POST",
         headers: {
           "content-type": "application/octet-stream",
-          "x-setup-action-id": actionId,
+          "x-setup-action-id": request.actionId,
           "x-setup-confirmation": confirmation,
+          // Percent-encoded so any secret-free text input stays a valid header value.
+          "x-setup-request": encodeURIComponent(JSON.stringify(request)),
         },
         body: file,
         signal,

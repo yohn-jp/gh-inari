@@ -174,12 +174,14 @@ export class FakeSetupServer implements SetupTransport {
 
   async enroll(
     inputId: string,
-    actionId: string,
     confirmation: string,
+    request: SetupActionRequest,
     body: Blob,
     signal: AbortSignal,
   ): Promise<SetupActionResult> {
-    this.calls.push({ kind: "enroll", inputId, actionId, confirmation, body, signal });
+    const actionId = request.actionId;
+    this.calls.push({ kind: "enroll", inputId, actionId, confirmation, request, body, signal });
+    if (!sameSetupGeneration(request.generation, this.current.generation)) throw new SetupApiError("stale", 409);
     this.consume(confirmation, actionId);
     if (this.enrollBehavior === "hang") {
       await new Promise<void>((_resolve, reject) =>

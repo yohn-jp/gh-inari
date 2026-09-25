@@ -8,7 +8,8 @@
  * confirmation for the current generation, submits one typed request and then
  * re-reads state. It never retries an effect, approves, merges or infers
  * completion. Selected enrollment files stay as in-memory `Blob` references,
- * are streamed once through the bounded enrollment transport and are dropped
+ * are streamed once through the bounded enrollment transport, beside the
+ * action's declared secret-free inputs, and are dropped
  * after success, failure or cancellation. Nothing is persisted or logged.
  */
 import type { SetupState } from "../../../src/application/setup/state.js";
@@ -291,7 +292,7 @@ export function createSetupController(options: SetupControllerOptions): SetupCon
     const abort = new AbortController();
     upload = { key, abort };
     try {
-      await run(actionId, true, async (_fresh, action) => {
+      await run(actionId, true, async (fresh, action) => {
         const declared = action.inputs.find((input) => input.id === enrollmentInput.id && input.kind === "enrollment");
         const file = files.get(key);
         if (declared === undefined || file === undefined) {
@@ -300,7 +301,21 @@ export function createSetupController(options: SetupControllerOptions): SetupCon
         try {
           const confirmation = await options.transport.confirm(action.id);
           if (abort.signal.aborted) throw new DOMException("Cancelled.", "AbortError");
-          return await options.transport.enroll(declared.id, action.id, confirmation, file, abort.signal);
+          // The declared secret-free inputs travel with the upload in the same
+          // canonical action, bound to the fresh generation.
+          return await options.transport.enroll(
+            declared.id,
+            confirmation,
+            {
+              version: action.version,
+              actionId: action.id,
+              generation: fresh.generation,
+              confirmed: true,
+              inputs: requestInputs(action, snapshot.drafts[action.id]),
+            },
+            file,
+            abort.signal,
+          );
         } finally {
           dropFile(key);
         }

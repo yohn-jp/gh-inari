@@ -80,8 +80,9 @@ test("requests use headers only, omit cookies/cache/referrer and carry no URL qu
   };
   assert.equal((await client.perform("tok", request)).outcome, "succeeded");
   const file = new Blob(["-----BEGIN KEY-----"]);
+  const enrollRequest = { ...request, inputs: { "app-id": "12345" } };
   assert.equal(
-    (await client.enroll("issuer-key", action.id, "tok2", file, new AbortController().signal)).outcome,
+    (await client.enroll("issuer-key", "tok2", enrollRequest, file, new AbortController().signal)).outcome,
     "succeeded",
   );
 
@@ -111,6 +112,9 @@ test("requests use headers only, omit cookies/cache/referrer and carry no URL qu
   assert.equal((enroll.headers as Record<string, string>)["content-type"], "application/octet-stream");
   assert.equal((enroll.headers as Record<string, string>)["x-setup-action-id"], action.id);
   assert.equal((enroll.headers as Record<string, string>)["x-setup-confirmation"], "tok2");
+  const typed = (enroll.headers as Record<string, string>)["x-setup-request"]!;
+  assert.deepEqual(JSON.parse(decodeURIComponent(typed)), enrollRequest);
+  assert.doesNotMatch(decodeURIComponent(typed), /BEGIN/u, "secret bytes never enter the typed request");
   for (const { init } of seen.slice(0, 3)) assert.doesNotMatch(String(init.body ?? ""), /BEGIN/u);
 });
 
@@ -150,10 +154,23 @@ test("HTTP failures map to fixed classifications without reading or echoing bodi
     createSetupOperatorContext(bootstrap),
     (async () => new Response("{}")) as unknown as typeof fetch,
   );
-  await assert.rejects(client.enroll("issuer-key", "a", "t", new Blob([]), new AbortController().signal));
-  await assert.rejects(client.enroll("../x", "a", "t", new Blob(["x"]), new AbortController().signal));
+  const typedRequest = {
+    version: 1 as const,
+    actionId: "a",
+    generation: canonicalState().generation,
+    confirmed: true,
+    inputs: {},
+  };
+  await assert.rejects(client.enroll("issuer-key", "t", typedRequest, new Blob([]), new AbortController().signal));
+  await assert.rejects(client.enroll("../x", "t", typedRequest, new Blob(["x"]), new AbortController().signal));
   await assert.rejects(
-    client.enroll("issuer-key", "a", "t", new Blob([new Uint8Array(64 * 1024 + 1)]), new AbortController().signal),
+    client.enroll(
+      "issuer-key",
+      "t",
+      typedRequest,
+      new Blob([new Uint8Array(64 * 1024 + 1)]),
+      new AbortController().signal,
+    ),
   );
 });
 
