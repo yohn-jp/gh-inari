@@ -871,7 +871,6 @@ async function main() {
     run(process.execPath, ["scripts/package-runtime-certification.mjs", "--tarball", tarballPath], {
       stdio: "inherit",
     });
-    run(process.execPath, ["scripts/release-preparation-certification.mjs"], { stdio: "inherit" });
     run(process.execPath, ["scripts/endpoint-dashboard-certification.mjs"], { stdio: "inherit" });
   } finally {
     fs.rmSync(tarballPath, { force: true });

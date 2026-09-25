@@ -259,7 +259,8 @@
     "verify": "wireit",
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm run typecheck && pnpm test",
-    "readme:check": "node scripts/readme-integrity.mjs"
+    "readme:check": "node scripts/readme-integrity.mjs",
+    "certify:release": "node scripts/release-preparation-certification.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "2.0.0",
