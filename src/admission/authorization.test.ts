@@ -8,6 +8,8 @@ import { generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
 import { validateExecutionIntent, type ExecutionIntent } from "../local-control/execution-intent.js";
 import type { LocalExecutorEvidenceRequest } from "../local-control/executor-http.js";
 import { createLocalSessionBinding, type LocalSessionBinding } from "../local-control/session-binding.js";
+import { createRepositoryBranchPolicy } from "../repository-branch-policy.js";
+import { observeLocalBranch } from "../cli/runtime/branch-observation.js";
 import {
   admitSession,
   authorizeExecutionIntent,
@@ -20,6 +22,62 @@ const REPOSITORY_ID = "123456789";
 const REPOSITORY_NAME = "acme/inari";
 const ISSUE = 375;
 const BRANCH = "feat/375-local-admission";
+
+test("policy-bound Session admission requires matching current generation and branch", async () => {
+  await withEnvironment(async (environment) => {
+    const fixture = authorityFixture();
+    const generation = { ref: "trunk", treeSha: "a".repeat(40) };
+    const acquired = createRepositoryBranchPolicy({
+      generation: {
+        authority: "repository-default-branch",
+        repository: {
+          host: "github.com",
+          repositoryId: REPOSITORY_ID,
+          owner: "acme",
+          name: "inari",
+          nameWithOwner: REPOSITORY_NAME,
+        },
+        ...generation,
+      },
+      rule: { pattern: "^work/[0-9]+-[a-z]+$", format: "work/{issueNumber}-{slug}" },
+    });
+    assert.equal(acquired.status, "available");
+    if (acquired.status !== "available") return;
+    const branchInput = {
+      policy: acquired.policy,
+      target: { repository: { repositoryHost: "github.com", repositoryId: REPOSITORY_ID }, implementation: ISSUE },
+      observedGeneration: generation,
+      observedBranch: "work/375-session",
+      naming: { slug: "session" },
+    };
+    const branchObservation = observeLocalBranch(branchInput);
+    const session = createLocalSessionBinding({
+      sessionId: "session-policy",
+      repository: { id: REPOSITORY_ID, name: REPOSITORY_NAME },
+      task: { kind: "issue", number: ISSUE },
+      capabilities: [{ kind: "branch.advance", branch: branchObservation.expectedBranch }],
+      ttlSeconds: 120,
+      runtimeAuthority: fixture.authority,
+      runtimeKey: fixture.keyPair,
+      now: NOW,
+      branchObservation,
+    });
+    const base = options(environment, fixture.authority, () => trustEvidence(fixture.authority));
+    await assert.rejects(admitSession(session, base), /observation is missing/u);
+    await assert.rejects(
+      admitSession(session, {
+        ...base,
+        branchObservation: { ...branchInput, observedGeneration: { ref: "trunk", treeSha: "b".repeat(40) } },
+      }),
+      /invalid or stale/u,
+    );
+    await assert.rejects(
+      admitSession(session, { ...base, branchObservation: { ...branchInput, observedBranch: "work/376-session" } }),
+      /invalid or stale/u,
+    );
+    assert.equal((await admitSession(session, { ...base, branchObservation: branchInput })).status, "active");
+  });
+});
 
 function authorityFixture(id = "runtime-admission-authorization-test") {
   const keyPair = generateDelegatorKeyPair();

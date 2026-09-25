@@ -5,6 +5,8 @@ import { validateLocalSessionBinding, type LocalSessionBinding } from "../../loc
 import { delegatorPublicKeyFingerprint } from "../../agent-authority/delegator-key.js";
 import { validateDelegator, type Delegator } from "../../agent-authority/delegator.js";
 import { CANONICAL_BRANCH_TYPES, recognizeBranchName } from "../../branch-naming.js";
+import { canonicalJsonString, type CanonicalJsonValue } from "../../agent-authority/codec.js";
+import { observeLocalBranch, type ObserveLocalBranchInput } from "./branch-observation.js";
 import {
   validateChangeProvenanceRecord,
   verifyChangeProvenanceRecord,
@@ -59,6 +61,7 @@ export interface StartLocalSessionOptions {
   readonly resolveRepository: () => Promise<LocalSessionRepositoryIdentity>;
   readonly spawnChild?: typeof spawn;
   readonly now?: Date;
+  readonly branchObservation?: Omit<ObserveLocalBranchInput, "observedBranch">;
 }
 
 export class LocalSessionLauncherError extends Error {
@@ -198,6 +201,20 @@ function canonicalIssueBranch(cwd: string, issue: number): string {
   return branch;
 }
 
+function observedLocalBranch(cwd: string): string {
+  try {
+    const branch = execFileSync("git", ["branch", "--show-current"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (branch.length > 0) return branch;
+  } catch {
+    /* mapped below */
+  }
+  fail("ADMISSION_SESSION_BRANCH_UNAVAILABLE", "A local Implementation branch is required.");
+}
+
 function createBinding(
   sessionId: string,
   issue: number,
@@ -205,6 +222,7 @@ function createBinding(
   cwd: string,
   environment: NodeJS.ProcessEnv,
   now: Date,
+  branchInput?: Omit<ObserveLocalBranchInput, "observedBranch">,
 ): LocalSessionBinding {
   const runtimeAuthority = localRuntimeAuthority(environment, now);
   const { authority } = runtimeAuthority;
@@ -213,7 +231,25 @@ function createBinding(
     if (authority.capabilityCeiling.includes(kind)) capabilities.push({ kind, issue });
   }
   if (authority.capabilityCeiling.includes("branch.advance")) {
-    capabilities.push({ kind: "branch.advance", branch: canonicalIssueBranch(cwd, issue) });
+    let branch: string;
+    if (branchInput === undefined) branch = canonicalIssueBranch(cwd, issue);
+    else {
+      if (
+        branchInput.target.implementation !== issue ||
+        branchInput.target.repository.repositoryId !== repository.repositoryId ||
+        branchInput.target.repository.repositoryHost !== repository.host
+      )
+        fail(
+          "ADMISSION_SESSION_BRANCH_MISMATCH",
+          "Branch observation does not match the Session repository and Implementation.",
+        );
+      try {
+        branch = observeLocalBranch({ ...branchInput, observedBranch: observedLocalBranch(cwd) }).expectedBranch;
+      } catch {
+        fail("ADMISSION_SESSION_BRANCH_MISMATCH", "Local branch does not match the repository policy observation.");
+      }
+    }
+    capabilities.push({ kind: "branch.advance", branch });
   }
   if (!capabilities.some((claim) => claim.kind === "change.implement")) {
     fail("ADMISSION_SESSION_CAPABILITY_UNAVAILABLE", "Runtime Authority cannot delegate Issue implementation.");
@@ -232,6 +268,9 @@ function createBinding(
       capabilities,
       ttlSeconds,
       now,
+      ...(branchInput === undefined
+        ? {}
+        : { branchObservation: observeLocalBranch({ ...branchInput, observedBranch: observedLocalBranch(cwd) }) }),
     });
   } catch {
     fail(
@@ -362,10 +401,36 @@ export async function startLocalSession(options: StartLocalSessionOptions): Prom
     if (localRepository?.toLocaleLowerCase("en-US") !== binding.repository.name.toLocaleLowerCase("en-US")) {
       fail("ADMISSION_SESSION_REPOSITORY_MISMATCH", "Local repository does not match the selected Session.");
     }
+    if (binding.branchObservation !== undefined) {
+      if (options.branchObservation === undefined)
+        fail("ADMISSION_SESSION_BRANCH_UNAVAILABLE", "Current branch policy observation is required.");
+      let current;
+      try {
+        current = observeLocalBranch({
+          ...options.branchObservation,
+          observedBranch: observedLocalBranch(options.cwd),
+        });
+      } catch {
+        fail("ADMISSION_SESSION_BRANCH_MISMATCH", "Current branch policy observation is invalid.");
+      }
+      if (
+        canonicalJsonString(current as unknown as CanonicalJsonValue) !==
+        canonicalJsonString(binding.branchObservation as unknown as CanonicalJsonValue)
+      )
+        fail("ADMISSION_SESSION_BRANCH_MISMATCH", "Current branch policy observation differs from the Session.");
+    }
   } else {
     const repository = await options.resolveRepository();
     validateRepositoryIdentity(repository);
-    binding = createBinding(sessionId, options.issue, repository, options.cwd, options.environment, now);
+    binding = createBinding(
+      sessionId,
+      options.issue,
+      repository,
+      options.cwd,
+      options.environment,
+      now,
+      options.branchObservation,
+    );
   }
 
   const stored = storeLocalSessionBinding(binding, options.environment);

@@ -29,6 +29,7 @@ import {
   resolveLocalExecutorRepository,
 } from "./execution.js";
 import { configuredLocalExecutor, LOCAL_EXECUTOR_DEFAULT_PORT } from "./setup.js";
+import { issuerExecutionEnvironment } from "./enrollment/issuer-reference.js";
 
 export const LOCAL_EXECUTOR_STATUS_PATH = "/status" as const;
 const LOCAL_EXECUTOR_HISTORICAL_PORT = 8765;
@@ -169,8 +170,9 @@ export async function startConfiguredLocalExecutor(
   readonly announcement: LocalRuntimeEndpoint;
 }> {
   const config = configuredLocalExecutor(environment);
+  const executionEnvironment = issuerExecutionEnvironment(config.id, environment);
   // Executor startup is the credential boundary: read and validate the key now.
-  requireLocalExecutorIssuerCredential(environment);
+  requireLocalExecutorIssuerCredential(executionEnvironment);
   let transport: ReturnType<typeof loadLocalMtlsIdentity> | undefined;
   if (config.listen.host === "0.0.0.0") {
     const admission = readLocalJson("admission", "config.json", validateLocalAdmissionConfig, environment);
@@ -193,10 +195,10 @@ export async function startConfiguredLocalExecutor(
     config,
     version,
     executorId: config.id,
-    execute: (execution) => executeLocalAuthorizedExecution(execution, environment),
+    execute: (execution) => executeLocalAuthorizedExecution(execution, executionEnvironment),
     resolveRepository: (repositoryNameWithOwner) =>
-      resolveLocalExecutorRepository(repositoryNameWithOwner, environment),
-    readEvidence: (request) => readLocalExecutorEvidence(request, environment),
+      resolveLocalExecutorRepository(repositoryNameWithOwner, executionEnvironment),
+    readEvidence: (request) => readLocalExecutorEvidence(request, executionEnvironment),
     ready: () => true,
     ...(transport === undefined ? {} : { transport }),
   });
