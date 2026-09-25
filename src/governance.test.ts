@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import path from "node:path";
 import {
+  acquireRepositoryBranchPolicy,
   compileRepositoryGovernedContract,
   createRemoteArtifactContractIdentities,
   createGovernedIssue,
@@ -14,6 +15,7 @@ import {
   updateGovernedIssue,
   updateGovernedPullRequest,
   resolveRemoteArtifactContractIdentity,
+  type RepositoryGovernanceSourceReader,
 } from "./governance.js";
 import { GitHubAdapter } from "./github/index.js";
 import {
@@ -1167,4 +1169,74 @@ test("resolveGovernedIssueEvidence resolves marker-identified remote governance 
   const evidence = await resolveGovernedIssueEvidence(secondAdapter, prepared.body, "main");
   assert.equal(evidence.body, prepared.body);
   assert.equal(evidence.contract.provenance?.template.path, ".github/ISSUE_TEMPLATE/remote.yml");
+});
+
+function branchPolicyReader(options: {
+  readonly policy?: string;
+  readonly defaultBranch?: string;
+  readonly repositoryId?: string;
+}): RepositoryGovernanceSourceReader {
+  const defaultBranch = options.defaultBranch ?? "trunk";
+  const entries =
+    options.policy === undefined
+      ? []
+      : [{ path: ".github/inari/pr-policy.yml", type: "blob" as const, sha: "policy-sha" }];
+  return {
+    async resolveRepositoryContext() {
+      return {
+        hostname: "github.com",
+        host: "github.com",
+        owner: "acme",
+        name: "widgets",
+        nameWithOwner: "acme/widgets",
+        url: "https://github.com/acme/widgets",
+        ...(options.repositoryId === undefined ? {} : { repositoryId: options.repositoryId }),
+      };
+    },
+    async getRepositoryDefaultBranch() {
+      return defaultBranch;
+    },
+    async getRepositoryTree(ref: string) {
+      assert.equal(ref, defaultBranch);
+      return { sha: "tree-sha", entries };
+    },
+    async getRepositoryBlob(sha: string) {
+      assert.equal(sha, "policy-sha");
+      return options.policy ?? "";
+    },
+  };
+}
+
+test("repository branch policy acquisition binds the rule to the default-branch generation", async () => {
+  const policy =
+    'version: 1\nsections: []\nbranch:\n  pattern: "^work/impl-[0-9]+$"\n  format: "work/impl-{issueNumber}"\n';
+  const acquired = await acquireRepositoryBranchPolicy(branchPolicyReader({ policy, repositoryId: "1001" }));
+  assert.equal(acquired.status, "available");
+  if (acquired.status !== "available") return;
+  assert.equal(acquired.policy.defaultBranch, "trunk");
+  assert.deepEqual(acquired.policy.rule, { pattern: "^work/impl-[0-9]+$", format: "work/impl-{issueNumber}" });
+  assert.equal(acquired.policy.generation.treeSha, "tree-sha");
+  assert.equal(acquired.policy.generation.repository.repositoryId, "1001");
+  assert.equal(acquired.policy.generation.policy?.path, ".github/inari/pr-policy.yml");
+  assert.equal(acquired.policy.generation.policy?.sha, "policy-sha");
+  assert.equal(acquired.policy.generation.policy?.digest, createHash("sha256").update(policy).digest("hex"));
+});
+
+test("repository branch policy acquisition reports missing and invalid policy without a fallback convention", async () => {
+  const missing = await acquireRepositoryBranchPolicy(branchPolicyReader({ repositoryId: "1001" }));
+  assert.equal(missing.status, "available");
+  assert.equal(missing.status === "available" && missing.policy.rule, undefined);
+  assert.equal(missing.status === "available" && missing.policy.generation.policy, undefined);
+
+  const noRule = await acquireRepositoryBranchPolicy(
+    branchPolicyReader({ policy: "version: 1\nsections: []\n", repositoryId: "1001" }),
+  );
+  assert.equal(noRule.status === "available" && noRule.policy.rule, undefined);
+
+  const invalid = await acquireRepositoryBranchPolicy(
+    branchPolicyReader({ policy: 'version: 1\nsections: []\nbranch:\n  pattern: "^x$"\n  format: "x"\n' }),
+  );
+  assert.equal(invalid.status, "denied");
+  assert.equal(invalid.status === "denied" && invalid.code, "BRANCH_POLICY_INVALID");
+  assert.equal(invalid.status === "denied" && invalid.path, "$.branch.format");
 });
