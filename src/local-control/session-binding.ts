@@ -30,6 +30,8 @@ import {
 import { capabilityClaimWithinCeiling, type CapabilityClaim } from "../agent-authority/capability.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "../agent-authority/codec.js";
 import type { Ed25519PublicJwk } from "../agent-authority/ed25519-jwk.js";
+import { validateLocalBranchObservation, type LocalBranchObservation } from "../cli/runtime/branch-observation.js";
+import { validateBranchName } from "../branch-naming.js";
 
 export const LOCAL_SESSION_BINDING_VERSION = 1 as const;
 export const MAX_LOCAL_SESSION_BINDING_BYTES = 16 * 1024;
@@ -52,6 +54,7 @@ const BINDING_KEYS = new Set([
   "nbf",
   "exp",
   "signature",
+  "branchObservation",
 ]);
 const AUTHORITY_KEYS = new Set(["id", "publicKeyFingerprint"]);
 
@@ -75,6 +78,8 @@ export interface LocalSessionBinding {
   readonly exp: number;
   /** Ed25519 signature over the domain-separated canonical payload. */
   readonly signature: string;
+  /** Additive signed repository-policy observation; absent on legacy Sessions. */
+  readonly branchObservation?: LocalBranchObservation;
 }
 
 export interface CreateLocalSessionBindingOptions {
@@ -88,6 +93,7 @@ export interface CreateLocalSessionBindingOptions {
   /** Runtime Authority key only. No Agent Session key is accepted here. */
   readonly runtimeKey: KeyObject | DelegatorKeyPair;
   readonly now?: Date;
+  readonly branchObservation?: LocalBranchObservation;
 }
 
 export type LocalSessionBindingDiagnosticCode =
@@ -165,6 +171,7 @@ function payloadOf(binding: LocalSessionBinding): Omit<LocalSessionBinding, "sig
     iat: binding.iat,
     nbf: binding.nbf,
     exp: binding.exp,
+    ...(binding.branchObservation === undefined ? {} : { branchObservation: binding.branchObservation }),
   };
 }
 
@@ -211,6 +218,27 @@ export function validateLocalSessionBinding(input: unknown): LocalSessionBinding
   }
   const claims = validateSessionCertificatePayload(schemaPayload(input, authorityId));
   if (!claims.valid || claims.value === undefined || claims.value.task === undefined) return invalidResult();
+  const branchObservation =
+    input.branchObservation === undefined ? undefined : validateLocalBranchObservation(input.branchObservation);
+  if (input.branchObservation !== undefined && branchObservation === undefined) return invalidResult();
+  if (
+    branchObservation === undefined &&
+    claims.value.capabilities.some(
+      (claim) => claim.kind === "branch.advance" && validateBranchName(claim.branch).length > 0,
+    )
+  )
+    return invalidResult();
+  if (branchObservation !== undefined) {
+    if (
+      branchObservation.repository.repositoryHost !== "github.com" ||
+      branchObservation.repository.repositoryId !== claims.value.repository.id ||
+      branchObservation.implementation !== claims.value.task.number ||
+      claims.value.capabilities.some(
+        (claim) => claim.kind === "branch.advance" && claim.branch !== branchObservation.expectedBranch,
+      )
+    )
+      return invalidResult();
+  }
   if (input.nbf !== input.iat || !Number.isInteger(input.iat) || !Number.isInteger(input.exp)) return invalidResult();
   if (typeof input.signature !== "string" || !SIGNATURE_PATTERN.test(input.signature)) return invalidResult();
 
@@ -234,6 +262,7 @@ export function validateLocalSessionBinding(input: unknown): LocalSessionBinding
     nbf: claims.value.nbf,
     exp: claims.value.exp,
     signature: input.signature,
+    ...(branchObservation === undefined ? {} : { branchObservation }),
   });
   const serialized = canonicalJsonString(value as unknown as CanonicalJsonValue);
   if (Buffer.byteLength(serialized, "utf8") > MAX_LOCAL_SESSION_BINDING_BYTES) return invalidResult();
@@ -304,6 +333,7 @@ export function createLocalSessionBinding(options: CreateLocalSessionBindingOpti
     nbf: iat,
     exp,
     signature: "",
+    ...(options.branchObservation === undefined ? {} : { branchObservation: options.branchObservation }),
   };
   const unsignedValidation = validateLocalSessionBinding({ ...candidate, signature: "A".repeat(86) });
   if (!unsignedValidation.valid || unsignedValidation.value === undefined) {
@@ -319,6 +349,9 @@ export function createLocalSessionBinding(options: CreateLocalSessionBindingOpti
     iat: unsignedValidation.value.iat,
     nbf: unsignedValidation.value.nbf,
     exp: unsignedValidation.value.exp,
+    ...(unsignedValidation.value.branchObservation === undefined
+      ? {}
+      : { branchObservation: unsignedValidation.value.branchObservation }),
   } as Omit<LocalSessionBinding, "signature">;
   for (const claim of unsignedValidation.value.capabilities) {
     if (!capabilityClaimWithinCeiling(claim, authority.capabilityCeiling)) {

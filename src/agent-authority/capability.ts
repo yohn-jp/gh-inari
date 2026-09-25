@@ -16,7 +16,7 @@
  * pattern.
  */
 
-import { validateBranchName } from "../branch-naming.js";
+import { validateBranchName, validateBranchSpelling } from "../branch-naming.js";
 
 export const CAPABILITY_KINDS = Object.freeze([
   "change.implement",
@@ -206,9 +206,12 @@ export function validateCapabilityClaim(input: unknown, path = "$"): CapabilityC
 
   if (kind === "branch.advance") {
     addUnknownProperties(input, new Set(["kind", "branch", "pathPolicy"]), path, diagnostics);
-    if (requireProperty(input, "branch", path, diagnostics) && !validAgentBranchName(input.branch)) {
+    if (
+      requireProperty(input, "branch", path, diagnostics) &&
+      (typeof input.branch !== "string" || input.branch === "main" || validateBranchSpelling(input.branch).length > 0)
+    ) {
       diagnostics.push(
-        diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.branch`, "branch must be a canonical repository branch name."),
+        diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.branch`, "branch must be a safe repository branch name."),
       );
     }
     let pathPolicy: string | undefined;

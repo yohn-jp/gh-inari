@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createDelegatorRecord } from "../agent-authority/delegator-operations.js";
 import { generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
+import { createRepositoryBranchPolicy } from "../repository-branch-policy.js";
+import { observeLocalBranch } from "../cli/runtime/branch-observation.js";
 import {
   createLocalSessionBinding,
   validateLocalSessionBinding,
@@ -11,6 +13,152 @@ import {
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 const REPOSITORY = { id: "1330755860", name: "yohn-jp/gh-inari" };
 const CAPABILITIES = [{ kind: "change.implement", issue: 1027 }] as const;
+
+test("policy observation is signed while legacy binding payload remains valid", () => {
+  const { keyPair } = authorityFixture();
+  const branch = "work/1027-session";
+  const generation = { ref: "trunk", treeSha: "a".repeat(40) };
+  const acquired = createRepositoryBranchPolicy({
+    generation: {
+      authority: "repository-default-branch",
+      repository: {
+        host: "github.com",
+        repositoryId: REPOSITORY.id,
+        owner: "yohn-jp",
+        name: "gh-inari",
+        nameWithOwner: REPOSITORY.name,
+      },
+      ...generation,
+    },
+    rule: { pattern: "^work/[0-9]+-[a-z]+$", format: "work/{issueNumber}-{slug}" },
+  });
+  assert.equal(acquired.status, "available");
+  if (acquired.status !== "available") return;
+  const observation = observeLocalBranch({
+    policy: acquired.policy,
+    target: { repository: { repositoryHost: "github.com", repositoryId: REPOSITORY.id }, implementation: 1027 },
+    observedGeneration: generation,
+    observedBranch: branch,
+    naming: { slug: "session" },
+  });
+  const delegated = createDelegatorRecord({
+    id: "policy-binding",
+    key: keyPair,
+    notBefore: new Date("2026-08-01T00:00:00.000Z"),
+    maxSessionTtlSeconds: 3600,
+    capabilityCeiling: ["change.implement", "branch.advance"],
+  });
+  const options = {
+    sessionId: "session-policy",
+    repository: REPOSITORY,
+    task: { kind: "issue", number: 1027 },
+    capabilities: [
+      { kind: "change.implement", issue: 1027 },
+      { kind: "branch.advance", branch },
+    ],
+    ttlSeconds: 120,
+    runtimeAuthority: delegated,
+    runtimeKey: keyPair,
+    now: NOW,
+    branchObservation: observation,
+  } as const;
+  const binding = createLocalSessionBinding(options);
+  assert.throws(() => createLocalSessionBinding({ ...options, branchObservation: undefined }));
+  assert.deepEqual(verifyLocalSessionBinding(binding, delegated, { now: NOW }).value, binding);
+  assert.equal(
+    verifyLocalSessionBinding(
+      { ...binding, branchObservation: { ...observation, expectedBranch: "work/1028-session" } },
+      delegated,
+      { now: NOW },
+    ).valid,
+    false,
+  );
+  assert.equal(bindingFixture().binding.branchObservation, undefined);
+});
+
+test("restricted change.implement Authority issues, verifies, and adopts a policy-bound Session without branch.advance", () => {
+  const keyPair = generateDelegatorKeyPair();
+  const branch = "work/1027-session";
+  const generation = { ref: "trunk", treeSha: "b".repeat(40) };
+  const acquired = createRepositoryBranchPolicy({
+    generation: {
+      authority: "repository-default-branch",
+      repository: {
+        host: "github.com",
+        repositoryId: REPOSITORY.id,
+        owner: "yohn-jp",
+        name: "gh-inari",
+        nameWithOwner: REPOSITORY.name,
+      },
+      ...generation,
+    },
+    rule: { pattern: "^work/[0-9]+-[a-z]+$", format: "work/{issueNumber}-{slug}" },
+  });
+  assert.equal(acquired.status, "available");
+  if (acquired.status !== "available") return;
+  const observation = observeLocalBranch({
+    policy: acquired.policy,
+    target: { repository: { repositoryHost: "github.com", repositoryId: REPOSITORY.id }, implementation: 1027 },
+    observedGeneration: generation,
+    observedBranch: branch,
+    naming: { slug: "session" },
+  });
+  const restricted = createDelegatorRecord({
+    id: "policy-restricted",
+    key: keyPair,
+    notBefore: new Date("2026-08-01T00:00:00.000Z"),
+    maxSessionTtlSeconds: 3600,
+    capabilityCeiling: ["change.implement"],
+  });
+  const binding = createLocalSessionBinding({
+    sessionId: "session-policy-restricted",
+    repository: REPOSITORY,
+    task: { kind: "issue", number: 1027 },
+    capabilities: CAPABILITIES,
+    ttlSeconds: 120,
+    runtimeAuthority: restricted,
+    runtimeKey: keyPair,
+    now: NOW,
+    branchObservation: observation,
+  });
+  assert.deepEqual(binding.branchObservation, observation);
+  assert.equal(
+    binding.capabilities.some((claim) => claim.kind === "branch.advance"),
+    false,
+  );
+  assert.deepEqual(verifyLocalSessionBinding(binding, restricted, { now: NOW }).value, binding);
+  assert.deepEqual(validateLocalSessionBinding(JSON.parse(JSON.stringify(binding))).value, binding);
+  for (const tampered of [
+    { ...observation, expectedBranch: "work/1028-session" },
+    { ...observation, implementation: 1028 },
+    { ...observation, repository: { ...observation.repository, repositoryId: "1" } },
+    { ...observation, observedGeneration: { ...observation.observedGeneration, treeSha: "c".repeat(40) } },
+  ]) {
+    assert.equal(
+      verifyLocalSessionBinding({ ...binding, branchObservation: tampered }, restricted, { now: NOW }).valid,
+      false,
+    );
+  }
+  assert.throws(() =>
+    createLocalSessionBinding({
+      sessionId: "session-policy-mismatch",
+      repository: REPOSITORY,
+      task: { kind: "issue", number: 1027 },
+      capabilities: [...CAPABILITIES, { kind: "branch.advance", branch: "work/1027-other" }],
+      ttlSeconds: 120,
+      runtimeAuthority: createDelegatorRecord({
+        id: "policy-mismatch",
+        key: keyPair,
+        notBefore: new Date("2026-08-01T00:00:00.000Z"),
+        maxSessionTtlSeconds: 3600,
+        capabilityCeiling: ["change.implement", "branch.advance"],
+      }),
+      runtimeKey: keyPair,
+      now: NOW,
+      branchObservation: observation,
+    }),
+  );
+});
 
 function authorityFixture() {
   const keyPair = generateDelegatorKeyPair();

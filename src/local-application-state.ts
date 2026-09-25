@@ -7,6 +7,7 @@ import { FileAppUserCredentialStore } from "./github/app-user-credential-store.j
 import { LocalRuntimeProfileStore } from "./local-runtime-profile.js";
 import { resolveLocalRepositoryContext } from "./github/local-repository-context.js";
 import { CANONICAL_BRANCH_TYPES, DEFAULT_BRANCH_NAME, recognizeBranchName } from "./branch-naming.js";
+import { observeLocalBranch, type ObserveLocalBranchInput } from "./cli/runtime/branch-observation.js";
 import {
   localComponentPath,
   readExistingLocalPublicJson,
@@ -99,6 +100,7 @@ export interface LocalApplicationState {
 export interface LocalApplicationStateOptions {
   readonly root?: string;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly branchObservation?: Omit<ObserveLocalBranchInput, "observedBranch">;
 }
 
 const AUTHORITY_RECORD_PATH = "runtime-authority.json";
@@ -185,8 +187,30 @@ function currentLocalGitBranch(root: string): string | undefined {
  * `recognizeBranchName` branch authority (#1065): this never re-derives or
  * revalidates the branch grammar it owns.
  */
-function resolveLocalChangeBranchReadiness(root: string): LocalApplicationChangeBranchReadiness {
+function resolveLocalChangeBranchReadiness(
+  root: string,
+  policyObservation?: Omit<ObserveLocalBranchInput, "observedBranch">,
+): LocalApplicationChangeBranchReadiness {
   const branch = currentLocalGitBranch(root);
+  if (policyObservation !== undefined) {
+    if (branch === undefined)
+      return { status: "issue-not-selected", detail: "No local Implementation branch is selected." };
+    try {
+      const observed = observeLocalBranch({ ...policyObservation, observedBranch: branch });
+      return {
+        status: "ready",
+        detail: `Local branch ${branch} matches the repository policy for Implementation #${observed.implementation}.`,
+        issue: observed.implementation,
+        branch,
+      };
+    } catch {
+      return {
+        status: "branch-mismatch",
+        detail: `Local branch ${branch} does not match the current repository policy and Implementation branch.`,
+        branch,
+      };
+    }
+  }
   const identity = branch === undefined ? undefined : recognizeBranchName(branch);
   const issue =
     identity !== undefined && (CANONICAL_BRANCH_TYPES as readonly string[]).includes(identity.type)
@@ -465,7 +489,7 @@ export async function projectLocalApplicationState(
   ];
   const setupComplete = steps.every((step) => step.status === "ready");
   const nextSetupStep = steps.find((step) => step.status === "required" || step.status === "blocked");
-  const changeBranch = resolveLocalChangeBranchReadiness(root);
+  const changeBranch = resolveLocalChangeBranchReadiness(root, options.branchObservation);
   const nextAction: LocalApplicationNextAction =
     nextSetupStep !== undefined
       ? {
