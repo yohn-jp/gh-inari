@@ -351,11 +351,45 @@ function approvedType(targetPath, symbols) {
 }
 
 /**
+ * Maps a frozen historical edge onto modules reached by owner-internal extraction.
+ * The target and owner never change: only the source may move along value-import
+ * edges that remain inside the same Runtime role as the frozen source.
+ */
+function buildMigrationInheritance(graph, load, ledger) {
+  const inherited = new Map();
+  for (const entry of ledger) {
+    const role = roleOf(entry.from);
+    if (role === undefined || !graph.has(entry.from)) continue;
+    const queue = [entry.from];
+    const seen = new Set(queue);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const key = `${current}\0${entry.to}`;
+      const existing = inherited.get(key);
+      if (existing === undefined) inherited.set(key, entry);
+      else if (existing.from !== entry.from || existing.owner !== entry.owner) inherited.set(key, null);
+
+      for (const reference of load(current).references) {
+        if (reference.kind !== "value" || reference.target.kind !== "internal") continue;
+        const target = reference.target.path;
+        if (seen.has(target) || roleOf(target) !== role) continue;
+        seen.add(target);
+        queue.push(target);
+      }
+    }
+  }
+  return inherited;
+}
+
+/**
  * Checks every role-owned module. Returns raw findings before the migration
  * ledger is applied.
  */
 export function collectBoundaryFindings(root = defaultRoot, options = {}) {
   const { graph, load } = buildModuleGraph(root, options);
+  const ledger = options.ledger ?? HISTORICAL_MIGRATION_EDGES;
+  const exactLedger = new Map(ledger.map((entry) => [`${entry.from}\0${entry.to}`, entry]));
+  const inheritedLedger = buildMigrationInheritance(graph, load, ledger);
   const findings = [];
   const roots = [...graph.keys()].filter((file) => roleOf(file) !== undefined).sort();
   for (const from of roots) {
@@ -397,13 +431,31 @@ export function collectBoundaryFindings(root = defaultRoot, options = {}) {
         if (parents.has(target)) continue;
         parents.set(target, current);
         const rule = forbiddenValueTarget(role, target);
+        const exactException = exactLedger.get(`${from}\0${target}`);
+        const inheritedException = inheritedLedger.get(`${from}\0${target}`) ?? undefined;
         if (rule !== undefined) {
           if (!reported.has(target)) {
             reported.add(target);
-            findings.push({ rule, role, from, to: target, via: witness(parents, target) });
+            findings.push({
+              rule,
+              role,
+              from,
+              to: target,
+              via: witness(parents, target),
+              ...(inheritedException === undefined
+                ? {}
+                : { historicalFrom: inheritedException.from, historicalOwner: inheritedException.owner }),
+            });
           }
         }
-        if (isGovernedSource(target)) queue.push(target);
+
+        // A frozen cross-role edge is the historical boundary itself. Do not
+        // attribute the target role's private closure to the caller as new
+        // violations; that target is independently checked under its own role.
+        const targetRole = roleOf(target);
+        const historicalRoleBoundary =
+          rule !== undefined && exactException !== undefined && targetRole !== undefined && targetRole !== role;
+        if (isGovernedSource(target) && !historicalRoleBoundary) queue.push(target);
       }
     }
   }
@@ -482,11 +534,16 @@ export function evaluateRuntimeBoundaries(root = defaultRoot, options = {}) {
   const violations = [];
   const excused = [];
   for (const finding of findings) {
-    const exception = excusable.has(finding.rule) ? undefined : ledgerKeys.get(`${finding.from}\0${finding.to}`);
+    const exception = excusable.has(finding.rule)
+      ? undefined
+      : (ledgerKeys.get(`${finding.from}\0${finding.to}`) ??
+        (finding.historicalFrom === undefined
+          ? undefined
+          : ledgerKeys.get(`${finding.historicalFrom}\0${finding.to}`)));
     if (exception === undefined) violations.push(finding);
-    else excused.push({ ...finding, owner: exception.owner });
+    else excused.push({ ...finding, owner: exception.owner, historicalFrom: exception.from });
   }
-  const usedKeys = new Set(excused.map((finding) => `${finding.from}\0${finding.to}`));
+  const usedKeys = new Set(excused.map((finding) => `${finding.historicalFrom ?? finding.from}\0${finding.to}`));
   const retired = ledger.filter((entry) => !usedKeys.has(`${entry.from}\0${entry.to}`));
   return { ok: violations.length === 0 && ledgerProblems.length === 0, violations, excused, retired, ledgerProblems };
 }

@@ -216,6 +216,78 @@ test("exact baseline exceptions excuse only their own pair and retire when the e
   assert.deepEqual(result.retired, [ledger[1]]);
 });
 
+test("frozen cross-role facade edges stop caller traversal at the historical boundary", () => {
+  const root = fixture({
+    ...SECRET_MODULES,
+    "src/local-control/admission-client.ts":
+      'import { admission } from "./admission-server.js";\nexport const client = admission;\n',
+    "src/local-control/admission-server.ts": 'export { admission } from "../admission/server.js";\n',
+    "src/admission/server.ts": "export const admission = 1;\n",
+    "src/local-application-state.ts":
+      'import { admission } from "./local-control/admission-server.js";\nexport const state = admission;\n',
+  });
+  const ledger = [
+    {
+      from: "src/local-control/admission-client.ts",
+      to: "src/local-control/admission-server.ts",
+      owner: "#1108",
+    },
+  ];
+  const result = evaluateRuntimeBoundaries(root, { ledger, baseline: ledger });
+  assert.deepEqual(
+    pairs(result.violations),
+    ["admission-private src/local-application-state.ts -> src/local-control/admission-server.ts"],
+  );
+  assert.ok(
+    result.excused.some(
+      (finding) =>
+        finding.from === "src/local-control/admission-client.ts" &&
+        finding.to === "src/local-control/admission-server.ts",
+    ),
+  );
+  assert.equal(
+    result.violations.some(
+      (finding) =>
+        finding.from === "src/local-control/admission-client.ts" &&
+        finding.to === "src/admission/server.ts",
+    ),
+    false,
+  );
+});
+
+test("same-role extraction inherits only the frozen source targets", () => {
+  const root = fixture({
+    ...SECRET_MODULES,
+    "src/github/app-user-credential-store.ts": "export const store = 1;\n",
+    "src/local-control/executor-server.ts": 'export { execute } from "../executor/execution.js";\n',
+    "src/executor/execution.ts":
+      'import { userToken } from "../github/app-user-credential.js";\nimport { store } from "../github/app-user-credential-store.js";\nexport const execute = [userToken, store];\n',
+    "src/executor/other.ts":
+      'import { userToken } from "../github/app-user-credential.js";\nexport const other = userToken;\n',
+  });
+  const ledger = [
+    {
+      from: "src/local-control/executor-server.ts",
+      to: "src/github/app-user-credential.ts",
+      owner: "#1106",
+    },
+  ];
+  const result = evaluateRuntimeBoundaries(root, { ledger, baseline: ledger });
+  assert.ok(
+    result.excused.some(
+      (finding) =>
+        finding.from === "src/executor/execution.ts" &&
+        finding.to === "src/github/app-user-credential.ts" &&
+        finding.historicalFrom === "src/local-control/executor-server.ts",
+    ),
+  );
+  assert.deepEqual(pairs(result.violations), [
+    "app-user-credential src/executor/execution.ts -> src/github/app-user-credential-store.ts",
+    "app-user-credential src/executor/other.ts -> src/github/app-user-credential.ts",
+    "app-user-credential src/local-control/executor-server.ts -> src/github/app-user-credential-store.ts",
+  ]);
+});
+
 test("new, wildcard, directory and unowned exceptions fail", () => {
   const baseline = [{ from: "src/admission/direct.ts", to: "src/github/app-user-credential.ts", owner: "#1107" }];
   assert.deepEqual(validateMigrationLedger(baseline, baseline), []);

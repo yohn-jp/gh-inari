@@ -150,6 +150,8 @@ Some imports inside a role's closure cannot be proven safe. A non-literal dynami
 
 The baseline has no Admission (#1107) violation. #1107 must keep it that way.
 
+During extraction, a frozen cross-role edge is treated as the historical boundary itself: traversal does not continue through that target under the caller's role, because the target module is checked independently under its owning Runtime role. When code moves from a frozen source into modules of that same owner role, only the exact forbidden targets already recorded for the frozen source may follow that owner-internal path. The ledger itself is unchanged; a new caller, target, owner, wildcard, unresolved import or dynamic import still fails.
+
 ## Import direction for producers
 
 - Producers implement the ports in `src/runtime-contracts/` and expose them only through the public entries listed above.
