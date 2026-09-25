@@ -15,6 +15,7 @@ import {
   type GitHubPullRequest,
   type ValidatedRenderedIssueArtifact,
 } from "./index.js";
+import { GitHubAdapter as AdapterModuleGitHubAdapter } from "./adapter.js";
 import {
   nativeTestTransport,
   type FixtureCommandOptions,
@@ -197,6 +198,78 @@ function governedFixture(contract: CanonicalContract): CanonicalContract {
     },
   };
 }
+
+test("direct adapter.ts GitHubAdapter retains environment and fallback credential discovery", async () => {
+  const credentialEnvironmentKeys = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+  ] as const;
+  const originalEnvironment = new Map(credentialEnvironmentKeys.map((key) => [key, process.env[key]] as const));
+  const authorizations: string[] = [];
+  const authenticatedFetch: typeof globalThis.fetch = async (_input, init) => {
+    authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+    return new Response(JSON.stringify({ login: "octocat" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const resetCredentialEnvironment = (): void => {
+      for (const key of credentialEnvironmentKeys) delete process.env[key];
+    };
+    const authenticate = async (
+      repository: string,
+      apiUrl: string,
+      credentialFallbackProvider?: (hostname: string) => string | undefined,
+    ): Promise<void> => {
+      const adapter = new AdapterModuleGitHubAdapter({
+        repository,
+        apiUrl,
+        ...(credentialFallbackProvider === undefined ? {} : { credentialFallbackProvider }),
+        fetch: authenticatedFetch,
+      });
+      await adapter.checkAuthentication();
+    };
+
+    process.env.GH_TOKEN = "adapter-gh-token";
+    process.env.GITHUB_TOKEN = "lower-priority-github-token";
+    await authenticate("acme/inari", "https://api.github.com");
+    assert.equal(authorizations.at(-1), "Bearer adapter-gh-token");
+
+    resetCredentialEnvironment();
+    process.env.GITHUB_TOKEN = "adapter-github-token";
+    await authenticate("acme/inari", "https://api.github.com");
+    assert.equal(authorizations.at(-1), "Bearer adapter-github-token");
+
+    resetCredentialEnvironment();
+    process.env.GH_ENTERPRISE_TOKEN = "adapter-enterprise-token";
+    process.env.GITHUB_ENTERPRISE_TOKEN = "lower-priority-enterprise-token";
+    await authenticate("ghe.example.com/acme/inari", "https://ghe.example.com/api/v3");
+    assert.equal(authorizations.at(-1), "Bearer adapter-enterprise-token");
+
+    resetCredentialEnvironment();
+    process.env.GITHUB_ENTERPRISE_TOKEN = "adapter-legacy-enterprise-token";
+    await authenticate("ghe.example.com/acme/inari", "https://ghe.example.com/api/v3");
+    assert.equal(authorizations.at(-1), "Bearer adapter-legacy-enterprise-token");
+
+    resetCredentialEnvironment();
+    const fallbackHostnames: string[] = [];
+    await authenticate("ghe.example.com/acme/inari", "https://ghe.example.com/api/v3", (hostname) => {
+      fallbackHostnames.push(hostname);
+      return "adapter-fallback-token";
+    });
+    assert.equal(authorizations.at(-1), "Bearer adapter-fallback-token");
+    assert.deepEqual(fallbackHostnames, ["ghe.example.com"]);
+  } finally {
+    for (const [key, value] of originalEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test("resolves the current repository from local Git evidence", async () => {
   const transport = new StubFixtureTransport([

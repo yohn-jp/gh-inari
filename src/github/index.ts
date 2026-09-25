@@ -1,4 +1,5 @@
 export * from "./adapter.js";
+export { GitHubAdapter } from "./standalone-adapter.js";
 export * from "./app-installation-credential-broker.js";
 export * from "./app-provider-credential-broker.js";
 export * from "./app-user-credential.js";

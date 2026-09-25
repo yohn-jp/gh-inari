@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { KeyObject } from "node:crypto";
@@ -27,34 +26,18 @@ import {
   resolveLocalRuntimeConfigHome,
   type LocalRuntimeProfile,
 } from "../local-runtime-profile.js";
+import {
+  environmentValue,
+  LocalRuntimeConfigError,
+  readAppPrivateKey,
+  type LocalRuntimeConfigEnvironment,
+} from "./local-runtime-config-credentials.js";
+export { LocalRuntimeConfigError, readAppPrivateKey } from "./local-runtime-config-credentials.js";
+export type { LocalRuntimeConfigEnvironment, LocalRuntimeConfigErrorCode } from "./local-runtime-config-credentials.js";
 
 const MAX_CONFIG_VALUE_LENGTH = 512;
-const MAX_APP_PRIVATE_KEY_BYTES = 64 * 1024;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/u;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
-
-export type LocalRuntimeConfigErrorCode =
-  | "LOCAL_RUNTIME_CONFIG_MISSING"
-  | "LOCAL_RUNTIME_CONFIG_INVALID"
-  | "LOCAL_RUNTIME_CONFIG_FILE_UNREADABLE"
-  | "LOCAL_RUNTIME_CONFIG_PROVIDER_FAILED";
-
-/** Diagnostics for local Runtime configuration never contain credential values. */
-export class LocalRuntimeConfigError extends Error {
-  readonly code: LocalRuntimeConfigErrorCode;
-  readonly path?: string;
-
-  constructor(code: LocalRuntimeConfigErrorCode, message: string, optionPath?: string) {
-    super(message);
-    this.name = "LocalRuntimeConfigError";
-    this.code = code;
-    this.path = optionPath;
-  }
-}
-
-export interface LocalRuntimeConfigEnvironment {
-  readonly [key: string]: string | undefined;
-}
 
 export type LocalRuntimeCredentialProfile = "installation-key" | "app-user";
 
@@ -132,39 +115,6 @@ function requiredValue(value: string | undefined, name: string, optionPath: stri
   if (value === undefined || value.trim().length === 0) throw missing(name, optionPath);
   if (value.length > MAX_CONFIG_VALUE_LENGTH) throw invalid(`${name} is too long.`, optionPath);
   return value.trim();
-}
-
-function environmentValue(environment: LocalRuntimeConfigEnvironment, ...names: readonly string[]): string | undefined {
-  for (const name of names) {
-    const value = environment[name];
-    if (value !== undefined && value.trim().length > 0) return value;
-  }
-  return undefined;
-}
-
-export function readAppPrivateKey(environment: LocalRuntimeConfigEnvironment): string {
-  const direct = environmentValue(environment, "INARI_GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY");
-  if (direct !== undefined) {
-    const pem = direct.replace(/\\n/gu, "\n");
-    if (Buffer.byteLength(pem, "utf8") > MAX_APP_PRIVATE_KEY_BYTES)
-      throw invalid("GitHub App private key is too large.", "$environment.GITHUB_APP_PRIVATE_KEY");
-    return pem;
-  }
-  const filePath = environmentValue(environment, "INARI_GITHUB_APP_PRIVATE_KEY_FILE", "GITHUB_APP_PRIVATE_KEY_FILE");
-  if (filePath === undefined) throw missing("GitHub App private key", "$environment.GITHUB_APP_PRIVATE_KEY");
-  try {
-    const pem = readFileSync(filePath, "utf8");
-    if (Buffer.byteLength(pem, "utf8") > MAX_APP_PRIVATE_KEY_BYTES)
-      throw invalid("GitHub App private key is too large.", "$environment.GITHUB_APP_PRIVATE_KEY_FILE");
-    return pem;
-  } catch (error: unknown) {
-    if (error instanceof LocalRuntimeConfigError) throw error;
-    throw new LocalRuntimeConfigError(
-      "LOCAL_RUNTIME_CONFIG_FILE_UNREADABLE",
-      "GitHub App private key file cannot be read.",
-      "$environment.GITHUB_APP_PRIVATE_KEY_FILE",
-    );
-  }
 }
 
 function repositoryFromValue(
