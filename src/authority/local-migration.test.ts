@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
-import { lstat, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  chown,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  readlink,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -166,6 +179,7 @@ async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
   };
 }
 
+/** Files (mtime, bytes, mode), directory modes and symlink targets under `directory`. */
 async function snapshot(directory: string): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
   async function walk(current: string): Promise<void> {
@@ -177,10 +191,15 @@ async function snapshot(directory: string): Promise<Record<string, string>> {
     }
     for (const entry of entries) {
       const full = path.join(current, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else {
-        const info = await stat(full);
-        result[path.relative(directory, full)] = `${info.mtimeMs}:${(await readFile(full)).toString("base64")}`;
+      const relative = path.relative(directory, full);
+      const info = await lstat(full);
+      if (info.isSymbolicLink()) result[`${relative}@`] = `link:${await readlink(full)}`;
+      else if (info.isDirectory()) {
+        result[`${relative}/`] = `dir:${(info.mode & 0o7777).toString(8)}:${info.uid}`;
+        await walk(full);
+      } else {
+        result[relative] =
+          `${info.mtimeMs}:${(await readFile(full)).toString("base64")}:${(info.mode & 0o7777).toString(8)}`;
       }
     }
   }
@@ -717,4 +736,85 @@ test("a Runtime started before the final profile step blocks the profile update"
       value.profile,
     );
   });
+});
+
+// `runtime-keys` stays 0700: the existing key-custody rules require a private key directory.
+const OWNED_DIRECTORIES = ["cli", "admission", "executor", "runtime-profiles"] as const;
+
+test("preview performs no filesystem mutation, including directory permission normalization", async () => {
+  for (const mode of [0o750, 0o755]) {
+    await withFixture({ release: "0.15" }, async (value) => {
+      // Safe but not owner-private modes that a write path would normalize to 0700.
+      for (const name of OWNED_DIRECTORIES) await chmod(path.join(value.home, name), mode);
+      await chmod(value.home, mode);
+      await mkdir(path.join(value.home, "runtime", "endpoints"), { recursive: true, mode });
+      await chmod(path.join(value.home, "runtime"), mode);
+      const before = await snapshot(value.root);
+      const homeMode = (await lstat(value.home)).mode & 0o7777;
+
+      const preview = await previewLocalConfigMigration(value.request);
+      assert.equal(preview.status, "ready", `${mode.toString(8)}: ${JSON.stringify(preview.blockers)}`);
+      assert.deepEqual(preview.blockers, []);
+      assert.deepEqual(await snapshot(value.root), before, `preview must not mutate (${mode.toString(8)})`);
+      assert.equal((await lstat(value.home)).mode & 0o7777, homeMode);
+      for (const name of [...OWNED_DIRECTORIES, "runtime", "runtime/endpoints"])
+        assert.equal((await lstat(path.join(value.home, name))).mode & 0o7777, mode, name);
+      assert.deepEqual(await previewLocalConfigMigration(value.request), preview, "generation is unchanged");
+    });
+  }
+});
+
+test("the non-mutating preview still fails closed on unsafe directories and symlinks", async () => {
+  const cases: readonly (readonly [string, (value: Fixture) => Promise<void>, string])[] = [
+    [
+      "group-writable owned directory",
+      async (value) => {
+        await chmod(path.join(value.home, "admission"), 0o770);
+      },
+      "admission/config.json",
+    ],
+    [
+      "symlinked owned directory",
+      async (value) => {
+        const outside = path.join(value.root, "outside-admission");
+        await rename(path.join(value.home, "admission"), outside);
+        await symlink(outside, path.join(value.home, "admission"));
+      },
+      "admission/config.json",
+    ],
+    [
+      "symlinked owned file",
+      async (value) => {
+        const target = path.join(value.root, "outside-cli.json");
+        const cliPath = localComponentPath("cli", "config.json", value.environment);
+        await rename(cliPath, target);
+        await symlink(target, cliPath);
+      },
+      "cli/config.json",
+    ],
+    ...(process.getuid?.() === 0
+      ? ([
+          [
+            "foreign-owned owned directory",
+            async (value: Fixture) => {
+              await chown(path.join(value.home, "executor"), 4242, 4242);
+            },
+            "executor/config.json",
+          ],
+        ] as const)
+      : []),
+  ];
+  for (const [name, mutate, subject] of cases) {
+    await withFixture({ release: "0.15" }, async (value) => {
+      await mutate(value);
+      const before = await snapshot(value.root);
+      const preview = await previewLocalConfigMigration(value.request);
+      assert.equal(preview.status, "blocked", name);
+      assert.ok(
+        preview.blockers.some((blocker) => blocker.code === "LOCAL_STATE_UNREADABLE" && blocker.subject === subject),
+        `${name}: ${JSON.stringify(preview.blockers)}`,
+      );
+      assert.deepEqual(await snapshot(value.root), before, `${name}: no mutation`);
+    });
+  }
 });

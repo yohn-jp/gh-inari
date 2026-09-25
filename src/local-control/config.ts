@@ -170,7 +170,12 @@ function directoryFlags(): number {
   return fsConstants.O_RDONLY | noFollow() | directory;
 }
 
-function openDirectory(pathname: string, privateDirectory: boolean): number {
+/**
+ * `normalize` tightens an owner-private directory to 0700. Read-only callers
+ * pass false: the directory is then only validated (owner, no symlink, no
+ * group/other write) and no filesystem metadata is changed.
+ */
+function openDirectory(pathname: string, privateDirectory: boolean, normalize = true): number {
   let fd: number;
   try {
     fd = openSync(pathname, directoryFlags());
@@ -183,7 +188,8 @@ function openDirectory(pathname: string, privateDirectory: boolean): number {
     const stat = fstatSync(fd);
     if (privateDirectory) {
       assertPrivateDirectory(stat);
-      fchmodSync(fd, PRIVATE_DIRECTORY_MODE);
+      if (normalize) fchmodSync(fd, PRIVATE_DIRECTORY_MODE);
+      else if ((stat.mode & PUBLIC_FILE_WRITE_MASK) !== 0) throw unsafe("Local configuration directory is unsafe.");
     } else {
       assertSafeAncestor(stat);
     }
@@ -194,7 +200,12 @@ function openDirectory(pathname: string, privateDirectory: boolean): number {
   }
 }
 
-function openSecureDirectory(directoryPath: string, create: boolean, missingOk = false): DirectoryHandle | undefined {
+function openSecureDirectory(
+  directoryPath: string,
+  create: boolean,
+  missingOk = false,
+  normalize = true,
+): DirectoryHandle | undefined {
   const target = path.resolve(directoryPath);
   const root = path.parse(target).root;
   const rootFd = openDirectory(root, false);
@@ -212,7 +223,7 @@ function openSecureDirectory(directoryPath: string, create: boolean, missingOk =
       const isFinal = index === components.length - 1;
       let childFd: number;
       try {
-        childFd = openDirectory(childPath, isFinal);
+        childFd = openDirectory(childPath, isFinal, normalize);
       } catch (error: unknown) {
         if (
           missingOk &&
@@ -632,10 +643,11 @@ function readExistingLocalJsonWithVisibility<T>(
   validator: LocalConfigValidator<T>,
   environment: NodeJS.ProcessEnv,
   visibility: "private" | "public",
+  normalize = true,
 ): T | undefined {
   const { directory, fileName } = safeFileName(relativePath);
   const directoryPath = componentDirectoryPath(component, directory, environment);
-  const handle = openSecureDirectory(directoryPath, false, true);
+  const handle = openSecureDirectory(directoryPath, false, true, normalize);
   if (handle === undefined) return undefined;
   try {
     return readExistingJson(handle, fileName, validator, visibility);
@@ -655,8 +667,10 @@ export function readExistingLocalPublicJson<T>(
 }
 
 /**
- * Read owner-only local configuration without creating absent directories.
- * Used by read-only previews that must not mutate the configuration home.
+ * Read owner-only local configuration without any filesystem mutation: no
+ * directory or file is created and no permission is changed. Symlinks,
+ * foreign ownership, group/other-writable directories and unsafe file modes
+ * are still rejected. Used by read-only previews.
  */
 export function readExistingLocalJson<T>(
   component: LocalComponent,
@@ -664,7 +678,7 @@ export function readExistingLocalJson<T>(
   validator: LocalConfigValidator<T>,
   environment: NodeJS.ProcessEnv = process.env,
 ): T | undefined {
-  return readExistingLocalJsonWithVisibility(component, relativePath, validator, environment, "private");
+  return readExistingLocalJsonWithVisibility(component, relativePath, validator, environment, "private", false);
 }
 
 function persistReplaceJson<T>(directory: DirectoryHandle, fileName: string, value: T): void {
