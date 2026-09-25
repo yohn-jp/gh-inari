@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { projectLocalApplicationState } from "./local-application-state.js";
+import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
 
 async function temporaryRoot(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), "inari-local-application-state-"));
@@ -156,6 +156,19 @@ test("#1092: the Issuer key setup step checks only the Executor-owned reference 
     assert.equal(rendered.includes(sentinel), false);
     assert.equal(rendered.includes("PRIVATE KEY"), false);
     assert.equal(rendered.includes("EXECUTOR_ISSUER_KEY_INVALID"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1108: live Runtime readiness is projected from public role health without a running Runtime", async () => {
+  const root = await temporaryRoot();
+  try {
+    assert.deepEqual(await projectLocalRuntimeReadiness(environmentFor(root)), {
+      executor: "not-running",
+      admission: "not-running",
+      overall: "not-ready",
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
