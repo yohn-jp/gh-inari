@@ -66,3 +66,112 @@ test("actual loopback HTTP rejects foreign origin, Host, CSRF and replay before 
     server.close();
   }
 });
+
+test("confirmation tokens are bound to the observed generation for generic actions and enrollment", async () => {
+  let effects = 0;
+  let currentConfiguration = "cfg";
+  const enrollmentAction = {
+    id: "enroll",
+    version: 1,
+    inputs: [{ id: "issuer-key", kind: "enrollment", label: "Key", required: true }],
+  };
+  const application = {
+    state: async () => ({
+      generation: { ...generation, configuration: currentConfiguration },
+      actions: [offered, enrollmentAction],
+    }),
+    perform: async (_repository: unknown, _request: unknown, options?: { enrollments?: Record<string, unknown> }) => {
+      effects++;
+      const upload = options?.enrollments?.["issuer-key"] as { stream: AsyncIterable<Uint8Array> } | undefined;
+      if (upload) for await (const _ of upload.stream) void _;
+      return { outcome: "succeeded" };
+    },
+  } as unknown as SetupApplication;
+  const issued: string[] = [];
+  const consumed: string[] = [];
+  class RecordingSession extends OperatorSession {
+    override confirm(actionId: string, bound: typeof generation, now?: number): string {
+      issued.push(`${actionId}@${bound.configuration}`);
+      return super.confirm(actionId, bound, now);
+    }
+    override consume(value: string | undefined, actionId: string, bound: typeof generation, now?: number): boolean {
+      consumed.push(`${actionId}@${bound.configuration}`);
+      return super.consume(value, actionId, bound, now);
+    }
+  }
+  const session = new RecordingSession(repository, "cfg");
+  const options = { application, repository, configuration: "cfg", session, origin: "http://127.0.0.1:19999" };
+  const server = createSetupApiServer(options);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  options.origin = url;
+  const base = {
+    origin: url,
+    authorization: `Bearer ${session.context.bearer}`,
+    "x-csrf-token": session.context.csrf,
+  };
+  const post = (path: string, body: unknown) =>
+    fetch(url + path, {
+      method: "POST",
+      headers: { ...base, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const enroll = (confirmation: string, actionId = "enroll") =>
+    fetch(url + "/api/setup/enrollment/issuer-key", {
+      method: "POST",
+      headers: {
+        ...base,
+        "content-type": "application/octet-stream",
+        "x-setup-action-id": actionId,
+        "x-setup-confirmation": confirmation,
+      },
+      body: new Uint8Array([1, 2, 3]),
+    });
+  const confirm = async (actionId: string) =>
+    ((await (await post("/api/setup/confirm", { actionId })).json()) as { confirmation: string }).confirmation;
+  const action = { version: 1, actionId: "act", generation, confirmed: true, inputs: {} };
+  try {
+    // A token minted for an earlier generation fails before any owner effect, same action ID.
+    const olderGeneration = { ...generation, configuration: "cfg-old" };
+    assert.equal(
+      (await post("/api/setup/actions", { confirmation: session.confirm("act", olderGeneration), request: action }))
+        .status,
+      409,
+    );
+    assert.equal((await enroll(session.confirm("enroll", olderGeneration))).status, 409);
+    assert.equal(effects, 0);
+
+    // The API captures the current generation at confirm and requires it at consumption.
+    issued.length = 0;
+    consumed.length = 0;
+    assert.equal(
+      (await post("/api/setup/actions", { confirmation: await confirm("act"), request: action })).status,
+      200,
+    );
+    assert.equal((await enroll(await confirm("enroll"))).status, 200);
+    assert.deepEqual(issued, ["act@cfg", "enroll@cfg"]);
+    assert.deepEqual(consumed, ["act@cfg", "enroll@cfg"]);
+    assert.equal(effects, 2);
+
+    // A token confirmed before generation drift fails for both transports without effects.
+    const staleAction = await confirm("act");
+    const staleEnrollment = await confirm("enroll");
+    currentConfiguration = "cfg-2";
+    assert.equal(
+      (
+        await post("/api/setup/actions", {
+          confirmation: staleAction,
+          request: { ...action, generation: { ...generation, configuration: "cfg-2" } },
+        })
+      ).status,
+      409,
+    );
+    assert.equal((await enroll(staleEnrollment)).status, 409);
+    assert.equal(effects, 2);
+  } finally {
+    server.close();
+  }
+});

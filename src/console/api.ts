@@ -96,7 +96,7 @@ export function createSetupApiServer(options: SetupApiOptions): Server {
           return fail(out, 400);
         const actionId = (body as { actionId: string }).actionId;
         if (!state.actions.some((action) => action.id === actionId)) return fail(out, 409);
-        return json(out, { confirmation: options.session.confirm(actionId) });
+        return json(out, { confirmation: options.session.confirm(actionId, state.generation) });
       }
       if (url.pathname === "/api/setup/actions" && request.method === "POST") {
         const body = await boundedJson(request);
@@ -108,7 +108,7 @@ export function createSetupApiServer(options: SetupApiOptions): Server {
           !sameSetupGeneration(action.generation, state.generation) ||
           !state.actions.some((item) => item.id === action.actionId) ||
           !action.confirmed ||
-          !options.session.consume(confirmation as string | undefined, action.actionId)
+          !options.session.consume(confirmation as string | undefined, action.actionId, state.generation)
         )
           return fail(out, 409);
         return json(out, await options.application.perform(options.repository, action));
@@ -123,7 +123,8 @@ export function createSetupApiServer(options: SetupApiOptions): Server {
             action.id === actionId &&
             action.inputs.some((input) => input.id === match[1] && input.kind === "enrollment"),
         );
-        if (offered === undefined || !options.session.consume(confirmation, actionId)) return fail(out, 409);
+        if (offered === undefined || !options.session.consume(confirmation, actionId, state.generation))
+          return fail(out, 409);
         const upload = enrollmentUpload(request);
         const result = await options.application.perform(
           options.repository,

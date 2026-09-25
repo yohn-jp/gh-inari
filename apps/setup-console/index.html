@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Inari local setup</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="setup-console" data-setup-console>
+      <h1>Inari local setup</h1>
+      <p id="setup-status" role="status" aria-live="polite">Waiting for the local operator context…</p>
+      <noscript>The local setup wizard needs JavaScript. The equivalent CLI is `inari setup`.</noscript>
+    </main>
+    <!--
+      The hosting product (#1121) delivers the in-memory operator bootstrap and
+      calls startSetupConsole() from /setup-console.js. This static asset holds
+      no operator credential.
+    -->
+  </body>
+</html>
