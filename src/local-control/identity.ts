@@ -10,6 +10,7 @@ import {
   type DelegatorKeyPair,
 } from "../agent-authority/delegator-key.js";
 import {
+  createLocalPrivateFile,
   ensureLocalComponentDirectory,
   localComponentPath,
   readLocalJson,
@@ -94,6 +95,69 @@ export function setupLocalAuthority(environment: NodeJS.ProcessEnv = process.env
     publicKey: exportDelegatorPublicKey(pair),
     publicKeyFingerprint: delegatorPublicKeyFingerprint(pair),
     privateKeyFile: "private-key.pem",
+  };
+  const selected = writeLocalJson("authority", "config.json", config, validateLocalAuthorityConfig, environment);
+  return { config: selected, configPath, privateKeyPath };
+}
+
+const AUTHORITY_PRIVATE_KEY_FILE = "private-key.pem";
+
+function authorityKeyError(message: string): LocalControlError {
+  return new LocalControlError("LOCAL_CONTROL_CONFIG_CONFLICT", message);
+}
+
+/** Load a Runtime Authority key only when it matches the expected public fingerprint. */
+function loadExpectedKey(filePath: string, expectedFingerprint: string): DelegatorKeyPair {
+  let pair: DelegatorKeyPair;
+  try {
+    pair = loadDelegatorKeyPair(filePath);
+  } catch {
+    throw new LocalControlError("LOCAL_CONTROL_UNSAFE_STORAGE", "Runtime Authority key could not be loaded safely.");
+  }
+  if (delegatorPublicKeyFingerprint(pair) !== expectedFingerprint)
+    throw authorityKeyError("Runtime Authority key does not match the adopted public fingerprint.");
+  return pair;
+}
+
+/**
+ * Copy an existing, safely stored Runtime Authority key into Authority-owned
+ * custody (`authority/private-key.pem`). The source is verified against the
+ * adopted public fingerprint first and is never moved or deleted. An existing
+ * custody key is never replaced: it must already hold the same key. No key is
+ * generated here.
+ */
+export function copyLocalAuthorityKey(
+  sourcePath: string,
+  expectedFingerprint: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const privateKeyPath = localComponentPath("authority", AUTHORITY_PRIVATE_KEY_FILE, environment);
+  const source = loadExpectedKey(sourcePath, expectedFingerprint);
+  const exported = source.privateKey.export({ format: "pem", type: "pkcs8" });
+  if (typeof exported !== "string")
+    throw new LocalControlError("LOCAL_CONTROL_STORAGE_FAILED", "Runtime Authority key could not be encoded.");
+  createLocalPrivateFile("authority", AUTHORITY_PRIVATE_KEY_FILE, Buffer.from(exported, "utf8"), environment);
+  loadExpectedKey(privateKeyPath, expectedFingerprint);
+  return privateKeyPath;
+}
+
+/**
+ * Create (or confirm) the public Authority custody descriptor for the key
+ * already held in `authority/private-key.pem`. A descriptor for any other key
+ * is a conflict; nothing is replaced and no key is generated.
+ */
+export function bindLocalAuthorityDescriptor(
+  expectedFingerprint: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): LocalAuthoritySetupResult {
+  const privateKeyPath = localComponentPath("authority", AUTHORITY_PRIVATE_KEY_FILE, environment);
+  const configPath = localComponentPath("authority", "config.json", environment);
+  const pair = loadExpectedKey(privateKeyPath, expectedFingerprint);
+  const config: LocalAuthorityConfig = {
+    version: 1,
+    publicKey: exportDelegatorPublicKey(pair),
+    publicKeyFingerprint: expectedFingerprint,
+    privateKeyFile: AUTHORITY_PRIVATE_KEY_FILE,
   };
   const selected = writeLocalJson("authority", "config.json", config, validateLocalAuthorityConfig, environment);
   return { config: selected, configPath, privateKeyPath };

@@ -114,6 +114,11 @@ function validateRepository(value: unknown): LocalRuntimeProfileRepository {
   return { repositoryHost, repositoryId, repositoryNameWithOwner };
 }
 
+/** Validate a secret-free Runtime profile record. */
+export function validateLocalRuntimeProfile(value: unknown): LocalRuntimeProfile {
+  return validateProfile(value);
+}
+
 function validateProfile(value: unknown): LocalRuntimeProfile {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid("Runtime profile is invalid.");
   const record = value as Record<string, unknown>;
@@ -224,6 +229,33 @@ export class LocalRuntimeProfileStore {
     } catch {
       throw new LocalRuntimeProfileError("LOCAL_RUNTIME_PROFILE_STORAGE_FAILED", "Runtime profile could not be saved.");
     }
+  }
+
+  /**
+   * Replace a Runtime profile only while it still equals `expected`. Endpoint
+   * and repository identity are immutable; a drifted profile is rejected
+   * before any write, and a profile that already equals `next` is kept.
+   */
+  async replace(expected: LocalRuntimeProfile, next: LocalRuntimeProfile): Promise<string> {
+    const previous = validateProfile(expected);
+    const validated = validateProfile(next);
+    if (
+      previous.endpoint !== validated.endpoint ||
+      previous.repository.repositoryHost !== validated.repository.repositoryHost ||
+      previous.repository.repositoryId !== validated.repository.repositoryId
+    )
+      throw new LocalRuntimeProfileError(
+        "LOCAL_RUNTIME_PROFILE_MISMATCH",
+        "Runtime profile identity cannot change during replacement.",
+      );
+    const current = await this.load(previous);
+    if (current !== undefined && JSON.stringify(current) === JSON.stringify(validated)) return this.pathFor(validated);
+    if (current === undefined || JSON.stringify(current) !== JSON.stringify(previous))
+      throw new LocalRuntimeProfileError(
+        "LOCAL_RUNTIME_PROFILE_MISMATCH",
+        "Runtime profile changed after it was inspected.",
+      );
+    return this.save(validated);
   }
 
   async findForRepository(repository: {

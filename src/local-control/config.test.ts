@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
   bindLocalCliAdmissionRoute,
   configuredLocalRuntimeBindHost,
+  createLocalPrivateFile,
+  readExistingLocalJson,
+  readLocalJson,
+  replaceLocalJsonIfCurrent,
   ensureLocalComponentDirectory,
   ensureLocalCliTopology,
   localComponentDirectory,
@@ -16,6 +20,7 @@ import {
   validateLocalAdmissionConfig,
   validateLocalCliConfig,
   validateLocalExecutorConfig,
+  type LocalCliConfig,
 } from "./config.js";
 
 async function temporaryEnvironment(): Promise<{ readonly root: string; readonly environment: NodeJS.ProcessEnv }> {
@@ -257,6 +262,94 @@ test("existing local artifact reads do not create missing storage or follow dire
     assert.throws(
       () => readExistingLocalPublicJson("authority", "runtime-authority.json", readUnknownJson, environment),
       /unsafe directory/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("non-creating private reads never prepare the configuration home", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    assert.equal(readExistingLocalJson("cli", "config.json", validateLocalCliConfig, environment), undefined);
+    await assert.rejects(lstat(resolveConfigHome(environment)));
+    const initial = ensureLocalCliTopology(environment);
+    assert.deepEqual(readExistingLocalJson("cli", "config.json", validateLocalCliConfig, environment), initial);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("compare-and-replace keeps drifted configuration and is idempotent", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const legacy = ensureLocalCliTopology(environment);
+    const routed: LocalCliConfig = {
+      ...legacy,
+      admission: { id: "adm_0123456789abcdef", endpoint: "http://127.0.0.1:8081" },
+    };
+    const next: LocalCliConfig = { ...legacy, admission: { id: "adm_0123456789abcdef" } };
+    assert.throws(
+      () => replaceLocalJsonIfCurrent("cli", "config.json", routed, next, validateLocalCliConfig, environment),
+      /changed after it was inspected/u,
+    );
+    const configPath = localComponentPath("cli", "config.json", environment);
+    assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")), legacy);
+    await writeFile(configPath, `${JSON.stringify(routed)}\n`, { mode: 0o600 });
+    assert.deepEqual(
+      replaceLocalJsonIfCurrent("cli", "config.json", routed, next, validateLocalCliConfig, environment),
+      next,
+    );
+    assert.deepEqual(
+      replaceLocalJsonIfCurrent("cli", "config.json", routed, next, validateLocalCliConfig, environment),
+      next,
+    );
+    assert.equal((await lstat(configPath)).mode & 0o077, 0);
+    assert.throws(
+      () => replaceLocalJsonIfCurrent("admission", "absent.json", legacy, next, validateLocalCliConfig, environment),
+      /changed after it was inspected/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("private files are created once with owner-only mode and never replaced", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const first = Buffer.from("first\n");
+    assert.equal(createLocalPrivateFile("authority", "secret.pem", first, environment), "created");
+    assert.equal(createLocalPrivateFile("authority", "secret.pem", Buffer.from("second\n"), environment), "exists");
+    assert.deepEqual(readLocalPrivateFile("authority", "secret.pem", environment), first);
+    assert.equal((await lstat(localComponentPath("authority", "secret.pem", environment))).mode & 0o077, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("non-mutating private reads keep directory modes and still reject unsafe storage", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const initial = ensureLocalCliTopology(environment);
+    const directory = localComponentDirectory("cli", environment);
+    await chmod(directory, 0o750);
+    assert.deepEqual(readExistingLocalJson("cli", "config.json", validateLocalCliConfig, environment), initial);
+    assert.equal((await lstat(directory)).mode & 0o7777, 0o750);
+    await chmod(directory, 0o770);
+    assert.throws(
+      () => readExistingLocalJson("cli", "config.json", validateLocalCliConfig, environment),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "LOCAL_CONTROL_UNSAFE_STORAGE",
+    );
+    assert.equal((await lstat(directory)).mode & 0o7777, 0o770);
+    // The owner-private write/read path keeps normalizing permissions.
+    assert.deepEqual(readLocalJson("cli", "config.json", validateLocalCliConfig, environment), initial);
+    assert.equal((await lstat(directory)).mode & 0o7777, 0o700);
+    const outside = path.join(root, "outside-cli");
+    await rename(directory, outside);
+    await symlink(outside, directory);
+    assert.throws(
+      () => readExistingLocalJson("cli", "config.json", validateLocalCliConfig, environment),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "LOCAL_CONTROL_UNSAFE_STORAGE",
     );
   } finally {
     await rm(root, { recursive: true, force: true });

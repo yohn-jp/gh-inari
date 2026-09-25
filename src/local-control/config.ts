@@ -170,7 +170,12 @@ function directoryFlags(): number {
   return fsConstants.O_RDONLY | noFollow() | directory;
 }
 
-function openDirectory(pathname: string, privateDirectory: boolean): number {
+/**
+ * `normalize` tightens an owner-private directory to 0700. Read-only callers
+ * pass false: the directory is then only validated (owner, no symlink, no
+ * group/other write) and no filesystem metadata is changed.
+ */
+function openDirectory(pathname: string, privateDirectory: boolean, normalize = true): number {
   let fd: number;
   try {
     fd = openSync(pathname, directoryFlags());
@@ -183,7 +188,8 @@ function openDirectory(pathname: string, privateDirectory: boolean): number {
     const stat = fstatSync(fd);
     if (privateDirectory) {
       assertPrivateDirectory(stat);
-      fchmodSync(fd, PRIVATE_DIRECTORY_MODE);
+      if (normalize) fchmodSync(fd, PRIVATE_DIRECTORY_MODE);
+      else if ((stat.mode & PUBLIC_FILE_WRITE_MASK) !== 0) throw unsafe("Local configuration directory is unsafe.");
     } else {
       assertSafeAncestor(stat);
     }
@@ -194,7 +200,12 @@ function openDirectory(pathname: string, privateDirectory: boolean): number {
   }
 }
 
-function openSecureDirectory(directoryPath: string, create: boolean, missingOk = false): DirectoryHandle | undefined {
+function openSecureDirectory(
+  directoryPath: string,
+  create: boolean,
+  missingOk = false,
+  normalize = true,
+): DirectoryHandle | undefined {
   const target = path.resolve(directoryPath);
   const root = path.parse(target).root;
   const rootFd = openDirectory(root, false);
@@ -212,7 +223,7 @@ function openSecureDirectory(directoryPath: string, create: boolean, missingOk =
       const isFinal = index === components.length - 1;
       let childFd: number;
       try {
-        childFd = openDirectory(childPath, isFinal);
+        childFd = openDirectory(childPath, isFinal, normalize);
       } catch (error: unknown) {
         if (
           missingOk &&
@@ -626,6 +637,25 @@ export function readLocalPrivateFile(
   );
 }
 
+function readExistingLocalJsonWithVisibility<T>(
+  component: LocalComponent,
+  relativePath: string,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv,
+  visibility: "private" | "public",
+  normalize = true,
+): T | undefined {
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const handle = openSecureDirectory(directoryPath, false, true, normalize);
+  if (handle === undefined) return undefined;
+  try {
+    return readExistingJson(handle, fileName, validator, visibility);
+  } finally {
+    closeQuietly(handle.fd);
+  }
+}
+
 /** Read a public local artifact without creating absent directories or following symlinks. */
 export function readExistingLocalPublicJson<T>(
   component: LocalComponent,
@@ -633,15 +663,22 @@ export function readExistingLocalPublicJson<T>(
   validator: LocalConfigValidator<T>,
   environment: NodeJS.ProcessEnv = process.env,
 ): T | undefined {
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
-  const handle = openSecureDirectory(directoryPath, false, true);
-  if (handle === undefined) return undefined;
-  try {
-    return readExistingJson(handle, fileName, validator, "public");
-  } finally {
-    closeQuietly(handle.fd);
-  }
+  return readExistingLocalJsonWithVisibility(component, relativePath, validator, environment, "public");
+}
+
+/**
+ * Read owner-only local configuration without any filesystem mutation: no
+ * directory or file is created and no permission is changed. Symlinks,
+ * foreign ownership, group/other-writable directories and unsafe file modes
+ * are still rejected. Used by read-only previews.
+ */
+export function readExistingLocalJson<T>(
+  component: LocalComponent,
+  relativePath: string,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv = process.env,
+): T | undefined {
+  return readExistingLocalJsonWithVisibility(component, relativePath, validator, environment, "private", false);
 }
 
 function persistReplaceJson<T>(directory: DirectoryHandle, fileName: string, value: T): void {
@@ -683,12 +720,17 @@ function persistReplaceJson<T>(directory: DirectoryHandle, fileName: string, val
 }
 
 function persistFirstJson<T>(directory: DirectoryHandle, fileName: string, value: T): void {
-  const target = secureFilePath(directory, fileName);
-  const temporary = secureFilePath(directory, `${fileName}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`);
   const bytes = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
   if (bytes.byteLength > MAX_LOCAL_CONFIG_BYTES) {
     throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local configuration file is too large.");
   }
+  persistFirstBytes(directory, fileName, bytes);
+}
+
+/** Publish owner-only bytes once through an exclusive temporary file and hard link; an existing target wins. */
+function persistFirstBytes(directory: DirectoryHandle, fileName: string, bytes: Buffer): void {
+  const target = secureFilePath(directory, fileName);
+  const temporary = secureFilePath(directory, `${fileName}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`);
   let fd: number | undefined;
   try {
     fd = openSync(
@@ -756,6 +798,81 @@ export function writeLocalJson<T>(
         throw new LocalControlError(
           "LOCAL_CONTROL_CONFIG_CONFLICT",
           "Existing local configuration conflicts with the requested identity.",
+        );
+      }
+      return persisted;
+    }),
+  );
+}
+
+/**
+ * Create an owner-only private file exactly once. The bytes are published
+ * atomically; an existing file is never replaced and is reported to the caller,
+ * which must verify it independently.
+ */
+export function createLocalPrivateFile(
+  component: LocalComponent,
+  relativePath: string,
+  bytes: Buffer,
+  environment: NodeJS.ProcessEnv = process.env,
+): "created" | "exists" {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_LOCAL_PRIVATE_FILE_BYTES) {
+    throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local private file size is invalid.");
+  }
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => {
+      if (readExistingPrivateFile(handle, fileName) !== undefined) return "exists";
+      persistFirstBytes(handle, fileName, bytes);
+      const persisted = readExistingPrivateFile(handle, fileName);
+      if (persisted === undefined) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_STORAGE_FAILED",
+          "Local private file could not be verified after persistence.",
+        );
+      }
+      return persisted.equals(bytes) ? "created" : "exists";
+    }),
+  );
+}
+
+/**
+ * Compare-and-replace bounded Inari-owned configuration. The current record
+ * must still equal `expected` (or be absent when `expected` is undefined);
+ * otherwise the replacement is rejected before any write. A record that
+ * already equals `next` is returned unchanged, so retries are idempotent.
+ */
+export function replaceLocalJsonIfCurrent<T>(
+  component: LocalComponent,
+  relativePath: string,
+  expected: T | undefined,
+  next: T,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv = process.env,
+): T {
+  const validated = validator(next);
+  const expectedValue = expected === undefined ? undefined : validator(expected);
+  const { directory, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directory, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) => {
+      const existing = readExistingJson(handle, fileName, validator);
+      if (existing !== undefined && canonicalJson(existing) === canonicalJson(validated)) return existing;
+      const current = existing === undefined ? undefined : canonicalJson(existing);
+      const wanted = expectedValue === undefined ? undefined : canonicalJson(expectedValue);
+      if (current !== wanted) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_CONFIG_CONFLICT",
+          "Local configuration changed after it was inspected.",
+        );
+      }
+      persistReplaceJson(handle, fileName, validated);
+      const persisted = readExistingJson(handle, fileName, validator);
+      if (persisted === undefined || canonicalJson(persisted) !== canonicalJson(validated)) {
+        throw new LocalControlError(
+          "LOCAL_CONTROL_STORAGE_FAILED",
+          "Local configuration could not be verified after persistence.",
         );
       }
       return persisted;
