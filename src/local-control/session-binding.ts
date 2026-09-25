@@ -233,8 +233,8 @@ export function validateLocalSessionBinding(input: unknown): LocalSessionBinding
       branchObservation.repository.repositoryHost !== "github.com" ||
       branchObservation.repository.repositoryId !== claims.value.repository.id ||
       branchObservation.implementation !== claims.value.task.number ||
-      !claims.value.capabilities.some(
-        (claim) => claim.kind === "branch.advance" && claim.branch === branchObservation.expectedBranch,
+      claims.value.capabilities.some(
+        (claim) => claim.kind === "branch.advance" && claim.branch !== branchObservation.expectedBranch,
       )
     )
       return invalidResult();
