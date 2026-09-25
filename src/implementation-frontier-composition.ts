@@ -34,7 +34,7 @@ import {
   type SemanticIssueLifecycleIssueProjection,
   type SemanticIssueLifecycleProjection,
 } from "./semantic-issue-lifecycle.js";
-import { GitHubAdapterCore as GitHubAdapter } from "./github/adapter.js";
+import { GitHubAdapterCore as GitHubAdapter } from "./github/adapter-core.js";
 import { createGitHubChangeReadAdapter } from "./github/change-state-projector.js";
 import {
   GitHubIssueRelationObservationAdapter,

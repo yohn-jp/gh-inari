@@ -21,7 +21,7 @@ import {
 import { resolveDelegator } from "../agent-authority/delegator-trust.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
-import { GitHubAdapterCore as GitHubAdapter } from "../github/adapter.js";
+import { GitHubAdapterCore as GitHubAdapter } from "../github/adapter-core.js";
 import {
   GitHubAppInstallationCredentialBroker,
   type GitHubAppRepositoryReadCapability,
