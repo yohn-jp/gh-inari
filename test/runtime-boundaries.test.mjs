@@ -221,8 +221,7 @@ test("frozen cross-role facade edges stop caller traversal at the historical bou
     ...SECRET_MODULES,
     "src/local-control/admission-client.ts":
       'import { admission } from "./admission-server.js";\nexport const client = admission;\n',
-    "src/local-control/admission-server.ts":
-      'export { admission } from "../admission/server.js";\n',
+    "src/local-control/admission-server.ts": 'export { admission } from "../admission/server.js";\n',
     "src/admission/server.ts": "export const admission = 1;\n",
     "src/local-application-state.ts":
       'import { admission } from "./admission-server.js";\nexport const state = admission;\n',
@@ -235,10 +234,9 @@ test("frozen cross-role facade edges stop caller traversal at the historical bou
     },
   ];
   const result = evaluateRuntimeBoundaries(root, { ledger, baseline: ledger });
-  assert.deepEqual(
-    pairs(result.violations),
-    ["admission-private src/local-application-state.ts -> src/local-control/admission-server.ts"],
-  );
+  assert.deepEqual(pairs(result.violations), [
+    "admission-private src/local-application-state.ts -> src/local-control/admission-server.ts",
+  ]);
   assert.ok(
     result.excused.some(
       (finding) =>
@@ -248,9 +246,7 @@ test("frozen cross-role facade edges stop caller traversal at the historical bou
   );
   assert.equal(
     result.violations.some(
-      (finding) =>
-        finding.from === "src/local-control/admission-client.ts" &&
-        finding.to === "src/admission/server.ts",
+      (finding) => finding.from === "src/local-control/admission-client.ts" && finding.to === "src/admission/server.ts",
     ),
     false,
   );
@@ -260,8 +256,7 @@ test("same-role extraction inherits only the frozen source targets", () => {
   const root = fixture({
     ...SECRET_MODULES,
     "src/github/app-user-credential-store.ts": "export const store = 1;\n",
-    "src/local-control/executor-server.ts":
-      'export { execute } from "../executor/execution.js";\n',
+    "src/local-control/executor-server.ts": 'export { execute } from "../executor/execution.js";\n',
     "src/executor/execution.ts":
       'import { userToken } from "../github/app-user-credential.js";\nimport { store } from "../github/app-user-credential-store.js";\nexport const execute = [userToken, store];\n',
     "src/executor/other.ts":
