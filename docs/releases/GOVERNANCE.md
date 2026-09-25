@@ -14,6 +14,9 @@ The exact machine-enforced rules live here, not in this document:
 - [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — format,
   lint, typecheck, test, build, package-contents checks that run on every
   PR and must be green before merge.
+- [`.github/workflows/release-preparation-certification.yml`](../../.github/workflows/release-preparation-certification.yml) —
+  explicit release-preparation Golden Path certification for changes to
+  release history, preparation, and publication surfaces.
 - [`.github/workflows/governance.yml`](../../.github/workflows/governance.yml) —
   branch-name and linked-Issue contract for PRs, delegated to the
   organization-owned reusable workflow in `yohn-jp/.github`, which validates
@@ -42,13 +45,18 @@ the release tag.
    the governed Issue-less exception: it is classified by its strict
    `release/<version>` head and uses the `release` PR template. No direct
    pushes to `main`.
-2. **Update the release notes.** Add `docs/releases/<version>.md`
+2. **Certify the release-preparation path before preparing or opening the release PR.**
+   Run `pnpm run certify:release`. This is the explicit Golden Path certification
+   for governed release history, exact-source preparation, and idempotent release
+   PR publication; it is intentionally separate from routine `pnpm run verify`.
+
+3. **Update the release notes.** Add `docs/releases/<version>.md`
    (this file's sibling) in the release PR, following the structure of
    [`0.1.0.md`](0.1.0.md): Summary, Highlights, Fixed, Behavioral changes,
    Upgrade instructions, Breaking changes, Known limitations. Release
    preparation derives factual bullets only from verified governed history;
    sections without applicable evidence say `None.`.
-3. **Bump every file that encodes the package version**, in its own
+4. **Bump every file that encodes the package version**, in its own
    commit or PR:
    - `package.json` `version` — the authority `publish.yml` checks
      against the release tag.
@@ -61,7 +69,7 @@ the release tag.
    three are consistent and fails loudly if any is missed — run it
    before opening the release PR, not just before tagging.
 
-4. **Cut the tag from the release PR's own merge commit, not from
+5. **Cut the tag from the release PR's own merge commit, not from
    whatever `main` happens to be at tag time.** If any other PR merges
    to `main` between the release PR merging and the tag being pushed,
    the tag will silently point at the wrong commit unless you pin it
@@ -82,7 +90,7 @@ the release tag.
    After creation, confirm the pushed tag resolved to that exact
    commit (`git log -1 v<version>`) before relying on the release.
 
-5. **Publishing the Release is the only trigger for
+6. **Publishing the Release is the only trigger for
    `.github/workflows/publish.yml`** (npm publish). The workflow uses
    npm Trusted Publishing and certifies the exact packed artifact before
    publication.
@@ -99,7 +107,7 @@ the release tag.
    release SHA with a fresh disposable Issue — this is optional extra
    assurance, not a required step of the sequence below (see #897).
 
-6. **Automated pipeline runs, in order, and stops at the first failure:**
+7. **Automated pipeline runs, in order, and stops at the first failure:**
    - `pnpm install --frozen-lockfile`
    - `pnpm run typecheck`
    - `pnpm test`
@@ -142,12 +150,13 @@ Before tagging a release, run the same checks CI runs:
 ```bash
 pnpm install --frozen-lockfile
 pnpm run verify
+pnpm run certify:release
 ```
 
-`pnpm run verify` runs format-check, lint, typecheck, test,
-`governance:actions` (pinned-Action-SHA validation), and the full
-pack/install/smoke-test cycle (`test:package`) — the same coverage the
-`publish` workflow depends on, runnable before a tag exists.
+`pnpm run verify` runs the routine repository quality gate, including
+format-check, lint, typecheck, test, and the full pack/install/smoke-test
+cycle (`test:package`). `pnpm run certify:release` separately certifies
+the release-preparation Golden Path and is required before release PR work.
 
 ## Worked example: the 0.10.0 / 0.10.1 incident
 
