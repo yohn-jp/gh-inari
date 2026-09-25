@@ -182,6 +182,11 @@ export function createSetupApplication(ports: SetupApplicationPorts): SetupAppli
     signal: AbortSignal | undefined,
   ): Promise<{ outcome?: SetupActionOutcome; receipt?: SecretEnrollmentReceipt; diagnostics: SetupDiagnostic[] }> {
     let receipt: SecretEnrollmentReceipt | undefined;
+    // The owner may need the same action's secret-free inputs (e.g. the App ID)
+    // to authorize custody. `checkInputs` already rejected undeclared and
+    // enrollment-kind values, so only declared non-enrollment inputs remain.
+    const declared = new Set(action.inputs.filter((item) => item.kind !== "enrollment").map((item) => item.id));
+    const inputs = Object.fromEntries(Object.entries(request.inputs).filter(([id]) => declared.has(id)));
     for (const input of action.inputs) {
       const upload = enrollments[input.id];
       if (input.kind !== "enrollment" || input.enrollment === undefined || upload === undefined) continue;
@@ -205,6 +210,7 @@ export function createSetupApplication(ports: SetupApplicationPorts): SetupAppli
               operationId: action.id,
               repository: request.generation.repository,
               declaredBytes: upload.declaredBytes,
+              ...(Object.keys(inputs).length === 0 ? {} : { inputs }),
             },
             upload.stream,
             signal,

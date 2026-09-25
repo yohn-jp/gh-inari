@@ -41,6 +41,18 @@ export async function setupLocalExecutor(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LocalExecutorSetupResult> {
   requireIssuerReference(environment);
+  return ensureLocalExecutorConfiguration(environment);
+}
+
+/**
+ * Create (or return) only the secret-free Executor configuration. Managed
+ * Issuer key custody (#1114) binds the enrolled key to this configuration ID,
+ * so enrollment needs it before any key exists; the operator key-reference
+ * prerequisite of `setupLocalExecutor` does not apply to that path.
+ */
+export async function ensureLocalExecutorConfiguration(
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<LocalExecutorSetupResult> {
   const configPath = path.join(resolveConfigHome(environment), "executor", EXECUTOR_CONFIG_PATH);
   const existing = readLocalJson("executor", EXECUTOR_CONFIG_PATH, validateLocalExecutorConfig, environment);
   const bindHost = configuredLocalRuntimeBindHost(environment);

@@ -297,7 +297,8 @@ function responseBody(response: { readonly body?: unknown }): Record<string, unk
   return body;
 }
 
-function createReadinessReader(
+/** Protected-ref trust reader over a repository read capability (public records only). */
+export function createReadinessReader(
   capability: GitHubAppRepositoryReadCapability,
   repository: LocalRuntimeProfileRepository,
   context: RepositoryContext,

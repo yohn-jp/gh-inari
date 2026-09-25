@@ -230,6 +230,8 @@ test("secrets cross only the owner enrollment port and never reach state, reques
   assert.equal(result.receipt?.publicFingerprint, `sha256:${"a".repeat(64)}`);
   assert.equal(received.length, 1);
   assert.equal(received[0]?.request.operationId, CONFIGURE);
+  // The owner receives the same action's validated secret-free inputs, never the upload.
+  assert.deepEqual(received[0]?.request.inputs, { "app-id": "123" });
   assert.equal(received[0]?.bytes, bytes.byteLength);
   assert.deepEqual(w.performed[0]?.inputs, { "app-id": "123" });
   const serialized = JSON.stringify({ journal: w.journal, performed: w.performed, state: await app.state(repository) });
