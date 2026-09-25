@@ -489,6 +489,10 @@ test("an exactly policy-bound historical-looking branch naming another Issue exe
   await certifyExecution("feat/999-special", "^[a-z]+/[0-9]+-[a-z-]+$");
 });
 
+test("a branch named main on a trunk default executes through Session, Admission, Executor, branch and PR capabilities", async () => {
+  await certifyExecution("main", "^(main|story/[0-9]+-[a-z0-9-]+)$");
+});
+
 test("main is bound only by actual default-branch evidence at the Session policy and capability boundary", () => {
   const fixture = authorityFixture();
   const pattern = "^(main|story/[0-9]+-[a-z0-9-]+)$";
