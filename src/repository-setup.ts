@@ -486,6 +486,15 @@ async function setupWithCapability(
       "REPOSITORY_SETUP_TRUST_CHANGE_REQUIRED",
       "Explicit capability intent is required before preparing a new Runtime Authority.",
     );
+  // Canonical protected-ref trust is resolved before any key generation or local materialization.
+  const snapshot = await loadDelegatorTrust(createReadinessReader(capability, repository, context)).catch(
+    () => undefined,
+  );
+  const canonicalAuthorities = snapshot?.authorities.map((item) => item.authority);
+  const requestedAuthorityId = input.authorityId ?? existing?.authority.authorityId;
+  const canonicalRegistered = (canonicalAuthorities ?? []).some(
+    (record) => requestedAuthorityId === undefined || record.id === requestedAuthorityId,
+  );
   try {
     keyPair = loadDelegatorKeyPair(keyPath);
   } catch (error: unknown) {
@@ -495,7 +504,8 @@ async function setupWithCapability(
       (error.code === "RUNTIME_AUTHORITY_KEY_NOT_FOUND" ||
         (error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE" && keyPathAbsent)) &&
       existing === undefined &&
-      localAuthorities.length === 0
+      localAuthorities.length === 0 &&
+      !canonicalRegistered
     ) {
       try {
         keyPair = generateAndPersistDelegatorKeyPair(keyPath);
@@ -522,16 +532,13 @@ async function setupWithCapability(
   }
   let authority: Delegator;
   try {
-    const snapshot = await loadDelegatorTrust(createReadinessReader(capability, repository, context)).catch(
-      () => undefined,
-    );
     authority = selectSetupAuthority({
       repository,
       ...(existing === undefined ? {} : { profile: existing }),
       authorityId,
       key: keyPair,
       local: localAuthorities,
-      canonical: snapshot?.authorities.map((item) => item.authority),
+      canonical: canonicalAuthorities,
       maxSessionTtlSeconds: input.maxSessionTtlSeconds ?? DEFAULT_SESSION_TTL_SECONDS,
       ...(input.capabilityCeiling === undefined ? {} : { capabilityIntent: input.capabilityCeiling }),
     });
