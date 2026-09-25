@@ -1149,3 +1149,17 @@ test("Local Executor production composition executes pullRequest.publish through
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the local-control Executor path is a compatibility facade over the extracted Executor role", async () => {
+  const facade = await import("./executor-server.js");
+  const setup = await import("../executor/setup.js");
+  const server = await import("../executor/server.js");
+  const execution = await import("../executor/execution.js");
+  assert.equal(facade.setupLocalExecutor, setup.setupLocalExecutor);
+  assert.equal(facade.LocalExecutorError, setup.LocalExecutorError);
+  assert.equal(facade.localExecutorAppId, setup.localExecutorAppId);
+  assert.equal(facade.localExecutorIssuerKeyStatus, setup.localExecutorIssuerKeyStatus);
+  assert.equal(facade.createLocalExecutorHttpServer, server.createLocalExecutorHttpServer);
+  assert.equal(facade.startConfiguredLocalExecutor, server.startConfiguredLocalExecutor);
+  assert.equal(facade.executeLocalAuthorizedExecution, execution.executeLocalAuthorizedExecution);
+});
