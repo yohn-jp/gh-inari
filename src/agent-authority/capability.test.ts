@@ -32,6 +32,20 @@ test("accepts a branch.advance claim with an optional pathPolicy", () => {
   assert.equal(result.valid, true);
 });
 
+test("branch.advance accepts safe alternative exact targets while creation and PR heads retain their grammar", () => {
+  assert.equal(
+    validateCapabilityClaim({ kind: "branch.advance", branch: "work/375-session", pathPolicy: "src/**" }).valid,
+    true,
+  );
+  assert.equal(validateCapabilityClaim({ kind: "branch.advance", branch: "work/../unsafe" }).valid, false);
+  assert.equal(validateCapabilityClaim({ kind: "branch.advance", branch: "main" }).valid, false);
+  assert.equal(validateCapabilityClaim({ kind: "branch.create", branch: "work/375-session", max: 1 }).valid, false);
+  assert.equal(
+    validateCapabilityClaim({ kind: "pullRequest.create", head: "work/375-session", base: "main", max: 1 }).valid,
+    false,
+  );
+});
+
 test("accepts a pullRequest.create claim targeting the canonical base", () => {
   const result = validateCapabilityClaim({
     kind: "pullRequest.create",

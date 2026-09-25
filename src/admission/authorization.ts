@@ -39,6 +39,7 @@ import {
   type RepositoryIdentity,
 } from "../github/effect-authorizer.js";
 import type { PrPublicationRequest } from "../pr-publication.js";
+import { observeLocalBranch, type ObserveLocalBranchInput } from "../cli/runtime/branch-observation.js";
 
 /** Reads current Executor evidence through the neutral Executor client protocol. */
 export type AdmissionEvidenceReader = (request: LocalExecutorEvidenceRequest) => Promise<unknown>;
@@ -48,6 +49,24 @@ export interface AdmissionAuthorizationOptions {
   readonly readEvidence: AdmissionEvidenceReader;
   readonly environment?: NodeJS.ProcessEnv;
   readonly now?: () => Date;
+  /** Public owner-port observation supplied by the caller, without provider credentials. */
+  readonly branchObservation?: ObserveLocalBranchInput;
+}
+
+function requireCurrentBranchObservation(binding: LocalSessionBinding, options: AdmissionAuthorizationOptions): void {
+  if (binding.branchObservation === undefined) return;
+  if (options.branchObservation === undefined) throw new Error("Current repository branch observation is missing.");
+  let current;
+  try {
+    current = observeLocalBranch(options.branchObservation);
+  } catch {
+    throw new Error("Current repository branch observation is invalid or stale.");
+  }
+  if (
+    canonicalJsonString(current as unknown as CanonicalJsonValue) !==
+    canonicalJsonString(binding.branchObservation as unknown as CanonicalJsonValue)
+  )
+    throw new Error("Current repository branch observation contradicts Session binding.");
 }
 
 export interface AdmittedSession {
@@ -281,6 +300,7 @@ export async function admitSession(
   binding: LocalSessionBinding,
   options: AdmissionAuthorizationOptions,
 ): Promise<AdmittedSession> {
+  requireCurrentBranchObservation(binding, options);
   const current = await currentTrust(binding, options);
   const snapshot = createAdmissionSession(binding, current, {
     environment: options.environment,
@@ -318,6 +338,13 @@ export async function authorizeExecutionIntent(
   });
   if (stored === undefined || stored.status !== "active") throw new Error("Session is unavailable.");
   const binding = stored.record.binding;
+  requireCurrentBranchObservation(binding, options);
+  if (
+    binding.branchObservation !== undefined &&
+    intent.operation === "branch.advance" &&
+    (intent.request as BranchAdvanceSemanticRequest).branch !== binding.branchObservation.expectedBranch
+  )
+    throw new Error("Branch advance does not match the Session policy branch.");
   if (!intentRepositoryMatchesBinding(intent.repository, binding.repository))
     throw new Error("Execution repository does not match Session.");
   const issue = executionIntentIssue(intent);
