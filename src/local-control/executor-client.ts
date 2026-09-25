@@ -2,6 +2,7 @@ import { request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
 import type { AuthorizedExecution, AuthorizedExecutionResult } from "../authorized-execution.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
+import type { ExecutorExecutionPort } from "../runtime-contracts/ports.js";
 import type { PeerCertificate } from "node:tls";
 import {
   LOCAL_EXECUTOR_EVIDENCE_PATH,
@@ -77,7 +78,11 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-export class LocalExecutorClient {
+/**
+ * Neutral client of the local Executor wire protocol. Admission reaches the
+ * Executor only through this client; it never loads Executor internals.
+ */
+export class LocalExecutorClient implements ExecutorExecutionPort {
   private readonly id: string;
   private readonly endpoint: URL;
   private readonly fetcher: typeof globalThis.fetch;
