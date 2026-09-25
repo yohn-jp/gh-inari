@@ -1,6 +1,7 @@
 /** The repository onboarding Golden Path. */
 
 import { createHash } from "node:crypto";
+import { lstatSync } from "node:fs";
 import path from "node:path";
 import { fetchEndpointOnboardingDescriptor } from "./endpoint-onboarding-client.js";
 import type { EndpointOnboardingDescriptor } from "./endpoint-onboarding.js";
@@ -23,15 +24,13 @@ import {
   generateAndPersistDelegatorKeyPair,
   loadDelegatorKeyPair,
 } from "./agent-authority/delegator-key.js";
-import {
-  createDelegatorRecord,
-  verifyDelegatorReadiness,
-  type DelegatorReadinessResult,
-} from "./agent-authority/delegator-operations.js";
-import { CAPABILITY_KINDS } from "./agent-authority/capability.js";
+import { verifyDelegatorReadiness, type DelegatorReadinessResult } from "./agent-authority/delegator-operations.js";
+import type { CapabilityKind } from "./agent-authority/capability.js";
+import { selectSetupAuthority, SetupTrustSelectionError } from "./authority/setup-trust.js";
 import { assertDelegator, DELEGATOR_ARTIFACT_DIRECTORY, type Delegator } from "./agent-authority/delegator.js";
 import { loadLocalDelegatorRepository, registerDelegator } from "./agent-authority/delegator-lifecycle.js";
 import { renderDelegatorArtifact } from "./agent-authority/delegator-trust.js";
+import { loadDelegatorTrust } from "./agent-authority/delegator-trust.js";
 import {
   LocalRuntimeProfileStore,
   resolveLocalRuntimeConfigHome,
@@ -61,6 +60,7 @@ export type RepositorySetupErrorCode =
   | "REPOSITORY_SETUP_AUTHORITY_MISMATCH"
   | "REPOSITORY_SETUP_AUTHORITY_FAILED"
   | "REPOSITORY_SETUP_TRUST_UNAVAILABLE"
+  | "REPOSITORY_SETUP_TRUST_CHANGE_REQUIRED"
   | "REPOSITORY_SETUP_PUBLICATION_FAILED";
 
 export class RepositorySetupError extends Error {
@@ -89,6 +89,7 @@ export interface RepositorySetupInput {
   readonly configHome?: string;
   readonly authorityId?: string;
   readonly privateKeyPath?: string;
+  readonly capabilityCeiling?: readonly CapabilityKind[];
   readonly json?: boolean;
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly endpointDescriptor?: EndpointOnboardingDescriptor;
@@ -138,6 +139,10 @@ export interface RepositorySetupResult {
     readonly artifactPath: string;
   };
   readonly publication?: RuntimeAuthorityPublicationResult;
+  readonly trust?: {
+    readonly status: "untrusted" | "pending-human-trust" | "unknown" | "trusted";
+    readonly nextAction?: "publish-trust" | "recheck-trust";
+  };
   readonly profilePath?: string;
   readonly readiness?: Pick<DelegatorReadinessResult, "ok" | "state" | "canonical" | "diagnostics">;
 }
@@ -402,6 +407,13 @@ async function setupWithCapability(
   const environment = input.environment ?? process.env;
   const profileStore = new LocalRuntimeProfileStore({ configHome: input.configHome, environment });
   const identity = { endpoint, repository };
+  try {
+    const selected = await profileStore.findForRepository(repository);
+    if (selected !== undefined && selected.endpoint !== endpoint)
+      throw new Error("A different Runtime profile is already selected for this repository.");
+  } catch {
+    throw new RepositorySetupError("REPOSITORY_SETUP_PROFILE_MISMATCH", "Runtime profile selection is ambiguous.");
+  }
   const existing = await profileStore.load(identity);
   if (
     existing !== undefined &&
@@ -451,14 +463,39 @@ async function setupWithCapability(
           `${createHash("sha256").update(`${endpoint}\u0000${repository.repositoryHost}\u0000${repository.repositoryId}`, "utf8").digest("hex")}.pem`,
         ))
       : path.resolve(input.root ?? process.cwd(), input.privateKeyPath);
+  let localAuthorities: readonly Delegator[];
+  try {
+    localAuthorities = loadLocalDelegatorRepository(path.resolve(input.root ?? process.cwd())).artifacts.map(
+      (artifact) => artifact.authority,
+    );
+  } catch {
+    throw new RepositorySetupError(
+      "REPOSITORY_SETUP_AUTHORITY_MISMATCH",
+      "Existing Runtime Authority material is invalid.",
+    );
+  }
   let keyPair;
+  let keyPathAbsent = false;
+  try {
+    lstatSync(keyPath);
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") keyPathAbsent = true;
+  }
+  if (keyPathAbsent && existing === undefined && localAuthorities.length === 0 && input.capabilityCeiling === undefined)
+    throw new RepositorySetupError(
+      "REPOSITORY_SETUP_TRUST_CHANGE_REQUIRED",
+      "Explicit capability intent is required before preparing a new Runtime Authority.",
+    );
   try {
     keyPair = loadDelegatorKeyPair(keyPath);
   } catch (error: unknown) {
     if (
       error instanceof Error &&
       "code" in error &&
-      (error.code === "RUNTIME_AUTHORITY_KEY_NOT_FOUND" || error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE")
+      (error.code === "RUNTIME_AUTHORITY_KEY_NOT_FOUND" ||
+        (error.code === "RUNTIME_AUTHORITY_KEY_UNSAFE_STORAGE" && keyPathAbsent)) &&
+      existing === undefined &&
+      localAuthorities.length === 0
     ) {
       try {
         keyPair = generateAndPersistDelegatorKeyPair(keyPath);
@@ -483,12 +520,38 @@ async function setupWithCapability(
       "Existing Runtime profile key does not match the local Runtime identity.",
     );
   }
-  const authority = createDelegatorRecord({
-    id: authorityId,
-    key: keyPair,
-    maxSessionTtlSeconds: input.maxSessionTtlSeconds ?? DEFAULT_SESSION_TTL_SECONDS,
-    capabilityCeiling: [...CAPABILITY_KINDS],
-  });
+  let authority: Delegator;
+  try {
+    const snapshot = await loadDelegatorTrust(createReadinessReader(capability, repository, context)).catch(
+      () => undefined,
+    );
+    authority = selectSetupAuthority({
+      repository,
+      ...(existing === undefined ? {} : { profile: existing }),
+      authorityId,
+      key: keyPair,
+      local: localAuthorities,
+      canonical: snapshot?.authorities.map((item) => item.authority),
+      maxSessionTtlSeconds: input.maxSessionTtlSeconds ?? DEFAULT_SESSION_TTL_SECONDS,
+      ...(input.capabilityCeiling === undefined ? {} : { capabilityIntent: input.capabilityCeiling }),
+    });
+  } catch (error) {
+    if (error instanceof SetupTrustSelectionError && error.code === "RECORD_UNAVAILABLE")
+      throw new RepositorySetupError(
+        "REPOSITORY_SETUP_TRUST_UNAVAILABLE",
+        "Registered Runtime Authority record is unavailable; resolve trust before retrying.",
+      );
+    if (error instanceof SetupTrustSelectionError && error.code !== "IDENTITY_CONFLICT")
+      throw new RepositorySetupError(
+        "REPOSITORY_SETUP_TRUST_CHANGE_REQUIRED",
+        "Selected capabilities require an explicit Runtime Authority trust change.",
+        { reason: error.code },
+      );
+    throw new RepositorySetupError(
+      "REPOSITORY_SETUP_AUTHORITY_MISMATCH",
+      "Existing Runtime Authority material conflicts with the selected signer.",
+    );
+  }
   const artifactPath = renderDelegatorArtifact(authority).path;
   const pendingProfile: LocalRuntimeProfile = {
     version: 1,
@@ -514,8 +577,15 @@ async function setupWithCapability(
     );
   }
   if (!readiness.ok) {
+    if (readiness.state !== "unknown-authority" && readiness.state !== "canonical-trust-unavailable") {
+      throw new RepositorySetupError(
+        "REPOSITORY_SETUP_AUTHORITY_MISMATCH",
+        "Canonical Runtime Authority trust conflicts with the selected signer or intent.",
+        { state: readiness.state },
+      );
+    }
     let publication: RuntimeAuthorityPublicationResult | undefined;
-    if (authorityPublisher !== undefined) {
+    if (authorityPublisher !== undefined && readiness.state === "unknown-authority") {
       try {
         publication = await authorityPublisher({
           capability,
@@ -543,7 +613,35 @@ async function setupWithCapability(
       profilePath,
       readiness: { ok: false, state: readiness.state, diagnostics: readiness.diagnostics },
       ...(publication === undefined ? {} : { publication }),
+      trust:
+        publication !== undefined
+          ? { status: "pending-human-trust", nextAction: "recheck-trust" }
+          : readiness.state === "canonical-trust-unavailable"
+            ? { status: "unknown", nextAction: "recheck-trust" }
+            : { status: "untrusted", nextAction: "publish-trust" },
     };
+  }
+  try {
+    const protectedSnapshot = await loadDelegatorTrust(createReadinessReader(capability, repository, context));
+    selectSetupAuthority({
+      repository,
+      profile: pendingProfile,
+      authorityId,
+      key: keyPair,
+      local: [materializedAuthority],
+      canonical: protectedSnapshot.authorities.map((item) => item.authority),
+      capabilityIntent: materializedAuthority.capabilityCeiling,
+      maxSessionTtlSeconds: materializedAuthority.maxSessionTtlSeconds,
+    });
+    if (!protectedSnapshot.authorities.some((item) => item.authority.id === authorityId))
+      throw new SetupTrustSelectionError("RECORD_UNAVAILABLE");
+  } catch (error) {
+    if (error instanceof SetupTrustSelectionError)
+      throw new RepositorySetupError(
+        "REPOSITORY_SETUP_AUTHORITY_MISMATCH",
+        "Protected-ref Runtime Authority differs from the local signer or capability intent.",
+      );
+    throw new RepositorySetupError("REPOSITORY_SETUP_TRUST_UNAVAILABLE", "Protected-ref trust recheck is unavailable.");
   }
   const readyProfile = await profileStore.save({ ...pendingProfile, state: "ready" });
   return {
@@ -558,6 +656,7 @@ async function setupWithCapability(
     authority: { authorityId, publicKeyFingerprint: fingerprint, privateKeyPath: keyPath, artifactPath },
     profilePath: readyProfile,
     readiness: { ok: true, state: readiness.state, canonical: readiness.canonical, diagnostics: readiness.diagnostics },
+    trust: { status: "trusted" },
   };
 }
 

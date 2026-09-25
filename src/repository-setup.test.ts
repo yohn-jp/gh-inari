@@ -125,6 +125,7 @@ test("setup publishes only the public trust record and reports trust-pending unt
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
       authorityPublisher: async (options) => {
         assert.equal(options.repository.repositoryNameWithOwner, "acme/inari");
         assert.deepEqual(Object.keys(options.authority).sort(), [
@@ -138,6 +139,7 @@ test("setup publishes only the public trust record and reports trust-pending unt
           "status",
           "version",
         ]);
+        assert.deepEqual(options.authority.capabilityCeiling, ["change.implement"]);
         assert.doesNotMatch(JSON.stringify(options), /unrelated-worktree-secret|\.mcp\.json|privateKeyPath/u);
         return {
           status: "created",
@@ -149,6 +151,7 @@ test("setup publishes only the public trust record and reports trust-pending unt
     });
     assert.equal(result.state, "trust-pending");
     assert.equal(result.publication?.pullRequest.number, 17);
+    assert.deepEqual(result.trust, { status: "pending-human-trust", nextAction: "recheck-trust" });
     assert.equal(result.readiness?.ok, false);
     assert.equal(result.readiness?.state, "unknown-authority");
     const profile = JSON.parse(await readFile(result.profilePath as string, "utf8")) as { state: string };
@@ -203,6 +206,7 @@ test("setup fails closed on Endpoint profile drift without rotating or overwriti
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
     });
     assert.equal(first.state, "trust-pending");
     const profilePath = first.profilePath as string;
@@ -278,6 +282,7 @@ test("setup fails closed on mismatched local authority state without changing th
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
     });
     assert.equal(first.state, "trust-pending");
     const profilePath = first.profilePath as string;
@@ -476,6 +481,7 @@ test("fresh setup reaches ready from canonical trust and reruns idempotently", a
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
     });
     const second = await setupRepository({
       root,
@@ -487,7 +493,22 @@ test("fresh setup reaches ready from canonical trust and reruns idempotently", a
     });
     assert.equal(first.state, "ready");
     assert.equal(second.state, "ready");
+    assert.deepEqual(second.trust, { status: "trusted" });
     assert.equal(first.authority?.authorityId, second.authority?.authorityId);
+    await assert.rejects(
+      () =>
+        setupRepository({
+          root,
+          configHome,
+          repository: "acme/inari",
+          endpoint: "https://endpoint.example.test",
+          endpointDescriptor: descriptor,
+          appUserBroker: broker,
+          capabilityCeiling: ["change.ready"],
+        }),
+      (error: unknown) =>
+        error instanceof RepositorySetupError && error.code === "REPOSITORY_SETUP_TRUST_CHANGE_REQUIRED",
+    );
     assert.equal(
       (await readdir(path.join(root, DELEGATOR_ARTIFACT_DIRECTORY))).filter((name) => name.endsWith(".json")).length,
       1,
