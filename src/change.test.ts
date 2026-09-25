@@ -34,10 +34,12 @@ import {
   validateChangeIdentity,
   validateChangeTransitionPlan,
   validateChangeTransitionRequest,
+  projectChangeFromGitHubEvidence,
   type Change,
   type ChangeEffect,
 } from "./change.js";
 import { GITHUB_PULL_REQUEST_PROJECTION_CAPABILITIES, planSemanticPullRequest } from "./semantic-pr-projection.js";
+import { createRepositoryBranchPolicy, resolveImplementationBranch } from "./repository-branch-policy.js";
 
 const canonicalBranchCommitSha = "0123456789abcdef0123456789abcdef01234567";
 
@@ -649,4 +651,79 @@ test("effect success evidence binds every knowable field exactly", () => {
   );
   assert.equal(mismatchedBranchResult.valid, false);
   assert.ok(mismatchedBranchResult.diagnostics.some((diagnostic) => diagnostic.code === "CHANGE_INVALID_PLAN"));
+});
+
+function alternativeBranchEvidence(
+  overrides: { readonly implementation?: number; readonly repositoryId?: string } = {},
+) {
+  const acquisition = createRepositoryBranchPolicy({
+    generation: {
+      authority: "repository-default-branch",
+      repository: {
+        host: "github.com",
+        repositoryId: overrides.repositoryId ?? "100000210",
+        owner: "acme",
+        name: "inari",
+        nameWithOwner: "acme/inari",
+      },
+      ref: "trunk",
+      treeSha: "a".repeat(40),
+    },
+    rule: { pattern: "^story/[0-9]+-[a-z0-9-]+$", format: "story/{issueNumber}-{slug}" },
+  });
+  assert.equal(acquisition.status, "available");
+  if (acquisition.status !== "available") throw new Error("policy unavailable");
+  const decision = resolveImplementationBranch({
+    policy: acquisition.policy,
+    target: {
+      repository: { repositoryHost: "github.com", repositoryId: overrides.repositoryId ?? "100000210" },
+      implementation: overrides.implementation ?? 210,
+    },
+    naming: { slug: "alternative-policy" },
+  });
+  assert.equal(decision.status, "bound");
+  if (decision.status !== "bound") throw new Error("branch unbound");
+  return decision.evidence;
+}
+
+function evidenceProjection(branchEvidence: unknown, extra: Record<string, unknown> = {}) {
+  return projectChangeFromGitHubEvidence({
+    change: validChange.identity,
+    branchEvidence,
+    baseBranch: "trunk",
+    evidence: {
+      issue: { status: "available", value: { number: 210, state: "open" } },
+      branches: { status: "absent" },
+      pullRequests: { status: "absent" },
+    },
+    ...extra,
+  });
+}
+
+test("Implementation-native projection consumes exact repository branch evidence and its non-main default", () => {
+  const result = evidenceProjection(alternativeBranchEvidence());
+  assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.canonicalBranch, "story/210-alternative-policy");
+  assert.equal(result.canonicalBaseBranch, "trunk");
+  assert.equal(result.status, "absent");
+});
+
+test("repository branch evidence for another repository, Implementation, off-policy branch or default generation fails closed", () => {
+  const evidence = alternativeBranchEvidence();
+  const cases: Array<[string, unknown, Record<string, unknown>]> = [
+    ["repository", alternativeBranchEvidence({ repositoryId: "999" }), {}],
+    ["implementation", alternativeBranchEvidence({ implementation: 211 }), {}],
+    ["off-policy branch", { ...evidence, branch: "feat/210-other" }, {}],
+    ["reserved branch", { ...evidence, branch: "issue/210-other" }, {}],
+    ["generation", { ...evidence, generation: { ...evidence.generation, ref: "develop" } }, {}],
+    ["default", { ...evidence, defaultBranch: "main" }, {}],
+    ["base", evidence, { baseBranch: "main" }],
+    ["legacy naming", evidence, { naming: { type: "feat", slug: "x" } }],
+  ];
+  for (const [label, candidate, extra] of cases) {
+    const result = evidenceProjection(candidate, extra);
+    assert.equal(result.valid, false, label);
+    if (label !== "base") assert.equal(result.canonicalBranch, undefined, label);
+    assert.ok(result.diagnostics.length > 0, label);
+  }
 });

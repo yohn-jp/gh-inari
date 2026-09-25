@@ -1,6 +1,6 @@
 /** The bounded, credentialless branch-advance execution authority (#466). */
 import { createHash } from "node:crypto";
-import { validateBranchName } from "../branch-naming.js";
+import { validateBranchSpelling } from "../branch-naming.js";
 import { MAX_SESSION_REQUEST_BYTES, canonicalizeSemanticRequest } from "./session-request.js";
 import { classifyDelegatedTreeDelta } from "./protected-paths.js";
 import { MAX_ISSUE_NUMBER } from "./capability.js";
@@ -219,8 +219,10 @@ export function validateBranchAdvanceSemanticRequest(input: unknown): BranchAdva
     (input.issue as number) > MAX_ISSUE_NUMBER
   )
     d.push(diag("$.issue", "Issue must be a positive bounded integer."));
-  if (!text(input.branch, 255) || input.branch === "main" || validateBranchName(input.branch).length !== 0)
-    d.push(diag("$.branch", "Branch must be a canonical non-default branch name."));
+  // Exact authorized target: repository-neutral safe spelling only. Ordinary
+  // naming is decided by repository policy and bound through Admission.
+  if (!text(input.branch, 255) || validateBranchSpelling(input.branch).length !== 0)
+    d.push(diag("$.branch", "Branch must be a safe branch name."));
   if (!text(input.expectedHead, 40) || !SHA.test(input.expectedHead))
     d.push(diag("$.expectedHead", "Expected head must be a lowercase commit SHA."));
   if (!record(input.commit)) d.push(diag("$.commit", "Commit metadata is required."));
@@ -585,7 +587,15 @@ export function authorizeBranchAdvance(options: BranchAdvanceAuthorizationOption
   ) {
     return { valid: false, failure: fail(request, "authorization", "The request is not admitted for this Issue.") };
   }
-  if (request.branch === context.authority.ref || request.branch === "main") {
+  // Default/protected-branch denial is bound to the authoritative default
+  // branch (the Runtime Authority policy ref) and the Implementation base,
+  // never to a fixed naming convention or a universal branch literal.
+  const defaultBranch = context.authority.ref.replace(/^refs\/heads\//u, "");
+  if (
+    request.branch === defaultBranch ||
+    request.branch === context.implementationBinding?.base.branch ||
+    request.branch === context.implementationScope?.base.branch
+  ) {
     return { valid: false, failure: fail(request, "branch-state", "Default-branch writes are forbidden.") };
   }
   const admission = options.admission;
