@@ -6,6 +6,8 @@
  * authors to maintain.
  */
 
+import { validateBranchFormatRule } from "../branch-naming.js";
+
 export const CANONICAL_IR_VERSION = "1.0.0" as const;
 export const CONTRACT_SCHEMA_VERSION = "1.0.0" as const;
 export const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema" as const;
@@ -63,6 +65,10 @@ export interface ContractProvenanceSource {
  */
 export interface PullRequestBranchGovernance {
   readonly pattern: string;
+  /** Optional bounded declarative formatter (additive; absent in historical records). */
+  readonly format?: string;
+  /** Closed `{type}` vocabulary for `format` (additive; absent in historical records). */
+  readonly types?: readonly string[];
 }
 
 export interface ContractProvenance {
@@ -598,7 +604,10 @@ function validateBranchGovernance(value: unknown, path: string, violations: Cano
     addViolation(violations, "IR_INVALID_PROVENANCE", path, "Branch governance must be an object.");
     return;
   }
-  checkUnknownKeys(value, ["pattern"], path, violations);
+  checkUnknownKeys(value, ["pattern", "format", "types"], path, violations);
+  for (const violation of validateBranchFormatRule({ format: value.format, types: value.types })) {
+    addViolation(violations, "IR_INVALID_PROVENANCE", `${path}.${violation.path}`, violation.message);
+  }
   const pattern = requiredString(value, "pattern", path, violations);
   if (pattern !== undefined) {
     try {

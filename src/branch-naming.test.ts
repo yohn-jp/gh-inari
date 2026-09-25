@@ -3,7 +3,13 @@ import { test } from "node:test";
 import {
   BRANCH_TYPES,
   DEFAULT_BRANCH_NAME,
+  LEGACY_CHANGE_BRANCH_RULE,
   MAX_BRANCH_TITLE_LENGTH,
+  matchBranchFormat,
+  normalizeBranchSlug,
+  renderBranchFormat,
+  validateBranchFormatRule,
+  validateBranchSpelling,
   branchBelongsToRootIssue,
   deriveBranchName,
   deriveBranchNamingFromIssueTitle,
@@ -77,4 +83,57 @@ test("Core branch naming rejects unsupported grammar and unsafe title inputs", (
   assert.throws(() => deriveBranchNamingFromIssueTitle("x".repeat(MAX_BRANCH_TITLE_LENGTH + 1)));
   assert.throws(() => deriveBranchName({ type: "feat", issueNumber: 0, slug: "invalid-issue" }));
   assert.throws(() => deriveBranchName({ type: "feat", issueNumber: 42, slug: "UPPERCASE" }));
+});
+
+test("the legacy compatibility rule renders and matches exactly the historical golden vectors", () => {
+  assert.deepEqual(validateBranchFormatRule(LEGACY_CHANGE_BRANCH_RULE), []);
+  const pattern = new RegExp(LEGACY_CHANGE_BRANCH_RULE.pattern, "u");
+  for (const vector of GOLDEN_VECTORS) {
+    const naming = deriveBranchNamingFromIssueTitle(vector.title);
+    const legacy = deriveBranchName({ ...naming, issueNumber: vector.issueNumber });
+    assert.equal(renderBranchFormat(LEGACY_CHANGE_BRANCH_RULE, { ...naming, issueNumber: vector.issueNumber }), legacy);
+    assert.deepEqual(matchBranchFormat(LEGACY_CHANGE_BRANCH_RULE, legacy, vector.issueNumber), naming);
+    assert.equal(matchBranchFormat(LEGACY_CHANGE_BRANCH_RULE, legacy, vector.issueNumber + 1), undefined);
+    assert.equal(pattern.test(legacy), true);
+  }
+  assert.equal(normalizeBranchSlug("  Café -- Déjà vu! "), "cafe-deja-vu");
+});
+
+test("declarative branch formatter grammar is bounded and never uses a pattern", () => {
+  const rule = { format: "users/{issueNumber}.{slug}" };
+  assert.equal(renderBranchFormat(rule, { issueNumber: 9, slug: "tidy-up" }), "users/9.tidy-up");
+  assert.deepEqual(matchBranchFormat(rule, "users/9.tidy-up", 9), { slug: "tidy-up" });
+  assert.equal(matchBranchFormat(rule, "users/9Xtidy-up", 9), undefined);
+  assert.equal(renderBranchFormat({ format: "impl-{issueNumber}" }, { issueNumber: 3 }), "impl-3");
+
+  for (const [candidate, path] of [
+    [{ format: "" }, "format"],
+    [{ format: "no-number" }, "format"],
+    [{ format: "{issueNumber}-{issueNumber}" }, "format"],
+    [{ format: "{issueNumber}-{title}" }, "format"],
+    [{ format: "a b/{issueNumber}" }, "format"],
+    [{ format: "{type}/{issueNumber}" }, "types"],
+    [{ format: "x/{issueNumber}", types: ["feat"] }, "types"],
+    [{ format: "{type}/{issueNumber}", types: [] }, "types"],
+    [{ format: "{type}/{issueNumber}", types: ["Feat"] }, "types"],
+    [{ format: "{type}/{issueNumber}", types: ["a", "a"] }, "types"],
+    [{ types: ["a"] }, "types"],
+  ] as const) {
+    const violations = validateBranchFormatRule(candidate);
+    assert.notDeepEqual(violations, [], JSON.stringify(candidate));
+    assert.equal(violations[0]?.path, path, JSON.stringify(candidate));
+  }
+
+  assert.throws(() => renderBranchFormat({ format: "u/{issueNumber}-{slug}" }, { issueNumber: 1 }));
+  assert.throws(() => renderBranchFormat({ format: "u/{issueNumber}-{slug}" }, { issueNumber: 1, slug: "a--b" }));
+  assert.throws(() => renderBranchFormat({ format: "u/{issueNumber}" }, { issueNumber: 0 }));
+  assert.throws(() =>
+    renderBranchFormat({ format: "{type}/{issueNumber}", types: ["a"] }, { issueNumber: 1, type: "b" }),
+  );
+  assert.throws(() => renderBranchFormat({ format: "u/{issueNumber}.lock" }, { issueNumber: 1 }));
+
+  for (const branch of ["", "a//b", "/a", "a/", "a/.b", "-a", "a..b", "a b", "a.lock", "x".repeat(256)]) {
+    assert.notDeepEqual(validateBranchSpelling(branch), [], branch);
+  }
+  assert.deepEqual(validateBranchSpelling("team/storage_rewrite-2.0"), []);
 });

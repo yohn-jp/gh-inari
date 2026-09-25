@@ -7,6 +7,7 @@ import {
   type SupplementalFieldConstraint,
 } from "./contract/ir.js";
 import type { TemplateIdentity } from "./template-discovery.js";
+import { validateBranchFormatRule } from "./branch-naming.js";
 
 export const PULL_REQUEST_POLICY_VERSION = 1 as const;
 
@@ -53,6 +54,14 @@ export interface PullRequestPolicyOverlay {
 
 export interface PullRequestPolicyBranchRule {
   readonly pattern: string;
+  /**
+   * Optional bounded declarative formatter used to derive an ordinary Change
+   * branch name. Without it, the rule only validates supplied names; the
+   * pattern is never inverted into a generated name.
+   */
+  readonly format?: string;
+  /** Closed `{type}` vocabulary for {@link format}. */
+  readonly types?: readonly string[];
 }
 
 export interface PullRequestPolicyTemplateSelector {
@@ -234,7 +243,7 @@ export function parsePullRequestPolicyOverlay(source: string): PullRequestPolicy
 
 function parseBranchRule(value: unknown, path: string): PullRequestPolicyBranchRule {
   if (!isRecord(value)) throw new PullRequestPolicyError("PR_POLICY_INVALID_VALUE", "branch must be an object.", path);
-  assertKeys(value, ["pattern"], path);
+  assertKeys(value, ["pattern", "format", "types"], path);
   const pattern = optionalString(value, "pattern", path);
   if (pattern === undefined || pattern.trim().length === 0) {
     throw new PullRequestPolicyError(
@@ -244,7 +253,21 @@ function parseBranchRule(value: unknown, path: string): PullRequestPolicyBranchR
     );
   }
   validatePatternSafety(pattern, `${path}.pattern`);
-  return { pattern };
+  const format = optionalString(value, "format", path);
+  const types = value.types;
+  const violation = validateBranchFormatRule({ format, types })[0];
+  if (violation !== undefined) {
+    throw new PullRequestPolicyError(
+      "PR_POLICY_INVALID_VALUE",
+      `branch.${violation.path}: ${violation.message}`,
+      `${path}.${violation.path}`,
+    );
+  }
+  return {
+    pattern,
+    ...(format === undefined ? {} : { format }),
+    ...(types === undefined ? {} : { types: Object.freeze([...(types as readonly string[])]) }),
+  };
 }
 
 function parseTemplateEntry(value: unknown, path: string): PullRequestPolicyTemplateEntry {
