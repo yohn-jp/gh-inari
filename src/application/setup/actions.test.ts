@@ -247,6 +247,71 @@ test("secrets cross only the owner enrollment port and never reach state, reques
   assert.equal(bare.journal.length, 0);
 });
 
+test("partial enrollment success requires reconciliation before retry", async () => {
+  const w = world({ configuration: "unconfigured" });
+  let enrollments = 0;
+  const executorEnrollment: SecretEnrollmentPort = {
+    owner: "executor",
+    kinds: ["executor-issuer-private-key"],
+    async enroll(enrollment, secret) {
+      for await (const _chunk of secret) {
+        // Consume the bounded secret stream.
+      }
+      enrollments += 1;
+      return {
+        version: 1,
+        kind: enrollment.kind,
+        operationId: enrollment.operationId,
+        repository: enrollment.repository,
+        outcome: "enrolled",
+        publicFingerprint: `sha256:${"b".repeat(64)}`,
+        diagnostics: [],
+      };
+    },
+  };
+  w.setBehavior(async (item) => ({
+    version: 1,
+    actionId: item.actionId,
+    generation: item.generation,
+    outcome: "failed",
+    diagnostics: [{ code: "OWNER_FAILED", message: "Configuration did not complete." }],
+  }));
+  const app = createSetupApplication(w.ports({ enrollment: [executorEnrollment] }));
+  const bytes = new TextEncoder().encode(PEM);
+  const perform = () =>
+    app.perform(repository, request(CONFIGURE, { inputs: { "app-id": "123" } }), {
+      enrollments: {
+        "issuer-key": {
+          declaredBytes: bytes.byteLength,
+          stream: (async function* () {
+            yield bytes;
+          })(),
+        },
+      },
+    });
+
+  const result = await perform();
+  assert.equal(result.outcome, "unknown");
+  assert.equal(result.receipt?.publicFingerprint, `sha256:${"b".repeat(64)}`);
+  assert.equal(result.diagnostics.at(-1)?.code, "SETUP_PARTIAL_EFFECT_UNCONFIRMED");
+  assert.equal(w.journal.at(-1)?.outcome, "unknown");
+  assert.equal(enrollments, 1);
+
+  const beforeEvidence = await app.state(repository);
+  assert.deepEqual(beforeEvidence.nextAction, { kind: "refresh", step: "configuration", reason: "journal-newer" });
+  assert.equal((await perform()).outcome, "stale");
+  assert.equal(enrollments, 1);
+
+  w.tick(1000);
+  const reconcile = await app.state(repository);
+  assert.deepEqual(reconcile.nextAction, {
+    kind: "perform",
+    step: "configuration",
+    actionId: CONFIGURE,
+    reconcile: true,
+  });
+});
+
 test("an unobserved effect is recorded as unknown and reconciled by operation identity", async () => {
   const w = world({ repositoryTrust: "untrusted" });
   w.setBehavior(async () => {
