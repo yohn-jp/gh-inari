@@ -6,7 +6,12 @@
  * consistency evidence after the route has been selected.
  */
 
-import { DEFAULT_BRANCH_NAME, recognizeBranchName, validateBranchName } from "./branch-naming.js";
+import {
+  DEFAULT_BRANCH_NAME,
+  recognizeBranchName,
+  validateBranchName,
+  validateBranchSpelling,
+} from "./branch-naming.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 
 export const INTEGRATION_ROUTING_VERSION = 1 as const;
@@ -125,6 +130,9 @@ const INPUT_KEYS = new Set([
   "base",
   "expectedHead",
   "expectedBase",
+  // Present when an already-projected route is re-validated (for example an
+  // Admission-normalized publication request); it must equal the projection.
+  "pullRequest",
 ]);
 const RELATIONSHIP_KEYS = new Set(["implementationParent", "sourceIssueParent"]);
 const GRAPH_KEYS = new Set(["scope", "nodes"]);
@@ -206,13 +214,29 @@ function parseReference(
   return result.reference;
 }
 
+const RESERVED_INTEGRATION_NAMESPACE = /^(epic|issue)\//u;
+const RESERVED_RELEASE_NAMESPACE = /^release\//u;
+
+/**
+ * Reserved `epic/` and `issue/` integration branches keep their canonical
+ * grammar, and `release/` stays outside this routing model. Every other
+ * branch (ordinary Implementation heads and the provider-resolved default
+ * branch) is exact governed evidence and is checked only for
+ * repository-neutral safe spelling: repository policy, not this projector,
+ * owns ordinary naming.
+ */
 function parseBranch(value: unknown, path: string, diagnostics: IntegrationRoutingDiagnostic[]): string | undefined {
-  if (typeof value !== "string" || validateBranchName(value).length > 0) {
+  const valid =
+    typeof value === "string" &&
+    (RESERVED_INTEGRATION_NAMESPACE.test(value)
+      ? validateBranchName(value).length === 0
+      : !RESERVED_RELEASE_NAMESPACE.test(value) && validateBranchSpelling(value).length === 0);
+  if (!valid) {
     diagnostic(
       diagnostics,
       "INTEGRATION_ROUTING_BRANCH_INVALID",
       path,
-      "Branch does not use canonical branch grammar.",
+      "Branch is not a safe branch name or a canonical reserved integration branch.",
     );
     return undefined;
   }
@@ -225,9 +249,18 @@ function branchMatchesReference(
   reference: IssueReference | undefined,
 ): boolean {
   if (branch === undefined || reference === undefined) return false;
+  if (expectedType === "ordinary") {
+    // An ordinary Implementation head is the exact governed branch. It never
+    // occupies a reserved namespace. A name that the historical
+    // `<type>/<issue>-<slug>` convention recognizes must still name this
+    // Implementation (historical compatibility); other repository conventions
+    // are bound by exact Implementation branch evidence, not by spelling.
+    if (RESERVED_INTEGRATION_NAMESPACE.test(branch) || RESERVED_RELEASE_NAMESPACE.test(branch)) return false;
+    const historical = recognizeBranchName(branch);
+    return historical === undefined || historical.issueNumber === reference.number;
+  }
   const parts = recognizeBranchName(branch);
   if (parts === undefined || parts.issueNumber !== reference.number) return false;
-  if (expectedType === "ordinary") return parts.type !== "issue" && parts.type !== "epic";
   return parts.type === expectedType;
 }
 
@@ -665,6 +698,13 @@ export function tryProjectIntegrationRouting(input: unknown): IntegrationRouting
         "$.implementationBranch",
         "Implementation PR head must be an ordinary branch for the Implementation.",
       );
+    if (expectedHead !== undefined && (expectedHead === defaultBranch || expectedHead === expectedBase))
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_HEAD_MISMATCH",
+        "$.implementationBranch",
+        "Implementation PR head cannot be the default or base branch.",
+      );
     if (
       mode === "issue-integration" &&
       (expectedBase === undefined || !branchMatchesReference(expectedBase, "issue", sourceIssue))
@@ -755,6 +795,28 @@ export function tryProjectIntegrationRouting(input: unknown): IntegrationRouting
       "Observed PR head does not match the canonical route.",
     );
 
+  const projectedPullRequest = {
+    role,
+    ...(head === undefined ? {} : { head }),
+    base: base ?? expectedBase,
+  };
+  if (input.pullRequest !== undefined) {
+    const declared = input.pullRequest;
+    if (
+      !isRecord(declared) ||
+      Object.keys(declared).some((key) => !["role", "head", "base"].includes(key)) ||
+      declared.role !== projectedPullRequest.role ||
+      declared.head !== projectedPullRequest.head ||
+      declared.base !== projectedPullRequest.base
+    )
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_ROUTE_INVALID",
+        "$.pullRequest",
+        "Declared pull-request route does not match the canonical route.",
+      );
+  }
+
   if (diagnostics.length > 0 || expectedBase === undefined) return invalidResult(diagnostics);
   const projection: IntegrationRoutingProjection = freezeDeep({
     version: INTEGRATION_ROUTING_VERSION,
@@ -775,7 +837,7 @@ export function tryProjectIntegrationRouting(input: unknown): IntegrationRouting
     expectedBase,
     ...(head === undefined ? {} : { head }),
     base: base ?? expectedBase,
-    pullRequest: { role, ...(head === undefined ? {} : { head }), base: base ?? expectedBase },
+    pullRequest: { ...projectedPullRequest, base: base ?? expectedBase },
   });
   return { valid: true, projection, diagnostics: [] };
 }

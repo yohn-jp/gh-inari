@@ -8,7 +8,8 @@
  * lifecycle state, or replace any of those authorities.
  */
 
-import { recognizeBranchName, validateBranchName } from "./branch-naming.js";
+import { validateBranchSpelling } from "./branch-naming.js";
+import { RESERVED_BRANCH_NAMESPACES } from "./repository-branch-policy.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "./agent-authority/codec.js";
 import { changeIdentityKey, validateChange, type Change, type ChangeIdentity } from "./change.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
@@ -297,14 +298,21 @@ function sameReference(left: IssueReference, right: IssueReference): boolean {
   return issueReferenceKey(left) === issueReferenceKey(right);
 }
 
+/**
+ * Implementation-native branches are exact governed values. Only
+ * repository-neutral safe spelling is checked here; identity comes from
+ * semantic equality to the Implementation contract, authorization, routing,
+ * execution evidence, Session capability, and Change projection below.
+ */
 function validBranch(value: unknown): value is string {
-  return typeof value === "string" && validateBranchName(value).length === 0;
+  return typeof value === "string" && validateBranchSpelling(value).length === 0;
 }
 
+/** An ordinary Implementation branch never occupies a reserved integration/release namespace. */
 function validImplementationBranch(value: unknown): value is string {
   if (!validBranch(value)) return false;
-  const parts = recognizeBranchName(value);
-  return parts !== undefined && parts.type !== "issue" && parts.type !== "epic";
+  const namespace = value.split("/")[0];
+  return !RESERVED_BRANCH_NAMESPACES.some((reserved) => reserved === namespace);
 }
 
 function positiveNumber(value: unknown): value is number {
@@ -771,14 +779,21 @@ export function tryProjectImplementationChangeIdentity(input: unknown): Implemen
       diagnostics,
       "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_INVALID",
       "$.branch",
-      "Branch must use the canonical branch grammar.",
+      "Branch must be a safe ordinary branch name outside reserved namespaces.",
     );
   if (typeof input.baseBranch !== "string" || !validBranch(input.baseBranch))
     diagnostic(
       diagnostics,
       "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_INVALID",
       "$.baseBranch",
-      "Base branch must use the canonical branch grammar.",
+      "Base branch must be a safe branch name.",
+    );
+  if (typeof input.branch === "string" && input.branch === input.baseBranch)
+    diagnostic(
+      diagnostics,
+      "IMPLEMENTATION_CHANGE_IDENTITY_BRANCH_INVALID",
+      "$.branch",
+      "Implementation branch must differ from its base branch.",
     );
   if (contract !== undefined && input.baseBranch !== contract.execution.baseBranch)
     diagnostic(

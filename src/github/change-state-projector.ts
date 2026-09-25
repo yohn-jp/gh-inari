@@ -36,12 +36,14 @@ import {
   type ExistingArtifactCandidate,
 } from "../artifact.js";
 import {
+  acquireRepositoryBranchPolicy,
   compileLocalGovernedContract,
   compileRepositoryGovernedContract,
   resolveGovernedIssueEvidence,
   resolveRepositoryBranchGovernance,
   type RepositoryGovernanceSourceReader,
 } from "../governance.js";
+import { resolveImplementationBranch, type RepositoryBranchEvidence } from "../repository-branch-policy.js";
 import { discoverTemplatesFromPaths } from "../template-discovery.js";
 import { artifactContractProvenanceFromTemplate } from "../contract/ir.js";
 import { effectiveFieldConstraints } from "../contract/constraints.js";
@@ -197,22 +199,31 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
 
     const repository = await this.#reader.readRepository();
     const issue = await this.#reader.readIssue(request.issue);
+    // Implementation-native Changes consume the governed exact branch bound to
+    // the repository branch policy generation; the historical title-derived
+    // naming below applies only when no such evidence exists.
+    const branchEvidence = await this.readImplementationBranchEvidence(issue.body, repository.defaultBranch);
     let naming: CanonicalBranchNamingInput | undefined;
-    try {
-      naming = deriveNaming(issue.title);
-    } catch {
-      // A title can be edited after issuance. Existing branch evidence remains
-      // authoritative, while a completely unanchored title still fails closed.
+    let derivedBranch: string | undefined;
+    if (branchEvidence !== undefined) {
+      derivedBranch = branchEvidence.branch;
+    } else {
+      try {
+        naming = deriveNaming(issue.title);
+      } catch {
+        // A title can be edited after issuance. Existing branch evidence remains
+        // authoritative, while a completely unanchored title still fails closed.
+      }
+      const derivation =
+        naming === undefined
+          ? undefined
+          : deriveCanonicalBranchIdentity({
+              change: this.#options.identity,
+              branchGovernance: this.#options.branchGovernance,
+              naming,
+            });
+      derivedBranch = derivation?.valid === true ? derivation.branch : undefined;
     }
-    const derivation =
-      naming === undefined
-        ? undefined
-        : deriveCanonicalBranchIdentity({
-            change: this.#options.identity,
-            branchGovernance: this.#options.branchGovernance,
-            naming,
-          });
-    const derivedBranch = derivation?.valid === true ? derivation.branch : undefined;
 
     const branches = await this.readBranches(derivedBranch);
     const pullRequests = await this.readPullRequests(derivedBranch, repository.defaultBranch, branches);
@@ -221,11 +232,18 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
       ...pullRequests.filter((candidate) => candidate.rootIssue === request.issue).map((candidate) => candidate.head),
     ]);
     if (anchoredBranches.size > 1) throw new Error("Multiple canonical Change branches were observed.");
-    const canonicalBranch = anchoredBranches.size === 1 ? [...anchoredBranches][0] : derivedBranch;
-    if (naming === undefined && canonicalBranch !== undefined)
-      naming = recognizeBranchNamingForIssue(canonicalBranch, request.issue);
-    if (naming === undefined || canonicalBranch === undefined)
-      throw new Error("Canonical Change branch is unavailable.");
+    let canonicalBranch: string | undefined;
+    if (branchEvidence !== undefined) {
+      if (anchoredBranches.size === 1 && !anchoredBranches.has(branchEvidence.branch))
+        throw new Error("Observed Change branch contradicts the governed Implementation branch.");
+      canonicalBranch = branchEvidence.branch;
+    } else {
+      canonicalBranch = anchoredBranches.size === 1 ? [...anchoredBranches][0] : derivedBranch;
+      if (naming === undefined && canonicalBranch !== undefined)
+        naming = recognizeBranchNamingForIssue(canonicalBranch, request.issue);
+      if (naming === undefined) canonicalBranch = undefined;
+    }
+    if (canonicalBranch === undefined) throw new Error("Canonical Change branch is unavailable.");
 
     const governedIssue =
       request.operation === "issue" && (this.#options.cwd !== undefined || this.#options.remoteGovernance !== undefined)
@@ -257,8 +275,9 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
 
     return {
       change: this.#options.identity,
-      branchGovernance: this.#options.branchGovernance,
-      naming,
+      ...(branchEvidence !== undefined
+        ? { branchEvidence }
+        : { branchGovernance: this.#options.branchGovernance, naming }),
       baseBranch: repository.defaultBranch,
       evidence: {
         issue: { status: "available", value: { number: issue.number, state: issue.state } },
@@ -269,6 +288,44 @@ export class GitHubChangeStateProjector implements ChangeTrustedEvidenceReader {
       ...(readyEvidence === undefined ? {} : { readyEvidence }),
       ...(semanticPullRequestPlan === undefined ? {} : { semanticPullRequestPlan }),
     };
+  }
+
+  /**
+   * Acquire the repository branch policy through the existing governance
+   * reader and resolve an Implementation-native Change's exact governed branch.
+   * Returns undefined for a non-Implementation Issue, a reader without
+   * repository governance, or when no exact evidence can be established
+   * (historical interpretation). A denial or a generation whose default
+   * branch differs from the provider-resolved default fails closed.
+   */
+  private async readImplementationBranchEvidence(
+    body: string | null | undefined,
+    defaultBranch: string,
+  ): Promise<RepositoryBranchEvidence | undefined> {
+    const governance = this.#options.remoteGovernance;
+    if (governance === undefined || typeof body !== "string") return undefined;
+    const parsed = parseImplementationIssueBody(body);
+    if (!parsed.valid || parsed.contract === undefined) return undefined;
+    const { identity } = this.#options;
+    const repository = { repositoryHost: identity.repositoryHost, repositoryId: identity.repositoryId };
+    if (
+      parsed.contract.repository.repositoryHost !== repository.repositoryHost ||
+      parsed.contract.repository.repositoryId !== repository.repositoryId
+    )
+      throw new Error("Implementation contract repository does not match reader scope.");
+    const acquisition = await acquireRepositoryBranchPolicy(governance);
+    if (acquisition.status !== "available")
+      throw new Error(`Repository branch policy is unavailable: ${acquisition.code}.`);
+    if (acquisition.policy.defaultBranch !== defaultBranch)
+      throw new Error("Repository branch policy generation does not match the provider-resolved default branch.");
+    const branch = parsed.contract.execution.branch;
+    const decision = resolveImplementationBranch({
+      policy: acquisition.policy,
+      target: { repository, implementation: identity.rootIssue },
+      ...(branch === undefined ? {} : { binding: { repository, implementation: identity.rootIssue, branch } }),
+    });
+    if (decision.status === "denied") throw new Error(`Implementation branch is denied: ${decision.code}.`);
+    return decision.status === "bound" ? decision.evidence : undefined;
   }
 
   private async readBranches(derivedBranch: string | undefined): Promise<readonly ChangeBranchEvidence[]> {

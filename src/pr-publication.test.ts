@@ -120,6 +120,28 @@ test("wrong work identity and route refs fail before create", async () => {
   assert.equal(provider.calls.length, 0);
 });
 
+test("an alternative repository convention publishes its exact head to a non-main default base", async () => {
+  const provider = fakeProvider();
+  const route = {
+    version: 1,
+    kind: "integration-routing",
+    mode: "standalone",
+    role: "implementation",
+    implementation,
+    branches: { default: "trunk", implementation: "story/700-alternative-policy" },
+  };
+  const result = await publishPullRequest(request({ routing: route }), provider);
+  assert.equal(result.classification, "created", JSON.stringify(result.diagnostics));
+  const routing = result.routing as { expectedHead?: string; expectedBase?: string } | undefined;
+  assert.deepEqual([routing?.expectedHead, routing?.expectedBase], ["story/700-alternative-policy", "trunk"]);
+  for (const expectedHead of ["story/701-other", "trunk"]) {
+    const denied = fakeProvider();
+    const failed = await publishPullRequest(request({ routing: route, expectedHead }), denied);
+    assert.equal(failed.classification, "failed", expectedHead);
+    assert.equal(denied.calls.length, 0);
+  }
+});
+
 test("multiple and conflicting matches fail closed", async () => {
   const first: PrPublicationRecord = {
     number: 42,

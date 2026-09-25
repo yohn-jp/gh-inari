@@ -14,7 +14,7 @@ import {
 } from "./change-effect-adapter.js";
 import { MAX_CHANGE_BRANCH_LENGTH } from "../change.js";
 import type { AppInstallationScope } from "./effect-authorizer.js";
-import { validateBranchName } from "../branch-naming.js";
+import { validateBranchSpelling } from "../branch-naming.js";
 import { classifyRepositoryPath } from "../agent-authority/protected-paths.js";
 
 const GIT_DATA_WRITE_MODES = Object.freeze(["100644", "100755"] as const);
@@ -416,20 +416,19 @@ function validPath(value: unknown): value is string {
 }
 
 /**
- * Runtime Authority publication (#1066) is Issue-less, like `release/<semver>`:
- * it bootstraps a repository trust root, not an ordinary Change, so it does
- * not use the `<type>/<issue-number>-<slug>` canonical branch grammar this
- * capability otherwise enforces. This capability is the shared Git-data
- * primitive Runtime Authority publication reuses for its own bounded ref
- * read (see `../runtime-authority-publication-capability.js`'s own
- * `RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PATTERN`, duplicated here rather than
- * imported to avoid a module cycle; keep both in sync).
+ * Git data targets are exact, already-authorized branches. This transport
+ * facade validates only repository-neutral safe Git spelling: it is not a
+ * naming authority, so it neither re-imposes an ordinary Change convention nor
+ * needs a special case for Issue-less Runtime Authority publication branches
+ * (`inari/runtime-authority/<id>`), which keep their own exact pattern in
+ * `../runtime-authority-publication.js`. Default/protected-branch
+ * denial is enforced upstream against the authoritative default branch and
+ * exact authorization binding; the `main` literal stays refused here as a
+ * conservative transport guard.
  */
-const RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PATTERN = /^inari\/runtime-authority\/[0-9a-f]{16}$/u;
-
 function validBranch(value: unknown): value is string {
   if (!validText(value, MAX_CHANGE_BRANCH_LENGTH) || value === "main") return false;
-  return validateBranchName(value).length === 0 || RUNTIME_AUTHORITY_PUBLICATION_BRANCH_PATTERN.test(value);
+  return validateBranchSpelling(value).length === 0;
 }
 
 function assertBranch(value: unknown): asserts value is string {

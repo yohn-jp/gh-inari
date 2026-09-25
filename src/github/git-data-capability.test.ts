@@ -166,3 +166,37 @@ test("never includes a credential in the capability or fixed failure", async () 
     return true;
   });
 });
+
+test("accepts exact safe branch targets from any repository convention and refuses unsafe spelling", async () => {
+  const requests: string[] = [];
+  const graphql: unknown[] = [];
+  const alternative = "story/466-alternative-policy";
+  const data = capability({
+    async request(request) {
+      requests.push(request.path);
+      return { status: 200, body: { ref: `refs/heads/${alternative}`, object: { type: "commit", sha: head } } };
+    },
+    async requestGraphql(request) {
+      graphql.push(request);
+      return { status: 200, body: { data: { updateRefs: { clientMutationId: null } } } };
+    },
+  });
+  assert.deepEqual(await data.readRef(alternative), {
+    name: alternative,
+    ref: `refs/heads/${alternative}`,
+    sha: head,
+  });
+  assert.deepEqual(
+    await data.compareAndAdvanceRef({ branch: alternative, beforeOid: head, afterOid: commit, force: false }),
+    { status: "updated" },
+  );
+  for (const unsafe of ["main", "story/../466", "story/466.lock", "-story", "story 466"]) {
+    await assert.rejects(data.readRef(unsafe), GitDataCapabilityError);
+    await assert.rejects(
+      data.compareAndAdvanceRef({ branch: unsafe, beforeOid: head, afterOid: commit, force: false }),
+      GitDataCapabilityError,
+    );
+  }
+  assert.equal(requests.length, 1);
+  assert.equal(graphql.length, 1);
+});
