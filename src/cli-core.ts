@@ -190,8 +190,12 @@ import {
 import { setupRepository, type RepositorySetupInput } from "./repository-setup.js";
 import { bindLocalCliAdmissionRoute, ensureLocalCliTopology, localComponentPath } from "./local-control/config.js";
 import { setupLocalAuthority } from "./local-control/identity.js";
-import { setupLocalExecutor, startConfiguredLocalExecutor } from "./local-control/executor-server.js";
-import { setupLocalAdmission, startConfiguredLocalAdmission } from "./local-control/admission-server.js";
+import {
+  setupExecutorRole,
+  serveExecutorRole,
+  setupAdmissionRole,
+  serveAdmissionRole,
+} from "./composition/local-runtime-roles.js";
 import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
 import { renderLocalApplicationSetupFlow } from "./local-application-state-terminal.js";
 import { superviseLocalRuntime } from "./local-control/supervisor.js";
@@ -202,7 +206,7 @@ import {
   createSessionExecutionIntent,
   configuredLocalAdmissionTopology,
   requireConfiguredLocalAdmissionRoute,
-} from "./local-control/admission-client.js";
+} from "./cli/runtime/admission-client.js";
 import {
   closeLocalSession,
   readLocalSessionBinding,
@@ -1577,7 +1581,7 @@ async function runExecutorCommand(
   }
   const environment = dependencies.environment ?? process.env;
   if (command === "setup") {
-    const result = await setupLocalExecutor(environment);
+    const result = await setupExecutorRole(environment);
     const output = {
       ok: true,
       operation: "executor.setup",
@@ -1594,7 +1598,7 @@ async function runExecutorCommand(
     return 0;
   }
 
-  const started = await startConfiguredLocalExecutor(version, environment);
+  const started = await serveExecutorRole(version, environment);
   const server = started.server;
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : undefined;
@@ -1658,7 +1662,7 @@ async function runAdmissionCommand(
     if (typeof from !== "string")
       throw new CliError("INPUT_REQUIRED", "Use --from <runtime-authority.json>.", "--from");
     const authority = await readJsonValue(from === "-" ? from : path.resolve(root, from));
-    const result = setupLocalAdmission(authority, environment);
+    const result = await setupAdmissionRole(authority, environment);
     bindLocalCliAdmissionRoute({ id: result.config.id }, environment);
     const output = {
       ok: true,
@@ -1678,7 +1682,7 @@ async function runAdmissionCommand(
     return 0;
   }
 
-  const started = await startConfiguredLocalAdmission(version, environment);
+  const started = await serveAdmissionRole(version, environment);
   const server = started.server;
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : undefined;

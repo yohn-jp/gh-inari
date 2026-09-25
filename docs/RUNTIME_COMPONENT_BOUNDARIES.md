@@ -133,20 +133,15 @@ Some imports inside a role's closure cannot be proven safe. A non-literal dynami
 
 ## Historical migration ledger
 
-`HISTORICAL_MIGRATION_EDGES` lists the only tolerated violations: exact `from` → `to` module pairs that exist at the baseline. Each pair has a migration owner. The rules are:
+`HISTORICAL_MIGRATION_EDGES` is empty after #1109. The frozen baseline remains in `test/runtime-boundaries.test.mjs` to prevent reintroducing exceptions. The ledger rules remain:
 
 - An entry must contain exactly `from`, `to` and `owner`.
 - Both `from` and `to` must be exact `.ts` module paths. No wildcards, no directories.
 - The owner must be one of #1106, #1107, #1108 or #1109.
 - The entry must be in the frozen baseline in `test/runtime-boundaries.test.mjs`. A new or grown entry fails verification.
-- When a leaf removes the import, the entry is reported as retired. #1109 empties the ledger before Source #1095 integrates into the Epic.
+- A removed import is reported as retired until its ledger entry is removed. No entries remain.
 
-| Owner | From                                    | To                                                                                                                                                                                                                                           |
-| ----- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| #1106 | `src/local-control/executor-server.ts`  | `src/github/app-user-credential.ts`, `app-user-credential-broker.ts`, `app-user-credential-store.ts`, `gh-auth-credential.ts`, `user-credential.ts` (through the `src/github/index.ts` barrel)                                               |
-| #1108 | `src/local-control/admission-client.ts` | `src/local-control/admission-server.ts`, `src/local-control/session-store.ts`                                                                                                                                                                |
-| #1108 | `src/local-application-state.ts`        | `src/local-control/executor-server.ts`, `src/relay/local-runtime-config.ts`, `src/github/app-installation-credential-broker.ts`, `src/local-control/admission-server.ts`, `src/local-control/session-store.ts`                               |
-| #1109 | `src/local-control/console-server.ts`   | `src/local-control/executor-server.ts`, `src/relay/local-runtime-config.ts`, `src/github/app-installation-credential-broker.ts`, `src/local-control/admission-server.ts`, `src/local-control/session-store.ts` (through the state projector) |
+All 17 baseline exceptions (#1106: 5, #1108: 7, #1109: 5) are retired. The local role commands load only the selected private implementation through `src/composition/local-runtime-roles.ts`; ordinary CLI clients and the browser console use public ports and status projections.
 
 The baseline has no Admission (#1107) violation. #1107 must keep it that way.
 

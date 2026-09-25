@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   HISTORICAL_MIGRATION_EDGES,
   MIGRATION_EDGE_OWNERS,
+  buildModuleGraph,
   evaluateRuntimeBoundaries,
   validateMigrationLedger,
 } from "../scripts/check-runtime-boundaries.mjs";
@@ -75,15 +76,50 @@ const SECRET_MODULES = {
   "src/authorized-execution.ts": "export const AUTHORIZED = 1;\n",
 };
 
-test("the repository satisfies the boundary guard with only frozen, owner-bound exceptions", () => {
+test("the repository satisfies the boundary guard without migration exceptions", () => {
   const result = evaluateRuntimeBoundaries(repoRoot);
+  assert.deepEqual(HISTORICAL_MIGRATION_EDGES, []);
   assert.deepEqual(result.ledgerProblems, []);
+  assert.deepEqual(result.excused, []);
+  assert.deepEqual(result.retired, []);
   assert.deepEqual(pairs(result.violations), []);
   const baseline = new Set(FROZEN_BASELINE_LEDGER.map((entry) => `${entry.from} ${entry.to} ${entry.owner}`));
   for (const entry of HISTORICAL_MIGRATION_EDGES) {
     assert.ok(baseline.has(`${entry.from} ${entry.to} ${entry.owner}`), `${entry.from} -> ${entry.to} is not frozen`);
   }
   for (const finding of result.excused) assert.ok(MIGRATION_EDGE_OWNERS.includes(finding.owner));
+});
+
+test("ordinary CLI and browser imports do not load private Admission or Executor implementations", () => {
+  const { load } = buildModuleGraph(repoRoot);
+  const privateRole = (file) =>
+    file.startsWith("src/admission/") ||
+    file.startsWith("src/executor/") ||
+    [
+      "src/local-control/admission-server.ts",
+      "src/local-control/executor-server.ts",
+      "src/local-control/session-store.ts",
+    ].includes(file);
+  for (const entry of ["src/index.ts", "src/cli.ts", "src/cli-core.ts", "src/local-control/console-server.ts"]) {
+    const pending = [entry];
+    const visited = new Set(pending);
+    while (pending.length > 0) {
+      const file = pending.shift();
+      // Role implementations are selected only on demand at the composition boundary.
+      if (file.startsWith("src/composition/")) continue;
+      for (const reference of load(file).references) {
+        if (reference.kind !== "value" || reference.target.kind !== "internal") continue;
+        const target = reference.target.path;
+        assert.equal(privateRole(target), false, `${entry} loads ${target}`);
+        if (!visited.has(target)) {
+          visited.add(target);
+          pending.push(target);
+        }
+      }
+    }
+  }
+  const selector = fs.readFileSync(path.join(repoRoot, "src/composition/local-runtime-roles.ts"), "utf8");
+  assert.doesNotMatch(selector, /^\s*(?:import|export)\s+[^\n]*from\s+["'][^"']*(?:admission|executor)\//mu);
 });
 
 test("the command-line guard exits zero on the repository", () => {
@@ -235,6 +271,7 @@ test("frozen cross-role facade edges stop caller traversal at the historical bou
   ];
   const result = evaluateRuntimeBoundaries(root, { ledger, baseline: ledger });
   assert.deepEqual(pairs(result.violations), [
+    "admission-private src/local-application-state.ts -> src/admission/server.ts",
     "admission-private src/local-application-state.ts -> src/local-control/admission-server.ts",
   ]);
   assert.ok(
