@@ -13,7 +13,7 @@ import type { ChangePullRequestEvidence } from "../change.js";
 import type { GitHubOperationalPullRequestEvidence } from "./types.js";
 import { INARI_ISSUER_PRINCIPAL } from "../issuer-identity.js";
 import type { InariIssuerAppIdentity } from "./issuer-authority.js";
-import { GitHubAdapter, type GitHubArtifactTransport } from "./adapter.js";
+import { GitHubAdapterCore, type GitHubArtifactTransport } from "./adapter-core.js";
 import {
   tryObserveOperationalPullRequest,
   type OperationalPullRequestObservation,
@@ -364,7 +364,7 @@ export class GitHubRepositoryEvidenceReader {
   /** Read normalized provider evidence used by review-bound authorities. */
   async readOperationalPullRequestEvidence(number: number): Promise<GitHubOperationalPullRequestEvidence> {
     try {
-      const adapter = new GitHubAdapter({
+      const adapter = new GitHubAdapterCore({
         repository: `${this.#options.repository.owner}/${this.#options.repository.name}`,
         hostname: this.#options.repository.hostname,
         transport: this.#options.transport as unknown as GitHubArtifactTransport,

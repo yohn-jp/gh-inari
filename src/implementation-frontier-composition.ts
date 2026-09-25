@@ -34,12 +34,12 @@ import {
   type SemanticIssueLifecycleIssueProjection,
   type SemanticIssueLifecycleProjection,
 } from "./semantic-issue-lifecycle.js";
+import { GitHubAdapterCore as GitHubAdapter } from "./github/adapter-core.js";
+import { createGitHubChangeReadAdapter } from "./github/change-state-projector.js";
 import {
-  createGitHubChangeReadAdapter,
-  GitHubAdapter,
   GitHubIssueRelationObservationAdapter,
   type IssueBlockedByObservation,
-} from "./github/index.js";
+} from "./github/issue-relation-observation-adapter.js";
 import type {
   GitHubBranch,
   GitHubIssue,

@@ -115,29 +115,7 @@ export const MIGRATION_EDGE_OWNERS = Object.freeze(["#1106", "#1107", "#1108", "
  * one exact forbidden module it can load at baseline 569c2399. Entries are
  * removed by their owner leaf (#1109 clears the ledger); none may be added.
  */
-export const HISTORICAL_MIGRATION_EDGES = Object.freeze([
-  // #1106 D1: the Executor server loads App-user/user credential modules through the provider barrel.
-  edge("src/local-control/executor-server.ts", "src/github/app-user-credential.ts", "#1106"),
-  edge("src/local-control/executor-server.ts", "src/github/app-user-credential-broker.ts", "#1106"),
-  edge("src/local-control/executor-server.ts", "src/github/app-user-credential-store.ts", "#1106"),
-  edge("src/local-control/executor-server.ts", "src/github/gh-auth-credential.ts", "#1106"),
-  edge("src/local-control/executor-server.ts", "src/github/user-credential.ts", "#1106"),
-  // #1108 D3: the CLI Admission client imports the Admission server for protocol constants.
-  edge("src/local-control/admission-client.ts", "src/local-control/admission-server.ts", "#1108"),
-  edge("src/local-control/admission-client.ts", "src/local-control/session-store.ts", "#1108"),
-  // #1108 D3: the state projector imports Executor/Admission servers for status and health paths.
-  edge("src/local-application-state.ts", "src/github/app-installation-credential-broker.ts", "#1108"),
-  edge("src/local-application-state.ts", "src/local-control/admission-server.ts", "#1108"),
-  edge("src/local-application-state.ts", "src/local-control/executor-server.ts", "#1108"),
-  edge("src/local-application-state.ts", "src/local-control/session-store.ts", "#1108"),
-  edge("src/local-application-state.ts", "src/relay/local-runtime-config.ts", "#1108"),
-  // #1109 D4: the console server reaches private roles through the state projector.
-  edge("src/local-control/console-server.ts", "src/github/app-installation-credential-broker.ts", "#1109"),
-  edge("src/local-control/console-server.ts", "src/local-control/admission-server.ts", "#1109"),
-  edge("src/local-control/console-server.ts", "src/local-control/executor-server.ts", "#1109"),
-  edge("src/local-control/console-server.ts", "src/local-control/session-store.ts", "#1109"),
-  edge("src/local-control/console-server.ts", "src/relay/local-runtime-config.ts", "#1109"),
-]);
+export const HISTORICAL_MIGRATION_EDGES = Object.freeze([]);
 
 function edge(from, to, owner) {
   return Object.freeze({ from, to, owner });
