@@ -10,7 +10,7 @@
 import { validateCapabilityClaim, MAX_ISSUE_NUMBER, type CapabilityClaim } from "./capability.js";
 import type { CapabilityAdmissionSubject } from "./capability-admission.js";
 import { MAX_OPAQUE_ID_LENGTH, MAX_UNIX_TIME_SECONDS } from "./session-certificate.js";
-import { validateBranchName } from "../branch-naming.js";
+import { validateBranchSpelling } from "../branch-naming.js";
 import {
   MAX_SESSION_AGENT_METADATA_KEYS,
   MAX_SESSION_AGENT_METADATA_TEXT_LENGTH,
@@ -326,15 +326,15 @@ function validateSubject(
 
   if (kind === "branch") {
     const branchPresent = requireProperty(input, "branch", path, diagnostics);
-    const branchValid = branchPresent && isCanonicalBranch(input.branch, MAX_SUBJECT_BRANCH_LENGTH);
+    const branchValid = branchPresent && isSafeBranch(input.branch, MAX_SUBJECT_BRANCH_LENGTH);
     if (!branchValid) invalid(`${path}.branch`, diagnostics, "Admission subject branch is invalid.");
     return issueValid && branchValid;
   }
 
   const headPresent = requireProperty(input, "head", path, diagnostics);
   const basePresent = requireProperty(input, "base", path, diagnostics);
-  const headValid = headPresent && isCanonicalBranch(input.head, MAX_SUBJECT_HEAD_LENGTH);
-  const baseValid = basePresent && isCanonicalBranch(input.base, MAX_SUBJECT_BASE_LENGTH);
+  const headValid = headPresent && isSafeBranch(input.head, MAX_SUBJECT_HEAD_LENGTH);
+  const baseValid = basePresent && isSafeBranch(input.base, MAX_SUBJECT_BASE_LENGTH);
   if (!headValid) invalid(`${path}.head`, diagnostics, "Pull request head is invalid.");
   if (!baseValid) invalid(`${path}.base`, diagnostics, "Pull request base is invalid.");
   return issueValid && headValid && baseValid;
@@ -344,8 +344,14 @@ function isSafeIssue(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_ISSUE_NUMBER;
 }
 
-function isCanonicalBranch(value: unknown, maximum: number): value is string {
-  return isBoundedText(value, maximum) && validateBranchName(value).length === 0;
+/**
+ * Provenance records an already-authorized exact subject; it checks only
+ * repository-neutral safe branch spelling. Equality to the admitted subject
+ * and capability is enforced by the consumers, and ordinary naming belongs
+ * to the repository branch policy.
+ */
+function isSafeBranch(value: unknown, maximum: number): value is string {
+  return isBoundedText(value, maximum) && validateBranchSpelling(value).length === 0;
 }
 
 function validateCapability(

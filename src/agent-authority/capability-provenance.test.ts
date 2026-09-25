@@ -164,3 +164,32 @@ test("stage transitions require the exact evidence established at each boundary"
   assert.ok(normalizeCapabilityExecutionProvenance(ADMITTED));
   assert.ok(normalizeCapabilityExecutionProvenance(APP_SCOPED));
 });
+
+test("authorized branch and PR subjects accept repository-neutral safe exact branch spelling", () => {
+  const branch = createCapabilityExecutionProvenance({
+    ...BASE,
+    stage: "authorized",
+    request: { ...BASE.request, operation: "branch.advance" },
+    subject: { kind: "branch", issue: 42, branch: "story/42-alternative" },
+    capability: { kind: "branch.advance", branch: "story/42-alternative" },
+  });
+  assert.deepEqual(branch.subject, { kind: "branch", issue: 42, branch: "story/42-alternative" });
+  const pullRequest = validateCapabilityExecutionProvenance({
+    ...BASE,
+    stage: "authorized",
+    request: { ...BASE.request, operation: "pullRequest.publish" },
+    subject: { kind: "pullRequest", issue: 42, head: "story/42-alternative", base: "trunk" },
+    capability: { kind: "pullRequest.create", head: "story/42-alternative", base: "trunk", max: 1 },
+  });
+  assert.equal(pullRequest.valid, true, JSON.stringify(pullRequest.diagnostics));
+  for (const unsafe of ["story/../42", "story/42-x.lock", "", "story//42"]) {
+    const result = validateCapabilityExecutionProvenance({
+      ...BASE,
+      stage: "authorized",
+      subject: { kind: "branch", issue: 42, branch: unsafe },
+      capability: { kind: "branch.advance", branch: "story/42-alternative" },
+    });
+    assert.equal(result.valid, false, unsafe);
+    assert.ok(result.diagnostics.some((entry) => entry.path === "$.subject.branch"));
+  }
+});

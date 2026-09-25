@@ -12,6 +12,12 @@ import { resolveChangeLifecycleTransition } from "./change/machine/lifecycle-mac
 import { isTrustedInariIssuerPrincipal } from "./issuer-identity.js";
 import { validateSemanticBranchMutationPlan, type SemanticBranchMutationPlan } from "./semantic-branch-projection.js";
 import { changeProvenanceRecordPath } from "./change-provenance-record.js";
+import {
+  createRepositoryBranchPolicy,
+  evaluateRepositoryBranch,
+  type RepositoryBranchEvidence,
+} from "./repository-branch-policy.js";
+import { canonicalJsonString, type CanonicalJsonValue } from "./agent-authority/codec.js";
 
 import {
   renderIssueArtifact,
@@ -649,6 +655,13 @@ export interface ChangeProjectionInput {
    * inputs below are accepted only for compatibility when this plan is absent.
    */
   readonly branchPlan?: SemanticBranchMutationPlan;
+  /**
+   * Generation-bound repository branch evidence for an Implementation-native
+   * Change (`repository-branch-policy.ts`). When present, its exact branch is
+   * the canonical branch and the legacy naming/governance inputs must be
+   * absent; no name is derived from type/Issue/slug.
+   */
+  readonly branchEvidence?: RepositoryBranchEvidence;
   /** Existing repository branch policy consumed by #211's authority; absent when the repository declares no branch rule. */
   readonly branchGovernance?: PullRequestBranchGovernance;
   /** Existing governance-resolved branch naming parts consumed by #211 (legacy compatibility). */
@@ -1086,6 +1099,7 @@ const EFFECT_SUCCESS_EVIDENCE_KEYS = new Set([
 const CHANGE_PROJECTION_INPUT_KEYS = new Set([
   "change",
   "branchPlan",
+  "branchEvidence",
   "branchGovernance",
   "naming",
   "baseBranch",
@@ -1557,6 +1571,90 @@ function validateCanonicalBranchNaming(
     return undefined;
   }
   return { type: type as string, slug: slug as string };
+}
+
+/**
+ * Admit generation-bound repository branch evidence at the Change boundary by
+ * re-evaluating it through the canonical repository branch policy authority
+ * against this Change's repository and root Implementation. The evidence must
+ * be exactly what that authority produces; Change never formats a name here.
+ */
+function validateConsumedRepositoryBranchEvidence(
+  input: unknown,
+  identity: ChangeIdentity,
+  diagnostics: ChangeDiagnostic[],
+): RepositoryBranchEvidence | undefined {
+  const path = "$.branchEvidence";
+  const evidence = input as RepositoryBranchEvidence;
+  if (
+    !isRecord(input) ||
+    !isRecord(input.repository) ||
+    !isRecord(input.generation) ||
+    typeof input.branch !== "string" ||
+    typeof input.defaultBranch !== "string" ||
+    (input.source !== "exact-binding" && input.source !== "policy-format")
+  ) {
+    addDiagnostic(diagnostics, "CHANGE_INVALID_BRANCH_INPUT", path, "Repository branch evidence is malformed.");
+    return undefined;
+  }
+  const target = {
+    repository: { repositoryHost: identity.repositoryHost, repositoryId: identity.repositoryId },
+    implementation: identity.rootIssue,
+  };
+  const acquisition = createRepositoryBranchPolicy({
+    generation: {
+      authority: "repository-default-branch",
+      repository: {
+        host: String(evidence.repository.repositoryHost),
+        repositoryId: String(evidence.repository.repositoryId),
+        owner: "evidence",
+        name: "repository",
+        nameWithOwner: "evidence/repository",
+      },
+      ref: evidence.generation.ref,
+      treeSha: evidence.generation.treeSha,
+      ...(evidence.generation.policy === undefined ? {} : { policy: evidence.generation.policy }),
+    },
+    ...(evidence.rule === undefined ? {} : { rule: evidence.rule }),
+  });
+  const decision =
+    acquisition.status === "available" && acquisition.policy.defaultBranch === evidence.defaultBranch
+      ? evaluateRepositoryBranch({
+          policy: acquisition.policy,
+          target,
+          branch: evidence.branch,
+          ...(evidence.source === "exact-binding"
+            ? {
+                binding: {
+                  repository: evidence.repository,
+                  implementation: evidence.implementation,
+                  branch: evidence.branch,
+                },
+              }
+            : {}),
+        })
+      : undefined;
+  let exact = false;
+  try {
+    exact =
+      decision?.status === "bound" &&
+      canonicalJsonString(decision.evidence as unknown as CanonicalJsonValue) ===
+        canonicalJsonString(input as CanonicalJsonValue);
+  } catch {
+    exact = false;
+  }
+  if (!exact) {
+    addDiagnostic(
+      diagnostics,
+      "CHANGE_BRANCH_GOVERNANCE_MISMATCH",
+      path,
+      decision !== undefined && decision.status !== "bound"
+        ? `Repository branch evidence is not bound to this Change: ${decision.code}.`
+        : "Repository branch evidence is not the canonical policy evidence for this Change.",
+    );
+    return undefined;
+  }
+  return evidence;
 }
 
 /**
@@ -2379,9 +2477,47 @@ export function projectChangeFromGitHubEvidence(input: unknown): ChangeProjectio
     consumedBranchPlan = validateConsumedSemanticBranchPlan(input.branchPlan, diagnostics);
   }
 
+  const hasBranchEvidence = hasOwn(input, "branchEvidence");
+  let consumedBranchEvidence: RepositoryBranchEvidence | undefined;
+  if (hasBranchEvidence) {
+    if (hasBranchPlan || hasOwn(input, "naming") || hasOwn(input, "branchGovernance")) {
+      addDiagnostic(
+        diagnostics,
+        "CHANGE_INVALID_BRANCH_INPUT",
+        "$.branchEvidence",
+        "Repository branch evidence cannot be combined with a Branch plan or legacy naming inputs.",
+      );
+    } else if (identity !== undefined) {
+      consumedBranchEvidence = validateConsumedRepositoryBranchEvidence(input.branchEvidence, identity, diagnostics);
+    }
+  }
+
   let derivedCanonicalBranch: string | undefined;
   let canonicalBaseBranch: string | undefined;
-  if (consumedBranchPlan !== undefined) {
+  if (hasBranchEvidence) {
+    // Implementation-native path: the exact governed branch and the
+    // provider-resolved default branch from the policy generation are the
+    // only authority; no type/Issue/slug derivation is consulted.
+    derivedCanonicalBranch = consumedBranchEvidence?.branch;
+    if (!hasOwn(input, "baseBranch")) {
+      addDiagnostic(diagnostics, "CHANGE_MISSING_PROPERTY", "$.baseBranch", "Property is required.");
+    } else if (consumedBranchEvidence !== undefined) {
+      canonicalBaseBranch = projectionText(
+        input.baseBranch,
+        "$.baseBranch",
+        diagnostics,
+        "Canonical base branch",
+        MAX_CHANGE_BASE_BRANCH_LENGTH,
+      );
+      if (canonicalBaseBranch !== undefined && canonicalBaseBranch !== consumedBranchEvidence.defaultBranch)
+        addDiagnostic(
+          diagnostics,
+          "CHANGE_BRANCH_GOVERNANCE_MISMATCH",
+          "$.baseBranch",
+          "The supplied base branch is not the default branch of the repository branch policy generation.",
+        );
+    }
+  } else if (consumedBranchPlan !== undefined) {
     // The Branch plan is already a Core projection. It is the only source of
     // branch identity and source on this path; legacy naming/policy values are
     // deliberately not consulted.
@@ -2476,15 +2612,18 @@ export function projectChangeFromGitHubEvidence(input: unknown): ChangeProjectio
   for (const pullRequest of pullRequests) {
     if (pullRequest.rootIssue === identity.rootIssue) anchoredBranchNames.add(pullRequest.head);
   }
+  // A consumed Branch plan or repository branch evidence is Core authority:
+  // observed claims for a different branch are ambiguity, never a replacement.
+  const authoritativeBranch = consumedBranchPlan?.desired.name ?? consumedBranchEvidence?.branch;
   const canonicalBranch =
-    consumedBranchPlan !== undefined
-      ? consumedBranchPlan.desired.name
+    authoritativeBranch !== undefined
+      ? authoritativeBranch
       : anchoredBranchNames.size === 1
         ? [...anchoredBranchNames][0]
         : derivedCanonicalBranch;
   const hasAmbiguousAnchoredBranches =
     anchoredBranchNames.size > 1 ||
-    (consumedBranchPlan !== undefined && [...anchoredBranchNames].some((name) => name !== canonicalBranch));
+    (authoritativeBranch !== undefined && [...anchoredBranchNames].some((name) => name !== canonicalBranch));
   if (canonicalBranch === undefined) {
     return projectionEvidenceUnavailableResult(diagnostics, derivedCanonicalBranch, canonicalBaseBranch);
   }
