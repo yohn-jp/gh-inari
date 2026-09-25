@@ -25,7 +25,7 @@ import {
   type ExistingArtifactCandidate,
 } from "./artifact.js";
 import type { ArtifactContract } from "./contract/artifact-contract.js";
-import { GitHubAdapter } from "./github/adapter.js";
+import type { GitHubAdapter } from "./github/adapter.js";
 import { isGitHubAdapterError } from "./github/errors.js";
 import type {
   GitHubIssue,
