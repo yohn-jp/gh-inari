@@ -1448,6 +1448,29 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
       executions.some((entry) => entry.operation === "pullRequest.publish"),
       false,
     );
+
+    // A stale inherited Session selector must not make a non-Implementation
+    // contract depend on Local Admission. The direct route remains selectable
+    // and no Session-owned publication is attempted.
+    const staleSelected = { ...selected, INARI_SESSION_ID: "sess_stale-nonimplementation" };
+    directRoute = false;
+    const staleIntegration = await capture(
+      ["pr", "create", "--field", "summary=x", "--title", "t", "--head", "issue/1029-x", "--base", "main", "--json"],
+      staleSelected,
+      {
+        repositoryRoot,
+        createAdapter: (() => {
+          directRoute = true;
+          throw new Error("direct route selected");
+        }) as never,
+      },
+    );
+    assert.notEqual(staleIntegration.exitCode, 0);
+    assert.equal(directRoute, true);
+    assert.equal(
+      executions.some((entry) => entry.operation === "pullRequest.publish"),
+      false,
+    );
     contract = implementationContract;
   } finally {
     for (const server of [admissionServer, executorServer])

@@ -3748,11 +3748,20 @@ async function runArtifactCommand(
     // their existing direct contract. A missing Session never reroutes an
     // Implementation PR to the user path.
     const localTopology = domain === "pr" && configuredLocalAdmissionTopology(localEnvironment);
+    let localSessionFailure: unknown;
     if (localTopology && (localEnvironment.INARI_SESSION_ID ?? "").length > 0) {
-      const context = requireLocalAdmissionSessionContext(root, parsed, localEnvironment);
-      const owned = await readLocalPullRequestContext(parsed, rest[0], context);
-      if (implementationPullRequestContract(owned.contract))
-        return createPullRequestThroughLocalAdmission(parsed, owned, context);
+      try {
+        const context = requireLocalAdmissionSessionContext(root, parsed, localEnvironment);
+        const owned = await readLocalPullRequestContext(parsed, rest[0], context);
+        if (implementationPullRequestContract(owned.contract))
+          return createPullRequestThroughLocalAdmission(parsed, owned, context);
+      } catch (error: unknown) {
+        // Non-Implementation PRs keep their direct route even if an inherited
+        // Implementation Session selector is stale, closed, or otherwise
+        // unavailable. Preserve the failure and rethrow it only if the
+        // repository-governed contract below proves this is an Implementation PR.
+        localSessionFailure = error;
+      }
     }
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
     await adapter.resolveRepositoryContext();
@@ -3773,6 +3782,7 @@ async function runArtifactCommand(
       return 0;
     }
     if (localTopology && implementationPullRequestContract(contract)) {
+      if (localSessionFailure !== undefined) throw localSessionFailure;
       requireLocalAdmissionSessionContext(root, parsed, localEnvironment);
       throw new CliError(
         "ADMISSION_RESPONSE_INVALID",
