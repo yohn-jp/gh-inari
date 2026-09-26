@@ -12,6 +12,7 @@ import {
   LOCAL_EXECUTOR_EXECUTIONS_PATH,
   LOCAL_EXECUTOR_EVIDENCE_PATH,
   LOCAL_EXECUTOR_HEALTH_PATH,
+  LOCAL_EXECUTOR_OWNER_OBSERVATION_PATH,
 } from "./executor-http.js";
 import type { LocalExecutorConfig } from "./config.js";
 import { INARI_ISSUER_PRINCIPAL } from "../github/effect-authorizer.js";
@@ -224,4 +225,91 @@ test("Executor evidence endpoint is closed, bounded, read-only, and identifies t
   } finally {
     await closeServer(server);
   }
+});
+
+const OBSERVED_EXECUTOR = "exec_0123456789abcdef";
+const OBSERVATION = {
+  version: 1 as const,
+  executorId: OBSERVED_EXECUTOR,
+  apps: [
+    {
+      appId: "123",
+      generation: "generation-000000123",
+      fingerprint: `sha256:${"b".repeat(64)}`,
+      providerVerified: true,
+      source: "app-scoped" as const,
+    },
+  ],
+  bindings: [],
+};
+
+async function observationRoute(observeOwner?: () => Promise<unknown>) {
+  const { createLocalExecutorHttpHandler } = await import("./executor-http.js");
+  const handler = createLocalExecutorHttpHandler({
+    executorId: OBSERVED_EXECUTOR,
+    version: "observation-test",
+    execute: async () => {
+      throw new Error("execution is not part of observation");
+    },
+    ...(observeOwner === undefined ? {} : { observeOwner: observeOwner as () => Promise<typeof OBSERVATION> }),
+  });
+  return (method = "GET") =>
+    handler(new Request(`http://127.0.0.1${LOCAL_EXECUTOR_OWNER_OBSERVATION_PATH}`, { method }));
+}
+
+test("#1223 owner observation route returns only the validated observation of this Executor", async () => {
+  const request = await observationRoute(async () => OBSERVATION);
+  const response = await request();
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    component: "executor",
+    executorId: OBSERVED_EXECUTOR,
+    protocol: 1,
+    observation: OBSERVATION,
+  });
+  assert.equal((await request("POST")).status, 405);
+});
+
+test("#1223 owner observation fails closed when absent, failing, foreign or secret-bearing", async () => {
+  const unavailable = async (observeOwner?: () => Promise<unknown>) => {
+    const response = await (await observationRoute(observeOwner))();
+    assert.equal(response.status, 503);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "OWNER_OBSERVATION_UNAVAILABLE");
+    assert.equal(JSON.stringify(body).includes("PRIVATE KEY"), false);
+  };
+  await unavailable();
+  await unavailable(async () => {
+    throw new Error("/home/user/.config/inari/executor/apps/123/issuer-x.pem");
+  });
+  await unavailable(async () => ({ ...OBSERVATION, executorId: "exec_fedcba9876543210" }));
+  await unavailable(async () => ({ ...OBSERVATION, apps: [{ ...OBSERVATION.apps[0], file: "issuer-x.pem" }] }));
+  await unavailable(async () => ({ ...OBSERVATION, privateKey: "-----BEGIN PRIVATE KEY-----" }));
+});
+
+test("#1223 authenticated route authorization separates Admission execution from Control observation", async () => {
+  const {
+    localExecutorRouteAllows,
+    LOCAL_EXECUTOR_BRANCH_POLICY_PATH,
+    LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH,
+    LOCAL_EXECUTOR_REPOSITORY_PATH,
+  } = await import("./executor-http.js");
+  const admissionRoutes = [
+    LOCAL_EXECUTOR_EXECUTIONS_PATH,
+    LOCAL_EXECUTOR_EVIDENCE_PATH,
+    LOCAL_EXECUTOR_REPOSITORY_PATH,
+    LOCAL_EXECUTOR_BRANCH_POLICY_PATH,
+    LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH,
+  ];
+  for (const route of admissionRoutes) {
+    assert.equal(localExecutorRouteAllows("admission", route), true, route);
+    assert.equal(localExecutorRouteAllows("control", route), false, route);
+  }
+  assert.equal(localExecutorRouteAllows("control", LOCAL_EXECUTOR_OWNER_OBSERVATION_PATH), true);
+  assert.equal(localExecutorRouteAllows("admission", LOCAL_EXECUTOR_OWNER_OBSERVATION_PATH), false);
+  assert.equal(localExecutorRouteAllows("control", LOCAL_EXECUTOR_HEALTH_PATH), true);
+  assert.equal(localExecutorRouteAllows("admission", LOCAL_EXECUTOR_HEALTH_PATH), true);
+  assert.equal(localExecutorRouteAllows("control", "/status"), false);
 });

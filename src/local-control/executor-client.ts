@@ -87,6 +87,64 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 /**
+ * One request to an Executor over mutually authenticated TLS. The server must
+ * present the pinned Executor URI identity; the caller presents its own role
+ * identity. Shared by the Admission execution client and the Control
+ * observation client (#1223) so both use the one Executor transport.
+ */
+export function requestLocalExecutorOverMtls(
+  url: URL,
+  init: RequestInit | undefined,
+  transport: LocalMtlsIdentity,
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  const requestHeaders: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    requestHeaders[name] = value;
+  });
+  return new Promise<Response>((resolve, reject) => {
+    const request = httpsRequest(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method: init?.method ?? "GET",
+        headers: requestHeaders,
+        cert: transport.certificate,
+        key: transport.privateKey,
+        ca: transport.caCertificate,
+        rejectUnauthorized: true,
+        checkServerIdentity: (_hostname: string, peer: PeerCertificate) =>
+          verifyLocalMtlsPeerIdentity(peer, "executor", transport.peerId)
+            ? undefined
+            : new Error("Executor TLS identity does not match configuration."),
+      },
+      (incoming) => {
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(incoming.headers)) {
+          if (Array.isArray(value)) responseHeaders.set(name, value.join(", "));
+          else if (value !== undefined) responseHeaders.set(name, value);
+        }
+        resolve(
+          new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
+            status: incoming.statusCode ?? 502,
+            headers: responseHeaders,
+          }),
+        );
+      },
+    );
+    request.once("error", reject);
+    init?.signal?.addEventListener("abort", () => request.destroy(new Error("Executor request was aborted.")), {
+      once: true,
+    });
+    const body = init?.body;
+    if (typeof body === "string" || Buffer.isBuffer(body) || body instanceof Uint8Array) request.write(body);
+    request.end();
+  });
+}
+
+/**
  * Neutral client of the local Executor wire protocol. Admission reaches the
  * Executor only through this client; it never loads Executor internals.
  */
@@ -141,7 +199,7 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
       response =
         this.transport === undefined
           ? await this.fetcher(this.url(path), { ...init, redirect: "error" })
-          : await this.requestOverMtls(path, init, this.transport);
+          : await requestLocalExecutorOverMtls(new URL(path, this.endpoint), init, this.transport);
     } catch {
       throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Configured Executor endpoint is unavailable.");
     }
@@ -153,56 +211,6 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
       throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Executor refused the request.", failure);
     }
     return { response, body };
-  }
-
-  private requestOverMtls(
-    path: string,
-    init: RequestInit | undefined,
-    transport: LocalMtlsIdentity,
-  ): Promise<Response> {
-    const url = new URL(path, this.endpoint);
-    const headers = new Headers(init?.headers);
-    const requestHeaders: Record<string, string> = {};
-    headers.forEach((value, name) => {
-      requestHeaders[name] = value;
-    });
-    return new Promise<Response>((resolve, reject) => {
-      const request = httpsRequest(
-        {
-          protocol: url.protocol,
-          hostname: url.hostname,
-          port: url.port,
-          path: `${url.pathname}${url.search}`,
-          method: init?.method ?? "GET",
-          headers: requestHeaders,
-          cert: transport.certificate,
-          key: transport.privateKey,
-          ca: transport.caCertificate,
-          rejectUnauthorized: true,
-          checkServerIdentity: (_hostname: string, peer: PeerCertificate) =>
-            verifyLocalMtlsPeerIdentity(peer, "executor", transport.peerId)
-              ? undefined
-              : new Error("Executor TLS identity does not match configuration."),
-        },
-        (incoming) => {
-          const responseHeaders = new Headers();
-          for (const [name, value] of Object.entries(incoming.headers)) {
-            if (Array.isArray(value)) responseHeaders.set(name, value.join(", "));
-            else if (value !== undefined) responseHeaders.set(name, value);
-          }
-          resolve(
-            new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
-              status: incoming.statusCode ?? 502,
-              headers: responseHeaders,
-            }),
-          );
-        },
-      );
-      request.once("error", reject);
-      const body = init?.body;
-      if (typeof body === "string" || Buffer.isBuffer(body) || body instanceof Uint8Array) request.write(body);
-      request.end();
-    });
   }
 
   private assertIdentity(body: unknown): asserts body is Record<string, unknown> {

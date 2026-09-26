@@ -131,7 +131,7 @@ async function writeCertificateFiles(certificate: TestCertificate): Promise<void
 
 async function issueCertificate(
   directory: string,
-  role: "admission" | "executor",
+  role: "admission" | "executor" | "control",
   id: string,
   ca: TestCertificate,
 ): Promise<TestCertificate> {
@@ -415,6 +415,198 @@ test(
         server.child.kill("SIGTERM");
         await exitResult(server);
       }
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+const CONTROL_ID = "ctl_0123456789abcdef";
+const WRONG_CONTROL_ID = "ctl_fedcba9876543210";
+
+const OBSERVED_SERVER_PROGRAM = `
+import { createLocalExecutorHttpServer } from "./src/local-control/executor-server.ts";
+import { loadLocalMtlsIdentity } from "./src/local-control/transport-security.ts";
+import { observeLocalExecutorOwner } from "./src/executor/observation.ts";
+const executorId = process.env.INARI_TEST_EXECUTOR_ID;
+const transport = loadLocalMtlsIdentity("executor", executorId, process.env.INARI_TEST_ADMISSION_ID, process.env);
+const executed = () => { console.log(JSON.stringify({ executed: true })); throw new Error("forbidden"); };
+const server = createLocalExecutorHttpServer({
+  config: { version: 1, id: executorId, listen: { host: "0.0.0.0", port: 8765 }, provider: { kind: "github", credentialProfile: "default" } },
+  listenPort: 0,
+  version: "control-test",
+  executorId,
+  execute: executed,
+  resolveRepository: executed,
+  readEvidence: executed,
+  readBranchPolicy: executed,
+  readGovernedContract: executed,
+  observeOwner: async () => observeLocalExecutorOwner({ environment: process.env }),
+  transport,
+  ...(process.env.INARI_TEST_CONTROL_ID ? { controlPeerId: process.env.INARI_TEST_CONTROL_ID } : {}),
+});
+server.once("listening", () => {
+  const address = server.address();
+  if (address === null || typeof address === "string") process.exit(3);
+  console.log(JSON.stringify({ port: address.port, local: observeLocalExecutorOwner({ environment: process.env }) }));
+});
+process.once("SIGTERM", () => server.close(() => process.exit(0)));
+`;
+
+test(
+  "#1223 a separately hosted Executor is observable over Control mTLS, and Admission and Control stay route-separated",
+  { timeout: 120_000 },
+  async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { generateKeyPairSync: rsa } = await import("node:crypto");
+    const { ExecutorAppCredentialStore } = await import("../executor/credential-store.js");
+    const { ExecutorRepositoryBindingStore } = await import("../executor/repository-binding-store.js");
+    const { writeLocalJson, validateLocalExecutorConfig } = await import("./config.js");
+    const { ExecutorObservationClient } = await import("./executor-observation-client.js");
+    const { LocalExecutorClient, requestLocalExecutorOverMtls } = await import("./executor-client.js");
+    const { createLocalControlMtlsIdentity } = await import("./transport-security.js");
+    const executorHttp = await import("./executor-http.js");
+
+    const root = await mkdtemp(path.join(os.tmpdir(), "inari-control-mtls-"));
+    // The Executor host owns this config home; the Control client below never reads it.
+    const executorHome = path.join(root, "executor-host");
+    await mkdir(executorHome, { mode: 0o700 });
+    const certificates = await createCertificates(root);
+    const control = await issueCertificate(root, "control", CONTROL_ID, certificates.ca);
+    const wrongControl = await issueCertificate(root, "control", WRONG_CONTROL_ID, certificates.ca);
+    await installComponentIdentity(executorHome, "executor", certificates.executor, certificates.ca);
+    const executorEnvironment = { INARI_CONFIG_HOME: executorHome };
+    writeLocalJson(
+      "executor",
+      "config.json",
+      {
+        version: 1,
+        id: EXECUTOR_ID,
+        listen: { host: "0.0.0.0", port: 0 },
+        provider: { kind: "github", credentialProfile: "default" },
+      },
+      validateLocalExecutorConfig,
+      executorEnvironment,
+    );
+    const issuerKey = Buffer.from(
+      rsa("rsa", { modulusLength: 2048 }).privateKey.export({ format: "pem", type: "pkcs8" }),
+    );
+    const apps = new ExecutorAppCredentialStore(executorEnvironment);
+    const credential = apps.markProviderVerified("123", apps.save(EXECUTOR_ID, "123", issuerKey).record.generation);
+    new ExecutorRepositoryBindingStore(executorEnvironment).publish({
+      repositoryHost: "github.com",
+      repositoryId: "101",
+      nameWithOwner: "acme/one",
+      appId: "123",
+      installationId: "77",
+      generation: credential.generation,
+      fingerprint: credential.fingerprint,
+    });
+
+    const material = async (identity: TestCertificate) => ({
+      certificate: await readFile(identity.certificate),
+      privateKey: await readFile(identity.privateKey),
+      caCertificate: await readFile(certificates.ca.certificate),
+    });
+    const controlIdentity = createLocalControlMtlsIdentity(CONTROL_ID, EXECUTOR_ID, await material(control));
+    const wrongControlIdentity = createLocalControlMtlsIdentity(
+      WRONG_CONTROL_ID,
+      EXECUTOR_ID,
+      await material(wrongControl),
+    );
+    const admissionMaterial = await material(certificates.admission);
+    const admissionIdentity = { ...admissionMaterial, peerRole: "executor" as const, peerId: EXECUTOR_ID };
+    // Control material never validates as another role's identity, and vice versa.
+    assert.throws(() => createLocalControlMtlsIdentity(CONTROL_ID, EXECUTOR_ID, admissionMaterial));
+    const controlMaterial = await material(control);
+    assert.throws(() => createLocalControlMtlsIdentity(WRONG_CONTROL_ID, EXECUTOR_ID, controlMaterial));
+
+    const serverEnvironment: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      INARI_CONFIG_HOME: executorHome,
+      INARI_TEST_ADMISSION_ID: ADMISSION_ID,
+      INARI_TEST_EXECUTOR_ID: EXECUTOR_ID,
+      INARI_TEST_CONTROL_ID: CONTROL_ID,
+    };
+    const children: CapturedChild[] = [];
+    try {
+      const server = startChild(OBSERVED_SERVER_PROGRAM, serverEnvironment);
+      children.push(server);
+      const startup = await nextJsonLine(server);
+      const endpoint = `https://127.0.0.1:${startup.port as number}`;
+
+      // Control observes the remote Executor with explicit endpoint and identity only.
+      const observed = await new ExecutorObservationClient({
+        endpoint,
+        executorId: EXECUTOR_ID,
+        transport: controlIdentity,
+      }).observe();
+      assert.deepEqual(observed, startup.local);
+      assert.deepEqual(
+        observed.bindings.map((item) => [item.repositoryId, item.appId, item.status]),
+        [["101", "123", "bound"]],
+      );
+      const serialized = JSON.stringify(observed);
+      for (const needle of [executorHome, "PRIVATE KEY", ".pem", issuerKey.toString("utf8").slice(40, 90)])
+        assert.equal(serialized.includes(needle), false, needle);
+
+      const call = async (identity: typeof controlIdentity, route: string, method: string) => {
+        const response = await requestLocalExecutorOverMtls(
+          new URL(route, endpoint),
+          method === "GET"
+            ? { method }
+            : { method, headers: { "content-type": "application/json" }, body: JSON.stringify({ version: 1 }) },
+          identity,
+        );
+        await response.arrayBuffer();
+        return response.status;
+      };
+      // Control may use only owner observation (and the health probe).
+      assert.equal(await call(controlIdentity, executorHttp.LOCAL_EXECUTOR_HEALTH_PATH, "GET"), 200);
+      for (const route of [
+        executorHttp.LOCAL_EXECUTOR_EXECUTIONS_PATH,
+        executorHttp.LOCAL_EXECUTOR_EVIDENCE_PATH,
+        executorHttp.LOCAL_EXECUTOR_REPOSITORY_PATH,
+        executorHttp.LOCAL_EXECUTOR_BRANCH_POLICY_PATH,
+        executorHttp.LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH,
+      ])
+        assert.equal(await call(controlIdentity, route, "POST"), 403, route);
+      // Admission keeps its execution routes but may not observe owner state.
+      assert.equal(
+        (await new LocalExecutorClient({ id: EXECUTOR_ID, endpoint, transport: admissionIdentity }).verifyReady())
+          .executorId,
+        EXECUTOR_ID,
+      );
+      assert.equal(await call(admissionIdentity, executorHttp.LOCAL_EXECUTOR_OWNER_OBSERVATION_PATH, "GET"), 403);
+      await assert.rejects(
+        new ExecutorObservationClient({ endpoint, executorId: EXECUTOR_ID, transport: admissionIdentity }).observe(),
+        { code: "EXECUTOR_OBSERVATION_FORBIDDEN" },
+      );
+      // An unconfigured Control identity is refused at the TLS layer.
+      await assert.rejects(
+        new ExecutorObservationClient({ endpoint, executorId: EXECUTOR_ID, transport: wrongControlIdentity }).observe(),
+        { code: "EXECUTOR_OBSERVATION_UNAVAILABLE" },
+      );
+      // Admission's request reached no forbidden handler.
+      assert.equal(server.stdout().includes('"executed"'), false);
+
+      // Without an explicitly supplied Control peer the Executor accepts no Control identity at all.
+      const noControl = startChild(OBSERVED_SERVER_PROGRAM, { ...serverEnvironment, INARI_TEST_CONTROL_ID: "" });
+      children.push(noControl);
+      const noControlStartup = await nextJsonLine(noControl);
+      await assert.rejects(
+        new ExecutorObservationClient({
+          endpoint: `https://127.0.0.1:${noControlStartup.port as number}`,
+          executorId: EXECUTOR_ID,
+          transport: controlIdentity,
+        }).observe(),
+        { code: "EXECUTOR_OBSERVATION_UNAVAILABLE" },
+      );
+    } finally {
+      for (const child of children)
+        if (child.child.exitCode === null) {
+          child.child.kill("SIGTERM");
+          await exitResult(child);
+        }
       await rm(root, { recursive: true, force: true });
     }
   },
