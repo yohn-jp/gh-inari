@@ -22,6 +22,7 @@ import {
   type SetupActionRequest,
   type SetupGeneration,
 } from "../runtime-contracts/index.js";
+import { resolveRepositoryComponentBinding } from "./repository-component-binding.js";
 import { createExecutorSetupEnrollmentPort, createLocalSetupPorts, createSetupActionPort } from "./setup-adapters.js";
 import { SetupConfigStore, SetupConfigStoreError, setupStateFileKey } from "./setup-config-store.js";
 import { ExecutorCredentialStore } from "../executor/credential-store.js";
@@ -723,4 +724,65 @@ test("start/restart only dispatch to an injected lifecycle owner and never fabri
 test("the shared record file is keyed by immutable repository identity", () => {
   assert.match(setupStateFileKey(repository), /^[0-9a-f]{32}$/u);
   assert.notEqual(setupStateFileKey(repository), setupStateFileKey({ ...repository, repositoryId: "1" }));
+});
+
+test("#1201 a second repository configures and binds its own dedicated App through App-scoped custody", async () => {
+  const w = world();
+  try {
+    await bound(w);
+    const firstBefore = await resolveRepositoryComponentBinding(repository, { environment: w.environment });
+    const second = { repositoryHost: "github.com", repositoryId: "1330755861", nameWithOwner: "yohn-jp/second" };
+    const DEDICATED_APP = "5151";
+    const action = createSetupActionPort({
+      environment: w.environment,
+      root: path.join(w.root, "repo"),
+      provider: w.provider,
+      executorVerification: { verifyProvider: async () => false, verifyInstallation: async () => true },
+    });
+    const generationOf = async (): Promise<SetupGeneration> => ({
+      repository: second,
+      configuration: (await readSetupConfigurationEvidence(second, w.environment)).generation,
+    });
+    const initial = await generationOf();
+    const pem = rsaPem();
+    const receipt = await createExecutorSetupEnrollmentPort({
+      environment: w.environment,
+      executorVerification: { verifyProvider: async () => false },
+    }).enroll(
+      {
+        version: SETUP_CONTRACT_VERSION,
+        kind: "executor-issuer-private-key",
+        operationId: setupOperationId("executor.configure", initial),
+        repository: second,
+        inputs: { "app-id": DEDICATED_APP },
+        declaredBytes: Buffer.byteLength(pem),
+      },
+      upload(pem).stream,
+    );
+    assert.equal(receipt.outcome, "enrolled", JSON.stringify(receipt.diagnostics));
+    const configured = await action.perform(actionRequest("executor.configure", initial, { "app-id": DEDICATED_APP }));
+    assert.equal(configured.outcome, "succeeded", JSON.stringify(configured.diagnostics));
+    w.provider.installation = { appId: DEDICATED_APP, installationId: "88", repositoryId: second.repositoryId };
+    const bindResult = await action.perform(actionRequest("executor.bind-repository", await generationOf()));
+    assert.equal(bindResult.outcome, "succeeded", JSON.stringify(bindResult.diagnostics));
+
+    const secondBinding = await resolveRepositoryComponentBinding(second, { environment: w.environment });
+    assert.equal(secondBinding.app?.appId, DEDICATED_APP);
+    assert.equal(secondBinding.executor?.appCredential?.appId, DEDICATED_APP);
+    assert.equal(secondBinding.executor?.appCredential?.fingerprint, receipt.publicFingerprint);
+    assert.deepEqual(
+      [secondBinding.executor?.binding?.appId, secondBinding.executor?.binding?.installationId],
+      [DEDICATED_APP, "88"],
+    );
+    assert.deepEqual(secondBinding.conflicts, []);
+    const evidence = await readSetupConfigurationEvidence(second, w.environment);
+    assert.equal(evidence.binding?.status, "bound");
+    // The first repository's App, credential and binding are untouched.
+    assert.deepEqual(await resolveRepositoryComponentBinding(repository, { environment: w.environment }), firstBefore);
+    assert.equal(executorIssuerCustody(w.environment)?.appId, APP_ID);
+    assert.notEqual(firstBefore.executor?.appCredential?.fingerprint, receipt.publicFingerprint);
+    assert.equal(storedText(w).includes("PRIVATE KEY"), false);
+  } finally {
+    w.cleanup();
+  }
 });
