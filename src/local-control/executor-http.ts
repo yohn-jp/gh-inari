@@ -18,6 +18,7 @@ export const LOCAL_EXECUTOR_EXECUTIONS_PATH = "/v1/executions" as const;
 export const LOCAL_EXECUTOR_EVIDENCE_PATH = "/v1/evidence" as const;
 export const LOCAL_EXECUTOR_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_EXECUTOR_HEALTH_PATH = "/health" as const;
+export const LOCAL_EXECUTOR_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
 export const MAX_LOCAL_EXECUTOR_BODY_BYTES = 1_048_576;
 
 export interface LocalExecutorEvidenceRequest {
@@ -35,7 +36,47 @@ export interface LocalExecutorHttpHandlerOptions {
   readonly execute: (execution: AuthorizedExecution) => Promise<AuthorizedExecutionResult>;
   readonly resolveRepository?: (repositoryNameWithOwner: string) => Promise<RepositoryIdentity>;
   readonly readEvidence?: (request: LocalExecutorEvidenceRequest) => Promise<unknown>;
+  readonly readBranchPolicy?: (request: LocalExecutorBranchPolicyRequest) => Promise<unknown>;
   readonly maxBodyBytes?: number;
+}
+
+/** Branch-policy observation request for one governed Implementation (#1179). */
+export interface LocalExecutorBranchPolicyRequest {
+  readonly version: 1;
+  readonly repository: SessionCertificateRepository;
+  readonly implementation: number;
+}
+
+/** Strict validator shared by the Executor wire, its client and Admission. */
+export function validateLocalExecutorBranchPolicyRequest(value: unknown): LocalExecutorBranchPolicyRequest | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.keys(value).some((key) => !["version", "repository", "implementation"].includes(key))
+  )
+    return undefined;
+  const record = value as Record<string, unknown>;
+  const repository = record.repository as Record<string, unknown> | null | undefined;
+  if (
+    record.version !== LOCAL_EXECUTOR_PROTOCOL_VERSION ||
+    typeof repository !== "object" ||
+    repository === null ||
+    Array.isArray(repository) ||
+    Object.keys(repository).some((key) => !["id", "name"].includes(key)) ||
+    typeof repository.id !== "string" ||
+    !/^[1-9][0-9]{0,19}$/u.test(repository.id) ||
+    typeof repository.name !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(repository.name) ||
+    !Number.isSafeInteger(record.implementation) ||
+    (record.implementation as number) < 1
+  )
+    return undefined;
+  return Object.freeze({
+    version: LOCAL_EXECUTOR_PROTOCOL_VERSION,
+    repository: Object.freeze({ id: repository.id, name: repository.name }),
+    implementation: record.implementation as number,
+  });
 }
 
 function json(status: number, body: unknown): Response {
@@ -316,6 +357,67 @@ export function createLocalExecutorHttpHandler(
           "EVIDENCE_UNAVAILABLE",
           "Current evidence is unavailable.",
           evidence.issue === undefined ? "trust-evidence" : "implementation-admission",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
+      }
+    }
+
+    if (pathname === LOCAL_EXECUTOR_BRANCH_POLICY_PATH) {
+      if (request.method !== "POST") {
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      }
+      if (!jsonContentType(request.headers.get("content-type"))) {
+        return json(415, {
+          ok: false,
+          error: { code: "UNSUPPORTED_MEDIA_TYPE", message: "Request content type must be application/json." },
+        });
+      }
+      if (options.readBranchPolicy === undefined) {
+        return json(503, {
+          ok: false,
+          error: { code: "BRANCH_POLICY_UNAVAILABLE", message: "Executor branch policy is unavailable." },
+        });
+      }
+      const body = await readBoundedBody(request, maxBodyBytes);
+      if (body.kind !== "body") {
+        return json(body.kind === "too-large" ? 413 : 400, {
+          ok: false,
+          error: {
+            code: body.kind === "too-large" ? "PAYLOAD_TOO_LARGE" : "MALFORMED_REQUEST",
+            message:
+              body.kind === "too-large"
+                ? "Request body exceeds the configured maximum size."
+                : "Request body could not be read.",
+          },
+        });
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(body.text) as unknown;
+      } catch {
+        return json(400, { ok: false, error: { code: "MALFORMED_JSON", message: "Request body is not valid JSON." } });
+      }
+      const policyRequest = validateLocalExecutorBranchPolicyRequest(value);
+      if (policyRequest === undefined) {
+        return json(400, {
+          ok: false,
+          error: { code: "INVALID_BRANCH_POLICY_REQUEST", message: "Branch policy request is invalid." },
+        });
+      }
+      try {
+        return json(200, {
+          ok: true,
+          component: "executor",
+          executorId: options.executorId,
+          protocol: LOCAL_EXECUTOR_PROTOCOL_VERSION,
+          branchPolicy: await options.readBranchPolicy(policyRequest),
+        });
+      } catch (error: unknown) {
+        return failed(
+          error,
+          "BRANCH_POLICY_UNAVAILABLE",
+          "Current branch policy is unavailable.",
+          "session-registration",
           "RUNTIME_OWNER_UNAVAILABLE",
         );
       }

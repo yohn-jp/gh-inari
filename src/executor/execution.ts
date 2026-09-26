@@ -18,7 +18,7 @@ import {
   type ChangeMutationRequest,
   type ChangeReadRequest,
 } from "../change-execution-port.js";
-import { resolveDelegator } from "../agent-authority/delegator-trust.js";
+import { DelegatorTrustError, resolveDelegator } from "../agent-authority/delegator-trust.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import { GitHubAdapterCore as GitHubAdapter } from "../github/adapter-core.js";
@@ -39,6 +39,8 @@ import {
   readCurrentImplementationAdmissionEvidence,
 } from "../implementation-frontier-composition.js";
 import { publishPullRequest } from "../pr-publication.js";
+import { acquireRepositoryBranchPolicy } from "../governance.js";
+import { parseImplementationIssueBody } from "../implementation-contract.js";
 import { LocalRuntimeProfileStore } from "../local-runtime-profile.js";
 import { LocalRuntimeConfigError, readAppPrivateKey } from "../relay/local-runtime-config-credentials.js";
 import type { LocalExecutorEvidenceRequest } from "../local-control/executor-http.js";
@@ -269,6 +271,34 @@ async function projectChange(
   );
 }
 
+/**
+ * The installation broker deliberately replaces every callback error with a
+ * generic credential-stage failure so a token can never escape. Owner
+ * failures raised by Executor code inside the callback (protected-ref trust
+ * resolution, Implementation contract checks) carry only a fixed code; they
+ * are kept here so the bounded Runtime diagnostic names the real owner stage
+ * instead of reporting a provider outage (#1180).
+ */
+async function withOwnerFailures<T>(
+  run: (keep: <R>(operation: () => Promise<R>) => Promise<R>) => Promise<T>,
+): Promise<T> {
+  let owner: DelegatorTrustError | LocalExecutorError | undefined;
+  const keep = async <R>(operation: () => Promise<R>): Promise<R> => {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      if (error instanceof DelegatorTrustError || error instanceof LocalExecutorError) owner = error;
+      throw error;
+    }
+  };
+  try {
+    return await run(keep);
+  } catch (error: unknown) {
+    if (owner !== undefined) throw owner;
+    throw error;
+  }
+}
+
 export async function resolveLocalExecutorRepository(
   repositoryNameWithOwner: string,
   environment: NodeJS.ProcessEnv,
@@ -297,57 +327,150 @@ export async function readLocalExecutorEvidence(
   const binding = await localExecutorIssuerBinding(identity, environment);
   await verifyIssuerBinding(binding);
   const broker = binding.broker();
-  return broker.withRepositoryReadCapability({}, async (capability) => {
-    const adapter = new GitHubAdapter({
-      repository: identity.nameWithOwner,
-      hostname: identity.repositoryHost,
-      transport: {
-        request: async (providerRequest) => {
-          if (providerRequest.method !== "GET") throw new Error("Executor evidence reads cannot perform mutation.");
-          const response = await capability.transport.request({
-            hostname: providerRequest.hostname,
-            method: "GET",
-            path: providerRequest.path,
-          });
-          return { ...response, body: response.body ?? null };
+  return withOwnerFailures((keep) =>
+    broker.withRepositoryReadCapability({}, async (capability) => {
+      const adapter = new GitHubAdapter({
+        repository: identity.nameWithOwner,
+        hostname: identity.repositoryHost,
+        transport: {
+          request: async (providerRequest) => {
+            if (providerRequest.method !== "GET") throw new Error("Executor evidence reads cannot perform mutation.");
+            const response = await capability.transport.request({
+              hostname: providerRequest.hostname,
+              method: "GET",
+              path: providerRequest.path,
+            });
+            return { ...response, body: response.body ?? null };
+          },
         },
-      },
-    });
-    const runtime = await resolveDelegator(adapter, request.authorityId);
-    const authority = Object.freeze({ ref: `refs/heads/${runtime.provenance.ref}`, sha: runtime.provenance.policySha });
-    if (request.issue === undefined || request.implementationIssue === undefined) {
+      });
+      const runtime = await keep(() => resolveDelegator(adapter, request.authorityId));
+      const authority = Object.freeze({
+        ref: `refs/heads/${runtime.provenance.ref}`,
+        sha: runtime.provenance.policySha,
+      });
+      if (request.issue === undefined || request.implementationIssue === undefined) {
+        return Object.freeze({
+          repository: identity,
+          authority,
+          runtimeAuthority: runtime.authority,
+        });
+      }
+      const frontierRepository = createGitHubImplementationFrontierRepository({
+        adapter,
+        cwd: process.cwd(),
+        changeReader: {
+          read: (changeRequest) => projectChange(broker, repository, identity, changeRequest),
+        },
+      });
+      const implementation = await readCurrentImplementationAdmissionEvidence(
+        frontierRepository,
+        request.implementationIssue,
+      );
+      const change = await projectChange(broker, repository, identity, changeReadRequest(request.issue));
+      const pullRequestNumber = change.change?.projection?.pullRequest;
+      const reviewEvidence =
+        typeof pullRequestNumber === "number"
+          ? await frontierRepository.observePullRequest(pullRequestNumber)
+          : undefined;
       return Object.freeze({
         repository: identity,
         authority,
         runtimeAuthority: runtime.authority,
+        change,
+        implementation,
+        ...(reviewEvidence === undefined ? {} : { reviewEvidence }),
       });
-    }
-    const frontierRepository = createGitHubImplementationFrontierRepository({
-      adapter,
-      cwd: process.cwd(),
-      changeReader: {
-        read: (changeRequest) => projectChange(broker, repository, identity, changeRequest),
-      },
-    });
-    const implementation = await readCurrentImplementationAdmissionEvidence(
-      frontierRepository,
-      request.implementationIssue,
-    );
-    const change = await projectChange(broker, repository, identity, changeReadRequest(request.issue));
-    const pullRequestNumber = change.change?.projection?.pullRequest;
-    const reviewEvidence =
-      typeof pullRequestNumber === "number"
-        ? await frontierRepository.observePullRequest(pullRequestNumber)
-        : undefined;
-    return Object.freeze({
-      repository: identity,
-      authority,
-      runtimeAuthority: runtime.authority,
-      change,
-      implementation,
-      ...(reviewEvidence === undefined ? {} : { reviewEvidence }),
-    });
-  });
+    }),
+  );
+}
+
+/** Request for the current repository branch policy of one governed Implementation (#1179). */
+export interface LocalExecutorBranchPolicyRequest {
+  readonly version: 1;
+  readonly repository: { readonly id: string; readonly name: string };
+  readonly implementation: number;
+}
+
+function branchPolicyDenied(code: string, message: string): LocalExecutorError {
+  return new LocalExecutorError(code, message);
+}
+
+/**
+ * Current repository branch-policy observation input for one governed
+ * Implementation (#1179): the policy acquired from the repository's
+ * provider-resolved default branch through the Issuer read capability, the
+ * Implementation's exact contract branch binding, and the generation observed
+ * for staleness. It is public data only; no credential leaves the Executor.
+ * A non-Implementation Issue (for example a Source bug Issue) or an
+ * unavailable/invalid policy is a bounded denial, never a fixed-grammar guess.
+ */
+export async function readLocalExecutorBranchPolicy(
+  request: LocalExecutorBranchPolicyRequest,
+  environment: NodeJS.ProcessEnv,
+): Promise<unknown> {
+  const identity: RepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: request.repository.id,
+    nameWithOwner: request.repository.name,
+  };
+  const binding = await localExecutorIssuerBinding(identity, environment);
+  await verifyIssuerBinding(binding);
+  return withOwnerFailures((keep) =>
+    binding.broker().withRepositoryReadCapability({}, (capability) =>
+      keep(async () => {
+        const adapter = new GitHubAdapter({
+          repository: identity.nameWithOwner,
+          hostname: identity.repositoryHost,
+          transport: {
+            request: async (providerRequest) => {
+              if (providerRequest.method !== "GET") throw new Error("Executor policy reads cannot perform mutation.");
+              const response = await capability.transport.request({
+                hostname: providerRequest.hostname,
+                method: "GET",
+                path: providerRequest.path,
+              });
+              return { ...response, body: response.body ?? null };
+            },
+          },
+        });
+        const issue = await adapter.getIssue(request.implementation);
+        const parsed = typeof issue.body === "string" ? parseImplementationIssueBody(issue.body) : undefined;
+        if (parsed === undefined || !parsed.valid || parsed.contract === undefined)
+          throw branchPolicyDenied(
+            "EXECUTOR_IMPLEMENTATION_CONTRACT_REQUIRED",
+            "The selected Issue is not a governed Implementation contract.",
+          );
+        const repository = { repositoryHost: identity.repositoryHost, repositoryId: identity.repositoryId };
+        if (
+          parsed.contract.repository.repositoryHost !== repository.repositoryHost ||
+          parsed.contract.repository.repositoryId !== repository.repositoryId
+        )
+          throw branchPolicyDenied(
+            "EXECUTOR_IMPLEMENTATION_REPOSITORY_MISMATCH",
+            "The Implementation contract names a different repository.",
+          );
+        const acquisition = await acquireRepositoryBranchPolicy(adapter);
+        if (acquisition.status !== "available")
+          throw branchPolicyDenied(
+            "EXECUTOR_BRANCH_POLICY_UNAVAILABLE",
+            "The repository branch policy is unavailable.",
+          );
+        const branch = parsed.contract.execution.branch;
+        return Object.freeze({
+          version: 1,
+          kind: "local-branch-policy-input",
+          policy: acquisition.policy,
+          target: { repository, implementation: request.implementation },
+          observedGeneration: {
+            ref: acquisition.policy.generation.ref,
+            treeSha: acquisition.policy.generation.treeSha,
+          },
+          ...(branch === undefined ? {} : { binding: { repository, implementation: request.implementation, branch } }),
+        });
+      }),
+    ),
+  );
 }
 
 function createDelegates(

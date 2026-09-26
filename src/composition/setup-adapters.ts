@@ -152,7 +152,7 @@ function providerDiagnostic(error: unknown): SetupDiagnostic {
   if (stage === "authorization")
     return diagnostic(
       "SETUP_APP_USER_AUTHORIZATION_REQUIRED",
-      "App-user authorization is required; authorize the Inari App for this operator and retry.",
+      "App-user authorization is required; run `inari setup --endpoint <endpoint-url>` (Device Flow) for this repository, then retry.",
     );
   if (stage === "installation")
     return diagnostic("SETUP_APP_INSTALLATION_REQUIRED", "The Inari App is not installed for this repository.");
@@ -336,7 +336,7 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
     if (profile === undefined)
       return diagnostic(
         "SETUP_AUTHORITY_PREPARATION_REQUIRED",
-        "No Runtime Authority exists to adopt; preparing a new one needs explicit capability intent outside this action.",
+        "No Runtime Authority exists to adopt. Prepare one with explicit capability intent: `inari setup --endpoint <endpoint-url> --capability change.implement`, then retry.",
       );
     let key;
     let local: readonly Delegator[];

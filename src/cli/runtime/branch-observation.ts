@@ -141,3 +141,98 @@ export function validateLocalBranchObservation(value: unknown): LocalBranchObser
   }
   return value as LocalBranchObservation;
 }
+
+/** Owner-supplied branch-policy observation input for one governed Implementation (#1179). */
+export type LocalBranchPolicyInput = Omit<ObserveLocalBranchInput, "observedBranch">;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function repositoryTarget(value: unknown): RepositoryBranchTarget["repository"] | undefined {
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).some((key) => !["repositoryHost", "repositoryId"].includes(key)) ||
+    value.repositoryHost !== "github.com" ||
+    typeof value.repositoryId !== "string" ||
+    !/^[1-9][0-9]{0,19}$/u.test(value.repositoryId)
+  )
+    return undefined;
+  return { repositoryHost: value.repositoryHost, repositoryId: value.repositoryId };
+}
+
+/**
+ * Re-validate an owner-supplied branch-policy input (the Executor wire result
+ * Admission forwards to the CLI) through the canonical policy authority. The
+ * policy is rebuilt from its generation and rule; anything else is refused.
+ */
+export function validateLocalBranchPolicyInput(value: unknown): LocalBranchPolicyInput | undefined {
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).some(
+      (key) => !["version", "kind", "policy", "target", "observedGeneration", "binding"].includes(key),
+    ) ||
+    value.version !== 1 ||
+    value.kind !== "local-branch-policy-input" ||
+    !isPlainRecord(value.policy) ||
+    !isPlainRecord(value.target) ||
+    !isPlainRecord(value.observedGeneration)
+  )
+    return undefined;
+  const policy = value.policy;
+  const acquisition = createRepositoryBranchPolicy({
+    generation: policy.generation as RepositoryBranchPolicy["generation"],
+    ...(policy.rule === undefined ? {} : { rule: policy.rule }),
+  });
+  if (acquisition.status !== "available") return undefined;
+  try {
+    if (
+      canonicalJsonString(acquisition.policy as unknown as CanonicalJsonValue) !==
+      canonicalJsonString(policy as unknown as CanonicalJsonValue)
+    )
+      return undefined;
+  } catch {
+    return undefined;
+  }
+  const target = value.target;
+  const repository = repositoryTarget(target.repository);
+  if (
+    repository === undefined ||
+    Object.keys(target).some((key) => !["repository", "implementation"].includes(key)) ||
+    !Number.isSafeInteger(target.implementation) ||
+    (target.implementation as number) < 1
+  )
+    return undefined;
+  const generation = value.observedGeneration;
+  if (
+    Object.keys(generation).some((key) => !["ref", "treeSha"].includes(key)) ||
+    typeof generation.ref !== "string" ||
+    typeof generation.treeSha !== "string"
+  )
+    return undefined;
+  let binding: ImplementationBranchBinding | undefined;
+  if (value.binding !== undefined) {
+    const candidate = value.binding;
+    const bindingRepository = isPlainRecord(candidate) ? repositoryTarget(candidate.repository) : undefined;
+    if (
+      !isPlainRecord(candidate) ||
+      bindingRepository === undefined ||
+      Object.keys(candidate).some((key) => !["repository", "implementation", "branch"].includes(key)) ||
+      bindingRepository.repositoryId !== repository.repositoryId ||
+      candidate.implementation !== target.implementation ||
+      typeof candidate.branch !== "string"
+    )
+      return undefined;
+    binding = {
+      repository: bindingRepository,
+      implementation: candidate.implementation as number,
+      branch: candidate.branch,
+    };
+  }
+  return Object.freeze({
+    policy: acquisition.policy,
+    target: { repository, implementation: target.implementation as number },
+    observedGeneration: { ref: generation.ref, treeSha: generation.treeSha },
+    ...(binding === undefined ? {} : { binding }),
+  });
+}

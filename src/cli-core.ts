@@ -168,7 +168,7 @@ import {
 } from "./agent-authority/delegator-operations.js";
 import { DELEGATOR_ARTIFACT_DIRECTORY } from "./agent-authority/delegator.js";
 import { renderDelegatorArtifact } from "./agent-authority/delegator-trust.js";
-import { MAX_ISSUE_NUMBER, type CapabilityKind } from "./agent-authority/capability.js";
+import { CAPABILITY_KINDS, MAX_ISSUE_NUMBER, type CapabilityKind } from "./agent-authority/capability.js";
 import { registerDelegator, revokeDelegator, rotateDelegator } from "./agent-authority/delegator-lifecycle.js";
 import {
   createSessionCredentialBundle,
@@ -197,11 +197,8 @@ import {
   setupAdmissionRole,
   serveAdmissionRole,
 } from "./composition/local-runtime-roles.js";
-import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
-import { renderLocalApplicationSetupFlow } from "./local-application-state-terminal.js";
 import type { SetupTerminalIO } from "./cli/setup/index.js";
 import { superviseLocalRuntime } from "./local-control/supervisor.js";
-import { startLocalConsole } from "./local-control/console-server.js";
 import {
   createAdmissionChangeExecutionPort,
   createLocalAdmissionClient,
@@ -244,6 +241,7 @@ import {
   tryPlanSemanticPullRequestMutation,
 } from "./semantic-pr-mutation.js";
 import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "./semantic-branch-observation.js";
+import { validateLocalBranchPolicyInput } from "./cli/runtime/branch-observation.js";
 import { GitHubIssueRelationObservationAdapter } from "./github/issue-relation-observation-adapter.js";
 import {
   LocalSemanticPullRequestExecutor,
@@ -1195,33 +1193,67 @@ async function runInitCommand(
   const environment = dependencies.environment ?? process.env;
   const config = ensureLocalCliTopology(environment);
   const configPath = localComponentPath("cli", "config.json", environment);
-  const applicationState = await projectLocalApplicationState({ root, environment });
-  const runtimeStatus = await projectLocalRuntimeReadiness(environment);
+  // #1065: init renders the one canonical Setup Application state over the same owner
+  // evidence as `setup status` and the browser console; no second setup projector.
+  const host = await import("./composition/setup-host.js");
+  let repository: Awaited<ReturnType<typeof host.resolveSetupRepository>> | undefined;
+  let repositoryDiagnostic: { readonly code: string; readonly message: string } | undefined;
+  try {
+    repository = await host.resolveSetupRepository({
+      root,
+      environment,
+      ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
+      ...(typeof parsed.options.repositoryId === "string" ? { repositoryId: parsed.options.repositoryId } : {}),
+      ...(dependencies.setupFetch === undefined ? {} : { fetch: dependencies.setupFetch }),
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof host.SetupHostError)) throw error;
+    repositoryDiagnostic = { code: error.code, message: error.message };
+  }
+  const state =
+    repository === undefined
+      ? undefined
+      : await host
+          .createLocalSetupApplication({
+            environment,
+            root,
+            lifecycle: host.createObservedRuntimeLifecycle({ environment }),
+          })
+          .state(repository);
+  const sessionStart = {
+    command: "inari session start --issue <implementation-number> -- <command...>",
+    requirement:
+      "Session start needs a governed Implementation Issue of this repository checked out on its exact contract branch. A Source Issue or a branch name alone is not an execution contract.",
+  };
   if (json) {
-    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config, applicationState, runtimeStatus }));
+    console.log(
+      JSON.stringify({
+        ok: true,
+        operation: "init",
+        configPath,
+        config,
+        ...(repository === undefined ? {} : { repository }),
+        ...(state === undefined ? {} : { setup: state }),
+        ...(repositoryDiagnostic === undefined ? {} : { diagnostics: [repositoryDiagnostic] }),
+        sessionStart,
+      }),
+    );
   } else {
+    const { renderSetupState } = await import("./cli/setup/index.js");
     console.log("Initialized local CLI topology.");
     console.log(`Config: ${configPath}`);
-    console.log(`Local execution setup: ${applicationState.status}.`);
-    console.log("Ordered setup path:");
-    for (const line of renderLocalApplicationSetupFlow(applicationState)) console.log(line);
-    console.log(`Next: ${applicationState.nextAction.detail}`);
-    for (const command of applicationState.nextAction.commands) console.log(`Run: ${command}`);
-    console.log(`Credential custody: ${applicationState.provider.credentialPath}`);
-    console.log("After setup, run the local Runtime Supervisor:");
-    for (const command of applicationState.runtime.commands) console.log(`Run: ${command}`);
-    console.log(
-      `Issue/Change branch: ${applicationState.changeBranch.status} — ${applicationState.changeBranch.detail}`,
-    );
-    if (applicationState.changeBranch.status === "ready") {
+    if (state === undefined || repository === undefined) {
       console.log(
-        `Then launch the governed child with: inari session start --issue ${applicationState.changeBranch.issue} -- <command...>`,
+        `${repositoryDiagnostic?.code ?? "SETUP_REPOSITORY_UNRESOLVED"}: ${repositoryDiagnostic?.message ?? ""}`,
       );
+      console.log("Rerun with --repository <owner/name> --repository-id <id> to see the setup state.");
+    } else {
+      console.log(`Repository: ${repository.nameWithOwner} (${repository.repositoryId})`);
+      console.log(renderSetupState(state, true));
+      console.log("Run `inari setup next` to perform the next action; `inari setup console` shows this same state.");
     }
-    console.log(
-      `Runtime readiness: executor=${runtimeStatus.executor} admission=${runtimeStatus.admission} overall=${runtimeStatus.overall}`,
-    );
-    console.log("Run `inari runtime console` for a browser view of this same state, including over SSH.");
+    console.log(`Session start: ${sessionStart.command}`);
+    console.log(sessionStart.requirement);
   }
   return 0;
 }
@@ -1352,6 +1384,18 @@ async function runSessionCommand(
     const environment = dependencies.environment ?? process.env;
     const route = requireConfiguredLocalAdmissionRoute(environment);
     const admission = createLocalAdmissionClient({ endpoint: route.endpoint });
+    const context = resolveLocalRepositoryContext({ cwd: root });
+    if (context.hostname !== "github.com") {
+      throw new CliError("REPOSITORY_ID_UNAVAILABLE", "Local Session repository must be hosted on github.com.");
+    }
+    const repository = await admission.resolveRepository(context.nameWithOwner);
+    // #1179: the repository's current branch policy and the governed Implementation's
+    // exact branch come from the owner through Admission; there is no fixed-grammar fallback.
+    const branchObservation = validateLocalBranchPolicyInput(
+      await admission.readBranchPolicy({ id: repository.repositoryId, name: repository.nameWithOwner }, issue),
+    );
+    if (branchObservation === undefined)
+      throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid branch policy observation.");
     const code = await startLocalSession({
       cwd: root,
       issue,
@@ -1359,13 +1403,8 @@ async function runSessionCommand(
       commandArgs: rest.slice(1),
       environment,
       admission,
-      resolveRepository: async () => {
-        const context = resolveLocalRepositoryContext({ cwd: root });
-        if (context.hostname !== "github.com") {
-          throw new CliError("REPOSITORY_ID_UNAVAILABLE", "Local Session repository must be hosted on github.com.");
-        }
-        return admission.resolveRepository(context.nameWithOwner);
-      },
+      branchObservation,
+      resolveRepository: async () => repository,
     });
     return code;
   }
@@ -1470,52 +1509,8 @@ async function runRuntimeCommand(
   }
   if (command === "console") {
     if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", "Unknown Runtime console command.");
-    const definition = getCommand("runtime.console");
-    const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
-    if (parsed.capabilities.length > 0 || unsupported !== undefined) {
-      const optionId = unsupported ?? "capability";
-      const option = getOption(optionId as OptionId);
-      throw new CliError(
-        "INVALID_OPTION",
-        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by runtime console.`,
-        "$argv",
-        { command: "runtime console", option: optionId },
-      );
-    }
-    const environment = dependencies.environment ?? process.env;
-    const { server, announcement } = await startLocalConsole(root, environment);
-    const shutdown = (): void => {
-      server.close();
-      process.removeListener("SIGINT", shutdown);
-      process.removeListener("SIGTERM", shutdown);
-    };
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
-    server.once("close", () => {
-      process.removeListener("SIGINT", shutdown);
-      process.removeListener("SIGTERM", shutdown);
-    });
-    const port = new URL(announcement.endpoint).port;
-    const sshForward = `-L ${port}:127.0.0.1:${port}`;
-    if (json) {
-      console.log(
-        JSON.stringify({
-          ok: true,
-          operation: "runtime.console",
-          endpoint: announcement.endpoint,
-          sshForward,
-          foreground: true,
-        }),
-      );
-    } else {
-      console.log(`Local setup/runtime console: ${announcement.endpoint}/`);
-      console.log("Loopback-only; this page never renders credentials, tokens, or private key material.");
-      console.log("To reach this console from a workstation browser over SSH, forward the same loopback port:");
-      console.log(`  ssh ${sshForward} <user>@<remote-host>`);
-      console.log(`Then open ${announcement.endpoint}/ in the workstation browser.`);
-      console.log("Press Ctrl-C to stop.");
-    }
-    return 0;
+    // #1065: one console. `runtime console` is the canonical setup/control host.
+    return runSetupApplicationCommand("console", parsed, root, dependencies, json, "runtime.console");
   }
   if (command !== "connect" || rest.length > 0) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown Runtime command "${command ?? ""}".`);
@@ -1767,8 +1762,12 @@ async function runSetupCommand(
       { command: "setup", option: option.id },
     );
   }
+  // #1065/#1184: explicit capability intent for preparing a new Runtime Authority.
+  const capabilityCeiling =
+    parsed.capabilities.length === 0 ? undefined : parseSetupCapabilityIntent(parsed.capabilities);
   const setup = dependencies.setupRepository ?? setupRepository;
   const output = await setup({
+    ...(capabilityCeiling === undefined ? {} : { capabilityCeiling }),
     root,
     json,
     ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
@@ -1807,6 +1806,16 @@ async function runSetupCommand(
     }
   }
   return 0;
+}
+
+function parseSetupCapabilityIntent(values: readonly string[]): CapabilityKind[] {
+  const result: CapabilityKind[] = [];
+  for (const value of values) {
+    if (!CAPABILITY_KINDS.includes(value as CapabilityKind))
+      throw new CliError("INVALID_OPTION", `--capability ${value} is not a delegable capability kind.`, "--capability");
+    if (!result.includes(value as CapabilityKind)) result.push(value as CapabilityKind);
+  }
+  return result;
 }
 
 function splitSetupAssignments(values: readonly string[] | undefined, option: string): Record<string, string> {
@@ -1853,8 +1862,9 @@ async function runSetupApplicationCommand(
   root: string,
   dependencies: CliDependencies,
   json: boolean,
+  consoleOperation: "setup.console" | "runtime.console" = "setup.console",
 ): Promise<number> {
-  const commandId = `setup.${subcommand}` as const;
+  const commandId = subcommand === "console" ? consoleOperation : (`setup.${subcommand}` as const);
   const definition = getCommand(commandId);
   const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
   if (parsed.capabilities.length > 0 || unsupported !== undefined) {
@@ -1862,9 +1872,9 @@ async function runSetupApplicationCommand(
     const option = getOption(optionId as OptionId);
     throw new CliError(
       "INVALID_OPTION",
-      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by setup ${subcommand}.`,
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by ${commandId.replace(".", " ")}.`,
       "$argv",
-      { command: `setup ${subcommand}`, option: optionId },
+      { command: commandId.replace(".", " "), option: optionId },
     );
   }
   const environment = dependencies.environment ?? process.env;
@@ -1897,7 +1907,7 @@ async function runSetupApplicationCommand(
         console.log(
           JSON.stringify({
             ok: true,
-            operation: "setup.console",
+            operation: consoleOperation,
             endpoint: live.endpoint,
             url: `${live.endpoint}/`,
             sshForward: `-L ${port}:127.0.0.1:${port}`,
@@ -1946,7 +1956,7 @@ async function runSetupApplicationCommand(
       console.log(
         JSON.stringify({
           ok: true,
-          operation: "setup.console",
+          operation: consoleOperation,
           endpoint: handle.origin,
           url: `${handle.origin}/`,
           sshForward,

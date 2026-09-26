@@ -24,6 +24,7 @@ import { createLocalRuntimeStatusPage, isLocalRuntimeLoopbackAddress } from "../
 import { LocalExecutorError } from "./errors.js";
 import {
   executeLocalAuthorizedExecution,
+  readLocalExecutorBranchPolicy,
   readLocalExecutorEvidence,
   requireLocalExecutorIssuerCredential,
   resolveLocalExecutorRepository,
@@ -199,6 +200,7 @@ export async function startConfiguredLocalExecutor(
     resolveRepository: (repositoryNameWithOwner) =>
       resolveLocalExecutorRepository(repositoryNameWithOwner, executionEnvironment),
     readEvidence: (request) => readLocalExecutorEvidence(request, executionEnvironment),
+    readBranchPolicy: (request) => readLocalExecutorBranchPolicy(request, executionEnvironment),
     ready: () => true,
     ...(transport === undefined ? {} : { transport }),
   });

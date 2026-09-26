@@ -73,6 +73,7 @@ test("Session launcher rejects stale injected branch policy before registration"
             return { id: "unused", status: "active" };
           },
           closeSession: async () => ({ id: "unused", status: "closed" }),
+          readBranchPolicy: async () => assert.fail("branch policy is not read by the launcher"),
           executeIntent: async () => {
             throw new Error("unreachable");
           },

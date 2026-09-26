@@ -25,6 +25,9 @@ import { parsePullRequestTemplate } from "../pull-request-template.js";
 import { saveLocalRuntimeProfile } from "../local-runtime-profile.js";
 import { ExecutorCredentialStore } from "../executor/credential-store.js";
 import { issuerExecutionEnvironment } from "../executor/enrollment/issuer-reference.js";
+import { readLocalExecutorBranchPolicy, readLocalExecutorEvidence } from "../executor/execution.js";
+import { observeLocalBranch, validateLocalBranchPolicyInput } from "../cli/runtime/branch-observation.js";
+import { renderImplementationIssueBody } from "../implementation-contract.js";
 import {
   executeLocalAuthorizedExecution,
   LocalExecutorError,
@@ -364,6 +367,9 @@ function providerFetch(
         title: CHANGE_TITLE,
         state: "open",
         body: options.issueBody ?? "A bounded Change fixture body.",
+        html_url: `https://github.com/acme/inari/issues/${ISSUE}`,
+        labels: [],
+        assignees: [],
       });
     }
     if (
@@ -1042,6 +1048,101 @@ test("#1182 the Executor executes from its own verified repository binding witho
       (error: unknown) => (error as { code?: unknown }).code === "EXECUTOR_REPOSITORY_BINDING_INCONSISTENT",
     );
     assert.deepEqual(inconsistent.calls, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1179 the Executor reads the repository branch policy and exact Implementation branch as public input", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  const branch = "story/1026-alternative-policy";
+  const policy = `version: 1\nsections: []\nbranch:\n  pattern: "^story/[0-9]+-[a-z0-9-]+$"\n`;
+  const policyArtifact = { path: ".github/inari/pr-policy.yml", sha: "3".repeat(40), content: policy };
+  const repository = { repositoryHost: REPOSITORY.repositoryHost, repositoryId: REPOSITORY.repositoryId };
+  const implementationBody = renderImplementationIssueBody({
+    version: 1,
+    kind: "implementation",
+    repository: { ...repository, repository: REPOSITORY.nameWithOwner },
+    sources: [{ ...repository, repository: REPOSITORY.nameWithOwner, number: ISSUE }],
+    objective: "Read the repository branch policy through the Executor.",
+    nonGoals: ["Fixed grammar."],
+    architecture: {
+      decision: "Owner-read policy.",
+      affectedComponents: ["Executor"],
+      invariants: ["No fixed grammar."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/**"], create: ["src/**"], delete: [], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+    verification: {
+      acceptanceCriteria: ["Policy is read."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: {
+      baseBranch: "main",
+      baseRevision: "a".repeat(40),
+      baseFreshness: "a".repeat(40),
+      branch,
+      dependencies: [],
+    },
+  });
+  try {
+    await configureIssuer(root, environment);
+    environment.INARI_GITHUB_APP_ID = APP.appId;
+    const request = {
+      version: 1 as const,
+      repository: { id: REPOSITORY.repositoryId, name: REPOSITORY.nameWithOwner },
+      implementation: ISSUE,
+    };
+    const provider = providerFetch({ issueBody: implementationBody, repositoryArtifacts: [policyArtifact] });
+    const value = await withProviderFetch(provider.fetch, () => readLocalExecutorBranchPolicy(request, environment));
+    assert.equal(JSON.stringify(value).includes(INSTALLATION_TOKEN), false);
+    const input = validateLocalBranchPolicyInput(value);
+    assert.ok(input, JSON.stringify(value));
+    assert.equal(input.policy.rule?.pattern, "^story/[0-9]+-[a-z0-9-]+$");
+    assert.equal(input.binding?.branch, branch);
+    assert.equal(observeLocalBranch({ ...input, observedBranch: branch }).expectedBranch, branch);
+    assert.throws(() => observeLocalBranch({ ...input, observedBranch: "feat/1026-alternative-policy" }));
+    assert.deepEqual(providerMutations(provider.calls), []);
+
+    // A Source Issue body is not an Implementation contract: bounded denial, no fixed-grammar guess.
+    const source = providerFetch({ issueBody: "A bounded Source bug report.", repositoryArtifacts: [policyArtifact] });
+    await assert.rejects(
+      withProviderFetch(source.fetch, () => readLocalExecutorBranchPolicy(request, environment)),
+      (error: unknown) => (error as { code?: unknown }).code === "EXECUTOR_IMPLEMENTATION_CONTRACT_REQUIRED",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1180 an unregistered Runtime Authority surfaces as the trust owner failure, not a provider outage", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    await configureIssuer(root, environment);
+    environment.INARI_GITHUB_APP_ID = APP.appId;
+    // The protected ref carries no Authority record for the ID a local bootstrap invented.
+    const provider = providerFetch({
+      repositoryArtifacts: [
+        { path: ".github/inari/pr-policy.yml", sha: "3".repeat(40), content: "version: 1\nsections: []\n" },
+      ],
+    });
+    await assert.rejects(
+      withProviderFetch(provider.fetch, () =>
+        readLocalExecutorEvidence(
+          {
+            version: 1,
+            repository: { id: REPOSITORY.repositoryId, name: REPOSITORY.nameWithOwner },
+            authorityId: "runtime-07b11b78ccbb94dec4573009c59a36bfc4e18defd7670781b52dced671b30e0d",
+          },
+          environment,
+        ),
+      ),
+      (error: unknown) => (error as { code?: unknown }).code === "RUNTIME_AUTHORITY_NOT_FOUND",
+    );
+    assert.deepEqual(providerMutations(provider.calls), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

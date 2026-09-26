@@ -5,12 +5,14 @@ import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { ExecutorExecutionPort } from "../runtime-contracts/ports.js";
 import type { PeerCertificate } from "node:tls";
 import {
+  LOCAL_EXECUTOR_BRANCH_POLICY_PATH,
   LOCAL_EXECUTOR_EVIDENCE_PATH,
   LOCAL_EXECUTOR_EXECUTIONS_PATH,
   LOCAL_EXECUTOR_HEALTH_PATH,
   LOCAL_EXECUTOR_PROTOCOL_VERSION,
   LOCAL_EXECUTOR_REPOSITORY_PATH,
   MAX_LOCAL_EXECUTOR_BODY_BYTES,
+  type LocalExecutorBranchPolicyRequest,
   type LocalExecutorEvidenceRequest,
 } from "./executor-http.js";
 import { verifyLocalMtlsPeerIdentity, type LocalMtlsIdentity } from "./transport-security.js";
@@ -276,6 +278,24 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
       throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Current Executor evidence is unavailable.");
     }
     return body.evidence;
+  }
+
+  async readBranchPolicy(request: LocalExecutorBranchPolicyRequest): Promise<unknown> {
+    const { response, body } = await this.request(LOCAL_EXECUTOR_BRANCH_POLICY_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    this.assertIdentity(body);
+    if (
+      response.status !== 200 ||
+      !exactKeys(body, ["ok", "component", "executorId", "protocol", "branchPolicy"]) ||
+      body.ok !== true ||
+      !record(body.branchPolicy)
+    ) {
+      throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Current branch policy is unavailable.");
+    }
+    return body.branchPolicy;
   }
 
   async execute(execution: AuthorizedExecution): Promise<AuthorizedExecutionResult> {

@@ -59,11 +59,12 @@ test("local Runtime supervision is one closed command over the canonical command
   );
 });
 
-test("the local Runtime console is one closed command projecting the canonical setup/runtime state", () => {
+test("the local Runtime console is one closed command over the canonical setup host", () => {
   const command = getCommandForPositionals(["runtime", "console"]);
   assert.ok(command);
   assert.equal(command.id, "runtime.console");
-  assert.deepEqual(command.optionIds, ["help", "json"]);
+  // #1065: the same repository-bound options as `setup console`, which it is.
+  assert.deepEqual(command.optionIds, getCommandForPositionals(["setup", "console"])?.optionIds);
 });
 
 test("setup Application commands are closed metadata beside the repository-onboarding setup root", () => {

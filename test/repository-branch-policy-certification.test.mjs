@@ -424,12 +424,19 @@ async function withAdmission(run) {
   }
 }
 
-function admissionOptions(environment, fixture, provider, branchObservation = observation()) {
+/** #1179: Admission reads the current owner policy input; the observed branch always comes from the Session. */
+function policyReader(current = observation()) {
+  const input = { ...current };
+  delete input.observedBranch;
+  return async () => ({ version: 1, kind: "local-branch-policy-input", ...input });
+}
+
+function admissionOptions(environment, fixture, provider, current = observation()) {
   return {
     runtimeAuthority: fixture.authority,
     environment,
     now: () => NOW,
-    branchObservation,
+    readBranchPolicy: policyReader(current),
     readEvidence: (request) => executorEvidence(provider, request, fixture.authority),
   };
 }
@@ -610,10 +617,17 @@ test("wrong repository, Implementation, branch, and stale generation fail before
       { name: "CapabilityAdmissionError", reason: "canonical-identity" },
     );
     await denied(
-      "observed branch",
+      "owner policy binds another Implementation branch",
       authorizeExecutionIntent(advanceIntent("observed-branch"), binding.sessionId, {
         ...options,
-        branchObservation: observation({ observedBranch: "story/42-other" }),
+        readBranchPolicy: async () => ({
+          ...(await policyReader()()),
+          binding: {
+            repository: { repositoryHost: "github.com", repositoryId: REPOSITORY_ID },
+            implementation: IMPLEMENTATION,
+            branch: "story/42-other",
+          },
+        }),
       }),
       /invalid or stale/u,
     );
@@ -646,7 +660,7 @@ test("wrong repository, Implementation, branch, and stale generation fail before
       "Session generation is stale at Admission",
       authorizeExecutionIntent(advanceIntent("stale-observation"), binding.sessionId, {
         ...options,
-        branchObservation: observation({ generation: moved, observedGeneration: moved }),
+        readBranchPolicy: policyReader(observation({ generation: moved, observedGeneration: moved })),
       }),
       /contradicts Session binding/u,
     );
@@ -654,7 +668,7 @@ test("wrong repository, Implementation, branch, and stale generation fail before
       "observed generation differs from policy generation",
       authorizeExecutionIntent(advanceIntent("stale-policy"), binding.sessionId, {
         ...options,
-        branchObservation: observation({ observedGeneration: moved }),
+        readBranchPolicy: policyReader(observation({ observedGeneration: moved })),
       }),
       /invalid or stale/u,
     );

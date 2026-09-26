@@ -28,6 +28,7 @@ export const LOCAL_ADMISSION_CLIENT_HEALTH_PATH = "/health" as const;
 export const LOCAL_ADMISSION_CLIENT_SESSIONS_PATH = "/v1/sessions" as const;
 export const LOCAL_ADMISSION_CLIENT_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH = "/v1/executions" as const;
+export const LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
 export const LOCAL_ADMISSION_CLIENT_SESSION_ID_HEADER = "x-inari-session-id" as const;
 
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -35,7 +36,7 @@ const MAX_SESSION_BINDING_BYTES = 16 * 1024;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 
 export interface LocalAdmissionFailureDetails {
-  readonly endpoint: "repository" | "session" | "execution";
+  readonly endpoint: "repository" | "branch-policy" | "session" | "execution";
   readonly status: number;
   readonly stage?: RuntimeFailure["stage"];
   readonly reason?: RuntimeFailure["reason"];
@@ -73,6 +74,7 @@ const FAILURE_CATEGORY_CODES: Readonly<Record<RuntimeFailureCategory, string>> =
 
 function endpointFor(path: string): LocalAdmissionFailureDetails["endpoint"] {
   if (path === LOCAL_ADMISSION_CLIENT_REPOSITORY_PATH) return "repository";
+  if (path === LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH) return "branch-policy";
   if (path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH) return "execution";
   return "session";
 }
@@ -267,6 +269,20 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
         );
       }
       return { id: session.id, status: session.status };
+    },
+    async readBranchPolicy(repository: { readonly id: string; readonly name: string }, implementation: number) {
+      const envelope = await request(LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH, "POST", {
+        version: LOCAL_ADMISSION_CLIENT_PROTOCOL_VERSION,
+        repository: { id: repository.id, name: repository.name },
+        implementation,
+      });
+      if (!isRecord(envelope.branchPolicy)) {
+        throw new LocalAdmissionClientError(
+          "ADMISSION_RESPONSE_INVALID",
+          "Admission returned an invalid branch policy observation.",
+        );
+      }
+      return envelope.branchPolicy;
     },
     async executeIntent(intent: ExecutionIntent, sessionId: string) {
       if (!SESSION_ID_PATTERN.test(sessionId)) {

@@ -39,7 +39,12 @@ import {
   type RepositoryIdentity,
 } from "../github/effect-authorizer.js";
 import type { PrPublicationRequest } from "../pr-publication.js";
-import { observeLocalBranch, type ObserveLocalBranchInput } from "../cli/runtime/branch-observation.js";
+import {
+  observeLocalBranch,
+  validateLocalBranchPolicyInput,
+  type LocalBranchPolicyInput,
+} from "../cli/runtime/branch-observation.js";
+import type { LocalExecutorBranchPolicyRequest } from "../local-control/executor-http.js";
 import {
   runtimeFailure,
   type RuntimeFailure,
@@ -72,21 +77,41 @@ export interface AdmissionAuthorizationOptions {
   readonly readEvidence: AdmissionEvidenceReader;
   readonly environment?: NodeJS.ProcessEnv;
   readonly now?: () => Date;
-  /** Public owner-port observation supplied by the caller, without provider credentials. */
-  readonly branchObservation?: ObserveLocalBranchInput;
+  /**
+   * Reads the current repository branch-policy input from the Executor owner
+   * (#1179). Admission verifies every observed Session binding against this
+   * current evidence; it never accepts a caller-supplied observation.
+   */
+  readonly readBranchPolicy?: (request: LocalExecutorBranchPolicyRequest) => Promise<unknown>;
 }
 
-function requireCurrentBranchObservation(
+/** Current, owner-acquired branch-policy input for one governed Implementation. */
+export async function currentBranchPolicyInput(
+  repository: SessionCertificateRepository,
+  implementation: number,
+  options: AdmissionAuthorizationOptions,
+  stage: RuntimeFailureStage,
+): Promise<LocalBranchPolicyInput> {
+  if (options.readBranchPolicy === undefined)
+    deny(stage, "ADMISSION_BRANCH_OBSERVATION_MISSING", "Current repository branch observation is missing.");
+  const input = validateLocalBranchPolicyInput(
+    await options.readBranchPolicy({ version: 1, repository: evidenceRepository(repository), implementation }),
+  );
+  if (input === undefined)
+    deny(stage, "ADMISSION_BRANCH_OBSERVATION_STALE", "Current repository branch observation is invalid or stale.");
+  return input;
+}
+
+async function requireCurrentBranchObservation(
   binding: LocalSessionBinding,
   options: AdmissionAuthorizationOptions,
   stage: RuntimeFailureStage,
-): void {
+): Promise<void> {
   if (binding.branchObservation === undefined) return;
-  if (options.branchObservation === undefined)
-    deny(stage, "ADMISSION_BRANCH_OBSERVATION_MISSING", "Current repository branch observation is missing.");
+  const input = await currentBranchPolicyInput(binding.repository, binding.task.number, options, stage);
   let current;
   try {
-    current = observeLocalBranch(options.branchObservation);
+    current = observeLocalBranch({ ...input, observedBranch: binding.branchObservation.observedBranch });
   } catch {
     deny(stage, "ADMISSION_BRANCH_OBSERVATION_STALE", "Current repository branch observation is invalid or stale.");
   }
@@ -383,7 +408,7 @@ export async function admitSession(
   binding: LocalSessionBinding,
   options: AdmissionAuthorizationOptions,
 ): Promise<AdmittedSession> {
-  requireCurrentBranchObservation(binding, options, "session-registration");
+  await requireCurrentBranchObservation(binding, options, "session-registration");
   const current = await currentTrust(binding, options);
   const snapshot = createAdmissionSession(binding, current, {
     environment: options.environment,
@@ -422,7 +447,7 @@ export async function authorizeExecutionIntent(
   if (stored === undefined || stored.status !== "active")
     deny("implementation-admission", "ADMISSION_SESSION_UNAVAILABLE", "Session is unavailable.");
   const binding = stored.record.binding;
-  requireCurrentBranchObservation(binding, options, "implementation-admission");
+  await requireCurrentBranchObservation(binding, options, "implementation-admission");
   if (
     binding.branchObservation !== undefined &&
     intent.operation === "branch.advance" &&
@@ -464,7 +489,15 @@ export async function authorizeExecutionIntent(
       ...(readTreeDelta(intent) === undefined ? {} : { treeDelta: readTreeDelta(intent) }),
       ...(evidence.reviewEvidence === undefined ? {} : { reviewEvidence: evidence.reviewEvidence }),
     });
-  } catch {
+  } catch (error: unknown) {
+    // Keep the capability owner's own denial (name/reason) and attach the bounded wire diagnostic.
+    if (error instanceof Error) {
+      Object.defineProperty(error, "runtimeFailure", {
+        value: runtimeFailure("implementation-admission", "ADMISSION_CAPABILITY_DENIED"),
+        enumerable: false,
+      });
+      throw error;
+    }
     deny(
       "implementation-admission",
       "ADMISSION_CAPABILITY_DENIED",

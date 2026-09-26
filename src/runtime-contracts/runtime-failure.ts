@@ -129,6 +129,19 @@ export const RUNTIME_FAILURE_REASONS = Object.freeze({
     "session",
     "The current repository branch-policy observation contradicts the Session binding.",
   ),
+  // Governed Implementation and repository branch policy (#1179).
+  EXECUTOR_IMPLEMENTATION_CONTRACT_REQUIRED: reason(
+    "denied",
+    "The selected Issue is not a governed Implementation contract; a Source Issue or branch name is not an execution contract.",
+  ),
+  EXECUTOR_IMPLEMENTATION_REPOSITORY_MISMATCH: reason(
+    "denied",
+    "The Implementation contract names a different repository.",
+  ),
+  EXECUTOR_BRANCH_POLICY_UNAVAILABLE: reason(
+    "unavailable",
+    "The repository branch policy could not be acquired from the default branch.",
+  ),
   // Implementation admission and capability authorization.
   ADMISSION_TASK_MISMATCH: reason("denied", "The operation repository or task does not match the Session."),
   ADMISSION_IMPLEMENTATION_UNAUTHORIZED: reason("denied", "The current Implementation is not authorized."),

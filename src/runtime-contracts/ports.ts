@@ -47,6 +47,15 @@ export interface AdmissionSessionPort {
   registerSession(binding: LocalSessionBinding): Promise<{ readonly id: string; readonly status: string }>;
   closeSession(binding: LocalSessionBinding): Promise<{ readonly id: string; readonly status: string }>;
   executeIntent(intent: ExecutionIntent, sessionId: string): Promise<unknown>;
+  /**
+   * Current repository branch-policy observation input for one governed
+   * Implementation (#1179), acquired by the owner from the repository's
+   * default branch. Public data only; validated by the consumer.
+   */
+  readBranchPolicy(
+    repository: { readonly id: string; readonly name: string },
+    implementation: number,
+  ): Promise<unknown>;
 }
 
 /**

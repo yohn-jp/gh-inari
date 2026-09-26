@@ -13,7 +13,11 @@ import type { AuthorizedExecution } from "../authorized-execution.js";
 import { validateIssuerRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { LocalAdmissionConfig } from "../local-control/config.js";
 import { LocalExecutorClient } from "../local-control/executor-client.js";
-import type { LocalExecutorEvidenceRequest } from "../local-control/executor-http.js";
+import {
+  validateLocalExecutorBranchPolicyRequest,
+  type LocalExecutorBranchPolicyRequest,
+  type LocalExecutorEvidenceRequest,
+} from "../local-control/executor-http.js";
 import { validateExecutionIntent } from "../local-control/execution-intent.js";
 import {
   clearLocalRuntimeEndpoint,
@@ -32,6 +36,7 @@ import {
   admitSession,
   authorizeExecutionIntent,
   closeSession,
+  currentBranchPolicyInput,
   observeRepositoryReadiness,
   type AdmissionAuthorizationOptions,
 } from "./authorization.js";
@@ -53,6 +58,7 @@ export const LOCAL_ADMISSION_SESSIONS_PATH = "/v1/sessions" as const;
 export const LOCAL_ADMISSION_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_ADMISSION_EXECUTIONS_PATH = "/v1/executions" as const;
 export const LOCAL_ADMISSION_READINESS_PATH = "/v1/readiness" as const;
+export const LOCAL_ADMISSION_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
 export const LOCAL_ADMISSION_SESSION_ID_HEADER = "x-inari-session-id" as const;
 export const MAX_LOCAL_ADMISSION_BODY_BYTES = 1_048_576;
 
@@ -65,6 +71,7 @@ export interface AdmissionExecutorClient {
   verifyReady(): Promise<unknown>;
   resolveRepository?(repositoryNameWithOwner: string): Promise<RepositoryIdentity>;
   readEvidence(request: LocalExecutorEvidenceRequest): Promise<unknown>;
+  readBranchPolicy?(request: LocalExecutorBranchPolicyRequest): Promise<unknown>;
   execute(execution: AuthorizedExecution): Promise<unknown>;
 }
 
@@ -81,6 +88,9 @@ function authorizationOptions(options: LocalAdmissionHttpHandlerOptions): Admiss
   return {
     runtimeAuthority: options.runtimeAuthority,
     readEvidence: (request) => options.executor.readEvidence(request),
+    ...(options.executor.readBranchPolicy === undefined
+      ? {}
+      : { readBranchPolicy: options.executor.readBranchPolicy.bind(options.executor) }),
     ...(options.environment === undefined ? {} : { environment: options.environment }),
     ...(options.now === undefined ? {} : { now: options.now }),
   };
@@ -252,6 +262,35 @@ function createLocalAdmissionHttpHandler(
           "REPOSITORY_UNAVAILABLE",
           "Repository identity could not be resolved.",
           "repository-resolution",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
+      }
+    }
+    if (url.pathname === LOCAL_ADMISSION_BRANCH_POLICY_PATH) {
+      if (request.method !== "POST")
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      const parsed = await bodyJson(request);
+      if (parsed.response !== undefined) return parsed.response;
+      const policyRequest = validateLocalExecutorBranchPolicyRequest(parsed.value);
+      if (policyRequest === undefined)
+        return json(400, {
+          ok: false,
+          error: { code: "INVALID_BRANCH_POLICY_REQUEST", message: "Branch policy request is invalid." },
+        });
+      try {
+        const input = await currentBranchPolicyInput(
+          policyRequest.repository,
+          policyRequest.implementation,
+          authorizationOptions(options),
+          "session-registration",
+        );
+        return json(200, { ok: true, branchPolicy: { version: 1, kind: "local-branch-policy-input", ...input } });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "BRANCH_POLICY_UNAVAILABLE",
+          "Current branch policy is unavailable.",
+          "session-registration",
           "RUNTIME_OWNER_UNAVAILABLE",
         );
       }
@@ -551,6 +590,7 @@ export async function startConfiguredLocalAdmission(
     verifyReady: () => discoveredExecutor().verifyReady(),
     resolveRepository: (repositoryNameWithOwner) => discoveredExecutor().resolveRepository(repositoryNameWithOwner),
     readEvidence: (request) => discoveredExecutor().readEvidence(request),
+    readBranchPolicy: (request) => discoveredExecutor().readBranchPolicy(request),
     execute: (execution) => discoveredExecutor().execute(execution),
   };
   try {
