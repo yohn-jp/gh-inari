@@ -8,6 +8,7 @@ import {
   LOCAL_ADMISSION_CLIENT_PROTOCOL_VERSION,
 } from "../cli/runtime/admission-client.js";
 import { LOCAL_EXECUTOR_HEALTH_PATH, LOCAL_EXECUTOR_PROTOCOL_VERSION } from "./executor-http.js";
+import { writeLocalRuntimeLog } from "./runtime-log.js";
 import {
   clearLocalRuntimeEndpoint,
   readLocalRuntimeEndpoint,
@@ -42,6 +43,7 @@ interface ManagedChild {
   readonly closed: Promise<void>;
   readonly spawnError: Promise<Error>;
   readonly readStderr: () => string;
+  readonly forwardStderr: () => void;
   announcement?: LocalRuntimeEndpoint;
 }
 
@@ -52,6 +54,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function boundedAppend(previous: string, addition: string): string {
   const next = previous + addition;
   return Buffer.byteLength(next, "utf8") <= MAX_CHILD_OUTPUT_BYTES ? next : next.slice(-MAX_CHILD_OUTPUT_BYTES);
+}
+
+function runtimeLogComponent(component: LocalRuntimeComponent): "admission" | "executor" | "supervisor" {
+  return component === "admission" || component === "executor" ? component : "supervisor";
 }
 
 function childEnvironment(component: LocalRuntimeComponent, environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -102,15 +108,33 @@ function createManagedChild(
     windowsHide: true,
   });
   let stderr = "";
+  let forwardStderr = false;
   child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
     stderr = boundedAppend(stderr, chunk);
+    if (forwardStderr) {
+      try {
+        process.stderr.write(chunk);
+      } catch {
+        // A broken foreground log sink must not change child supervision.
+      }
+    }
   });
   const exit = new Promise<ChildExit>((resolve) => {
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
   const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
   const spawnError = new Promise<Error>((resolve) => child.once("error", resolve));
-  return { component, child, exit, closed, spawnError, readStderr: () => stderr };
+  return {
+    component,
+    child,
+    exit,
+    closed,
+    spawnError,
+    readStderr: () => stderr,
+    forwardStderr: () => {
+      forwardStderr = true;
+    },
+  };
 }
 
 function componentId(component: LocalRuntimeComponent, value: unknown): string | undefined {
@@ -273,9 +297,11 @@ async function startAndVerify(
   children: ManagedChild[],
   entry: string,
 ): Promise<ManagedChild> {
+  writeLocalRuntimeLog({ component: runtimeLogComponent(component), event: "starting" });
   const child = createManagedChild(component, environment, entry);
   children.push(child);
   const id = await waitForStartup(child);
+  child.forwardStderr();
   let announcement: LocalRuntimeEndpoint;
   try {
     announcement = requireLocalRuntimeEndpoint(component, id, environment);
@@ -307,11 +333,15 @@ async function waitForClose(child: ManagedChild, timeoutMs: number): Promise<boo
 
 async function stopChild(child: ManagedChild, environment: NodeJS.ProcessEnv): Promise<boolean> {
   const exitedBeforeStop = child.child.exitCode !== null || child.child.signalCode !== null;
-  if (!exitedBeforeStop) child.child.kill("SIGTERM");
+  if (!exitedBeforeStop) {
+    writeLocalRuntimeLog({ component: runtimeLogComponent(child.component), event: "stopping" });
+    child.child.kill("SIGTERM");
+  }
   let stopped = await waitForClose(child, SHUTDOWN_TIMEOUT_MS);
   let forced = false;
   if (!stopped) {
     forced = true;
+    writeLocalRuntimeLog({ component: runtimeLogComponent(child.component), event: "forced-stop", outcome: "failure" });
     child.child.kill("SIGKILL");
     stopped = await waitForClose(child, SHUTDOWN_TIMEOUT_MS);
   }
@@ -339,6 +369,11 @@ async function stopChild(child: ManagedChild, environment: NodeJS.ProcessEnv): P
       );
     }
   }
+  writeLocalRuntimeLog({
+    component: runtimeLogComponent(child.component),
+    event: "stopped",
+    outcome: forced ? "failure" : "success",
+  });
   return forced;
 }
 
@@ -391,6 +426,8 @@ export async function startLocalRuntime(
   try {
     const executor = await startAndVerify("executor", environment, children, entry);
     const admission = await startAndVerify("admission", environment, children, entry);
+    writeLocalRuntimeLog({ component: "executor", event: "ready", outcome: "success" });
+    writeLocalRuntimeLog({ component: "admission", event: "ready", outcome: "success" });
     let stopping: Promise<boolean> | undefined;
     return Object.freeze({
       executorId: executor.announcement!.id,
@@ -533,6 +570,13 @@ export async function superviseLocalRuntime(
       }
       const termination =
         outcome.signal === null ? `exit code ${outcome.code ?? "unknown"}` : `signal ${outcome.signal}`;
+      writeLocalRuntimeLog({
+        component: runtimeLogComponent(outcome.component),
+        event: "unexpected-exit",
+        outcome: "failure",
+        ...(outcome.code === null ? {} : { exitCode: outcome.code }),
+        ...(outcome.signal === null ? {} : { signal: outcome.signal }),
+      });
       throw new LocalRuntimeSupervisorError(
         "LOCAL_RUNTIME_SUPERVISOR_CHILD_EXITED",
         `${outcome.component} stopped unexpectedly with ${termination}; the other local Runtime service was stopped.`,

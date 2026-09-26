@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import {
   createAuthorizedExecution,
   type AuthorizedExecution,
@@ -12,6 +13,14 @@ import {
   type RuntimeFailureReason,
   type RuntimeFailureStage,
 } from "../runtime-contracts/runtime-failure.js";
+import {
+  beginLocalRuntimeRequest,
+  localRuntimeFailureForResponse,
+  localRuntimeOutcomeForStatus,
+  rememberLocalRuntimeFailure,
+  runtimeCorrelationForRequestId,
+  writeLocalRuntimeLog,
+} from "./runtime-log.js";
 
 export const LOCAL_EXECUTOR_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_EXECUTOR_EXECUTIONS_PATH = "/v1/executions" as const;
@@ -140,7 +149,10 @@ function failed(
   fallback: RuntimeFailureReason,
 ): Response {
   const failure = runtimeFailureFromError(error, stage, fallback);
-  return json(runtimeFailureHttpStatus(failure), { ok: false, error: { code, message, failure } });
+  return rememberLocalRuntimeFailure(
+    json(runtimeFailureHttpStatus(failure), { ok: false, error: { code, message, failure } }),
+    failure,
+  );
 }
 
 function jsonContentType(value: string | null): boolean {
@@ -250,7 +262,7 @@ export function createLocalExecutorHttpHandler(
     throw new TypeError("Local Executor HTTP body limit is invalid.");
   }
 
-  return async (request: Request): Promise<Response> => {
+  const handle = async (request: Request): Promise<Response> => {
     let pathname: string;
     try {
       pathname = new URL(request.url).pathname;
@@ -551,22 +563,77 @@ export function createLocalExecutorHttpHandler(
         error: { code: "INVALID_AUTHORIZED_EXECUTION", message: "Request is not a valid AuthorizedExecution." },
       });
     }
+    const correlationId = runtimeCorrelationForRequestId(execution.provenance.request.requestId);
+    const executionStartedAt = performance.now();
+    writeLocalRuntimeLog({
+      component: "executor",
+      event: "execution.received",
+      method: request.method,
+      route: pathname,
+      operation: execution.operation,
+      correlationId,
+    });
     try {
       const result = await options.execute(execution);
-      return json(200, {
+      const response = json(200, {
         ok: true,
         component: "executor",
         executorId: options.executorId,
         protocol: LOCAL_EXECUTOR_PROTOCOL_VERSION,
         result,
       });
+      writeLocalRuntimeLog({
+        component: "executor",
+        event: "execution.completed",
+        method: request.method,
+        route: pathname,
+        operation: execution.operation,
+        correlationId,
+        elapsedMs: performance.now() - executionStartedAt,
+        status: response.status,
+        outcome: localRuntimeOutcomeForStatus(response.status),
+      });
+      return response;
     } catch (error: unknown) {
-      return failed(
+      const response = failed(
         error,
         "EXECUTION_FAILED",
         "Authorized execution failed.",
         "provider-execution",
         "EXECUTOR_EXECUTION_FAILED",
+      );
+      writeLocalRuntimeLog({
+        component: "executor",
+        event: "execution.completed",
+        method: request.method,
+        route: pathname,
+        operation: execution.operation,
+        correlationId,
+        elapsedMs: performance.now() - executionStartedAt,
+        status: response.status,
+        outcome: localRuntimeOutcomeForStatus(response.status),
+        failure: localRuntimeFailureForResponse(response),
+      });
+      return response;
+    }
+  };
+
+  return async (request: Request): Promise<Response> => {
+    let pathname = "/unknown";
+    try {
+      pathname = new URL(request.url).pathname;
+    } catch {
+      // The handler returns a bounded malformed-request response.
+    }
+    const requestLog = beginLocalRuntimeRequest("executor", request.method, pathname);
+    let response: Response | undefined;
+    try {
+      response = await handle(request);
+      return response;
+    } finally {
+      requestLog.complete(
+        response?.status,
+        response === undefined ? undefined : localRuntimeFailureForResponse(response),
       );
     }
   };

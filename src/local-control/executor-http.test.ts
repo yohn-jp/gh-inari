@@ -13,6 +13,7 @@ import {
   LOCAL_EXECUTOR_EVIDENCE_PATH,
   LOCAL_EXECUTOR_HEALTH_PATH,
 } from "./executor-http.js";
+import { runtimeCorrelationForRequestId } from "./runtime-log.js";
 import type { LocalExecutorConfig } from "./config.js";
 import { INARI_ISSUER_PRINCIPAL } from "../github/effect-authorizer.js";
 
@@ -20,6 +21,20 @@ const ISSUE = 465;
 const REPOSITORY = { repositoryHost: "github.com", repositoryId: "123456789", nameWithOwner: "acme/inari" };
 const SUBJECT = { kind: "change" as const, issue: ISSUE };
 const CAPABILITY = { kind: "change.implement" as const, issue: ISSUE };
+
+async function captureStderr<T>(run: () => Promise<T>): Promise<{ readonly value: T; readonly output: string }> {
+  const originalWrite = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    output += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { value: await run(), output };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
 
 function absentProjection(): ChangeProjectionResult {
   return projectChangeFromGitHubEvidence({
@@ -161,6 +176,70 @@ test("local Executor rejects raw Session envelopes, CLI intents, unknown fields,
       body: JSON.stringify({ payload: "x".repeat(5000) }),
     });
     assert.equal(oversized.status, 413);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("Executor request logs correlate executions and redact credentials, provenance, and provider errors", async () => {
+  const secret = "ghp_provider-response-secret-value";
+  const server = createLocalExecutorHttpServer({
+    config: CONFIG,
+    listenPort: 0,
+    version: "0.14.1",
+    executorId: CONFIG.id,
+    execute: async () => {
+      throw new Error(secret);
+    },
+  });
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const endpoint = `http://127.0.0.1:${address.port}${LOCAL_EXECUTOR_EXECUTIONS_PATH}`;
+  try {
+    const { value: statuses, output } = await captureStderr(async () => {
+      const invalid = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...authorizedExecution(),
+          credential: { token: secret, privateKey: secret, signature: secret },
+        }),
+      });
+      const valid = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(authorizedExecution()),
+      });
+      return [invalid.status, valid.status];
+    });
+    assert.equal(statuses[0], 400);
+    assert.ok(statuses[1] >= 400);
+    const events = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const completions = events.filter((event) => event.event === "request.completed");
+    assert.equal(completions.length, 2);
+    assert.ok(completions.every((event) => typeof event.elapsedMs === "number" && typeof event.outcome === "string"));
+    const executionReceived = events.find((event) => event.event === "execution.received");
+    const executionCompleted = events.find((event) => event.event === "execution.completed");
+    assert.ok(executionReceived !== undefined);
+    assert.ok(executionCompleted !== undefined);
+    assert.equal(executionReceived.correlationId, runtimeCorrelationForRequestId("request-local-test"));
+    assert.equal(executionCompleted.correlationId, executionReceived.correlationId);
+    assert.equal(executionReceived.operation, "change.show");
+    assert.ok(typeof executionCompleted.elapsedMs === "number");
+    assert.equal(executionCompleted.outcome, "failure");
+    assert.deepEqual(executionCompleted.failure, {
+      code: "EXECUTOR_EXECUTION_FAILED",
+      stage: "provider-execution",
+      category: "unavailable",
+    });
+    assert.doesNotMatch(
+      output,
+      /ghp_provider-response-secret-value|session-local-test|certificate-local-test|request-local-test/u,
+    );
   } finally {
     await closeServer(server);
   }
