@@ -34,10 +34,13 @@ Public routes are deliberately bounded:
   PKCE exchange. The Worker never persists the returned App-user token.
 - `GET /healthz` — non-secret deployment metadata only.
 
-The Dashboard browser shell is served from the Worker Static Assets directory
-`apps/dashboard/dist`. Worker routes are evaluated first for `/v1/*`, `/mcp`,
-`/.well-known/*`, and `/healthz`, so those surfaces never fall through to the
-SPA shell. There is no second Dashboard server.
+The Dashboard browser shell and exact `/.well-known/inari` onboarding descriptor
+are served from the Worker Static Assets directory `apps/dashboard/dist`.
+Worker routes are evaluated first for `/v1/*`, `/mcp`, unknown
+`/.well-known/*`, and `/healthz`; the exact descriptor is a negative
+`run_worker_first` exception, so it is served asset-first without allowing other
+well-known paths to fall through to the SPA shell. There is no second Dashboard
+server.
 
 The native MCP catalog also advertises the read-only `inari_issue_view` tool
 with the MCP Apps `io.modelcontextprotocol/ui` extension. App-capable hosts
@@ -103,9 +106,13 @@ pnpm exec wrangler deploy --config wrangler.hosted.toml
 ```
 
 The hosted build first runs the Dashboard build and requires
-`apps/dashboard/dist/index.html` before packaging the Worker. The reference
-`wrangler.hosted.toml` publishes that directory as Static Assets and declares
-the `RepositoryRelayDurableObject` binding with its explicit migration.
+`apps/dashboard/dist/index.html` before packaging the Worker. It then reads the
+checked public deployment metadata from `wrangler.hosted.toml`, validates it
+through the canonical endpoint-onboarding contract, and emits
+`apps/dashboard/dist/.well-known/inari` plus its Static Assets JSON header.
+The reference `wrangler.hosted.toml` publishes that directory as Static Assets
+and declares the `RepositoryRelayDurableObject` binding with its explicit
+migration.
 
 Configure the non-secret Endpoint and public App metadata:
 
@@ -120,14 +127,13 @@ INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow
 INARI_GITHUB_APP_CALLBACK_URL=https://HOST/dashboard/oauth/callback
 ```
 
-Configure only the non-secret provider host partition if `github.com` is not used:
+Set the non-secret provider host partition in the deployment Wrangler
+configuration before running `hosted-worker:build` if `github.com` is not used.
+Do not override descriptor-backed public metadata only at deploy time: the
+onboarding descriptor is already a Static Asset by then and must be built from
+the same checked configuration that is deployed.
 
-```sh
-pnpm exec wrangler deploy --config wrangler.hosted.toml \
-  --var INARI_HOSTED_REPOSITORY_HOST:ghe.example.com
-```
-
-The onboarding descriptor also requires these non-secret public App variables:
+The onboarding descriptor requires these non-secret public App variables:
 `INARI_GITHUB_APP_ID`, `INARI_GITHUB_APP_CLIENT_ID`,
 `INARI_GITHUB_APP_SLUG`, `INARI_GITHUB_APP_INSTALLATION_URL`, and
 `INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow`. For Dashboard browser
@@ -136,8 +142,8 @@ authorization, configure the exact registered
 with `wrangler secret put INARI_GITHUB_APP_CLIENT_SECRET`. Configure the
 webhook secret separately with
 `wrangler secret put INARI_GITHUB_WEBHOOK_SECRET`. The descriptor exposes the
-callback URI but never either secret. The descriptor remains bounded and
-unavailable until all required values are valid. Do not put an App private key,
+callback URI but never either secret. The hosted build fails closed when its
+required public values are missing or invalid. Do not put an App private key,
 installation token, user access token, Runtime credential, or other credential
 in Worker variables or Durable Object state.
 
