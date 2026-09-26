@@ -591,7 +591,7 @@ export function createLocalExecutorHttpHandler(
         correlationId,
         elapsedMs: performance.now() - executionStartedAt,
         status: response.status,
-        outcome: localRuntimeOutcomeForStatus(response.status),
+        outcome: result.status === "succeeded" ? "success" : "failure",
       });
       return response;
     } catch (error: unknown) {
