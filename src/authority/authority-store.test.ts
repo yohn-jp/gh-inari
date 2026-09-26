@@ -182,8 +182,9 @@ test("exact open validates ID, fingerprint pin, descriptor and key", async () =>
       () => openLocalAuthorityCustody({ authorityId: "runtime-alpha" }, environment),
       code("RUNTIME_AUTHORITY_KEY_MISMATCH"),
     );
-    // ... and one key is now claimed by two IDs, which enumeration refuses.
-    assert.throws(() => listLocalAuthorityIdentities(environment), code("AUTHORITY_IDENTITY_CONFLICT"));
+    // Enumeration opens every entry, so the mismatched custody fails closed
+    // before the duplicate fingerprint claimed by runtime-beta is observable.
+    assert.throws(() => listLocalAuthorityIdentities(environment), code("RUNTIME_AUTHORITY_KEY_MISMATCH"));
 
     // Descriptor stored under a different path ID.
     replaceLocalJson(
