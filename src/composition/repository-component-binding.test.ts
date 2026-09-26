@@ -197,8 +197,7 @@ test("#1201 incomplete Authority-ID custody is unreadable, not projected as conf
     unlinkSync(path.join(w.home, "authority", "keys", identity.authorityId, "private-key.pem"));
     assert.throws(
       () => resolveRepositoryComponentBinding(one, { environment: w.environment }),
-      (error: unknown) =>
-        error instanceof RepositoryComponentBindingError && error.subjects.includes("authority"),
+      (error: unknown) => error instanceof RepositoryComponentBindingError && error.subjects.includes("authority"),
     );
   } finally {
     w.cleanup();
