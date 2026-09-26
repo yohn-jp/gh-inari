@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { RepositoryRegistry } from "../local-control/repository-registry.js";
 import { findSetupSecretMaterial } from "../runtime-contracts/index.js";
 import {
   SetupConfigStore,
   SetupConfigStoreError,
+  setupConfigRecordRelativePath,
   setupStateFileKey,
   validateSetupConfigRecord,
 } from "./setup-config-store.js";
@@ -32,11 +34,18 @@ test("fresh processes read the same persisted non-secret configuration without s
     // A different process (no inherited INARI_GITHUB_APP_ID) observes the same truth.
     const reader = new SetupConfigStore({ environment: { INARI_CONFIG_HOME: root } });
     assert.deepEqual(reader.read(repository), first);
-    const file = path.join(root, "runtime", "setup", `${setupStateFileKey(repository)}.json`);
+    const file = path.join(root, "repositories", repository.repositoryId, "setup.json");
+    assert.equal(setupConfigRecordRelativePath(repository), `repositories/${repository.repositoryId}/setup.json`);
     const stored: unknown = JSON.parse(readFileSync(file, "utf8"));
     assert.deepEqual(findSetupSecretMaterial(stored), []);
-    // Only the setup record exists below runtime/setup; no operator file is touched.
-    assert.deepEqual(readdirSync(path.join(root, "runtime", "setup")), [`${setupStateFileKey(repository)}.json`]);
+    // The canonical record lives in the repository registry next to the registry record;
+    // no legacy runtime/setup record and no operator file is written.
+    assert.deepEqual(readdirSync(path.join(root, "repositories", repository.repositoryId)), [
+      "repository.json",
+      "setup.json",
+    ]);
+    assert.equal(existsSync(path.join(root, "runtime", "setup")), false);
+    assert.deepEqual(new RepositoryRegistry({ environment }).list(), [{ version: 1, ...repository }]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -102,11 +111,73 @@ test("a store rejects an unreadable record instead of treating it as absent", ()
   try {
     const store = new SetupConfigStore({ environment });
     store.update(repository, 0, { app: { appId: "123" } });
-    const file = path.join(root, "runtime", "setup", `${setupStateFileKey(repository)}.json`);
+    const file = path.join(root, "repositories", repository.repositoryId, "setup.json");
     rmSync(file);
     writeFileSync(file, "{", { mode: 0o600 });
     assert.throws(() => store.read(repository), { code: "SETUP_CONFIG_UNREADABLE" });
     assert.throws(() => store.update(repository, 1, { app: { appId: "123" } }), { code: "SETUP_CONFIG_UNREADABLE" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function legacyFile(root: string): string {
+  return path.join(root, "runtime", "setup", `${setupStateFileKey(repository)}.json`);
+}
+
+function writeLegacy(root: string, value: unknown): string {
+  mkdirSync(path.join(root, "runtime", "setup"), { recursive: true, mode: 0o700 });
+  const file = legacyFile(root);
+  writeFileSync(file, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  return file;
+}
+
+test("a legacy-only record stays readable and is copied forward on the next update without touching it", () => {
+  const { root, environment } = home();
+  try {
+    const legacy = { version: 1, repository, revision: 3, app: { appId: "123" } };
+    const file = writeLegacy(root, legacy);
+    const before = readFileSync(file, "utf8");
+    const store = new SetupConfigStore({ environment });
+    assert.deepEqual(store.read(repository), legacy);
+    assert.equal(store.observe(repository)?.source, "legacy");
+    assert.equal(store.readCanonical(repository), undefined);
+    assert.throws(() => store.update(repository, 0, { endpoint: "https://runtime.example.test" }), {
+      code: "SETUP_CONFIG_STALE",
+    });
+    assert.throws(() => store.update(repository, 3, { app: { appId: "456" } }), { code: "SETUP_CONFIG_CONFLICT" });
+    assert.equal(store.readCanonical(repository), undefined);
+    const next = store.update(repository, 3, { endpoint: "https://runtime.example.test" });
+    assert.equal(next.revision, 4);
+    assert.equal(store.observe(repository)?.source, "canonical");
+    assert.equal(readFileSync(file, "utf8"), before);
+    // Later legacy drift never overrides the canonical record.
+    writeFileSync(file, `${JSON.stringify({ ...legacy, revision: 9, app: { appId: "999" } })}\n`, { mode: 0o600 });
+    assert.deepEqual(store.read(repository), next);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a rename keeps the same setup path and refreshes registry display metadata only", () => {
+  const { root, environment } = home();
+  try {
+    const store = new SetupConfigStore({ environment });
+    const first = store.update(repository, 0, { app: { appId: "123" } });
+    const renamed = { ...repository, nameWithOwner: "yohn-jp/inari-renamed" };
+    assert.deepEqual(store.read(renamed), first);
+    const next = store.update(renamed, first.revision, { endpoint: "https://runtime.example.test" });
+    assert.equal(next.repository.nameWithOwner, "yohn-jp/inari-renamed");
+    assert.equal(next.app?.appId, "123");
+    assert.deepEqual(readdirSync(path.join(root, "repositories")), [repository.repositoryId]);
+    assert.equal(
+      new RepositoryRegistry({ environment }).get(repository.repositoryId)?.nameWithOwner,
+      renamed.nameWithOwner,
+    );
+    // The same repository ID under another host is never reused.
+    const foreign = { ...repository, repositoryHost: "ghe.example.test" };
+    assert.throws(() => store.read(foreign), { code: "SETUP_CONFIG_UNREADABLE" });
+    assert.throws(() => store.update(foreign, 0, { app: { appId: "1" } }), SetupConfigStoreError);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

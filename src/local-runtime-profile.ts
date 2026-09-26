@@ -9,6 +9,8 @@ export const LOCAL_RUNTIME_PROFILE_VERSION = 1 as const;
 export const LOCAL_RUNTIME_PROFILE_DIRECTORY = "runtime-profiles" as const;
 
 const MAX_PROFILE_BYTES = 32 * 1024;
+/** Bound on legacy profile enumeration by immutable identity. */
+export const MAX_LOCAL_RUNTIME_PROFILES = 256;
 const MAX_TEXT_LENGTH = 2_048;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
 const AUTHORITY_ID = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/u;
@@ -291,6 +293,61 @@ export class LocalRuntimeProfileStore {
         // Ignore unrelated or stale profiles during repository selection. A
         // profile selected by its immutable identity is still validated above.
       }
+    }
+    if (matches.length > 1)
+      throw new LocalRuntimeProfileError(
+        "LOCAL_RUNTIME_PROFILE_MISMATCH",
+        "Multiple Runtime profiles match the repository.",
+      );
+    return matches[0];
+  }
+
+  /**
+   * Bounded, fail-closed lookup by immutable repository identity
+   * (`repositoryHost + repositoryId`) for explicit setup migration. Unlike
+   * name-based selection, every profile entry must be readable and valid,
+   * more than one match is ambiguous, and the result is never written.
+   */
+  async findForRepositoryIdentity(repository: {
+    readonly repositoryHost: string;
+    readonly repositoryId: string;
+  }): Promise<LocalRuntimeProfile | undefined> {
+    const directory = path.join(this.#configHome, LOCAL_RUNTIME_PROFILE_DIRECTORY);
+    let entries: string[];
+    try {
+      entries = await readdir(directory);
+    } catch (error: unknown) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+      throw new LocalRuntimeProfileError(
+        "LOCAL_RUNTIME_PROFILE_UNREADABLE",
+        "Runtime profile directory could not be read.",
+      );
+    }
+    const files = entries.filter((value) => value.endsWith(".json")).sort();
+    if (files.length > MAX_LOCAL_RUNTIME_PROFILES)
+      throw new LocalRuntimeProfileError("LOCAL_RUNTIME_PROFILE_UNREADABLE", "Too many Runtime profiles.");
+    const matches: LocalRuntimeProfile[] = [];
+    for (const entry of files) {
+      const entryPath = path.join(directory, entry);
+      let parsed: unknown;
+      try {
+        const stat = await lstat(entryPath);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_PROFILE_BYTES) throw new Error();
+        parsed = JSON.parse((await readFile(entryPath)).toString("utf8")) as unknown;
+      } catch {
+        throw new LocalRuntimeProfileError("LOCAL_RUNTIME_PROFILE_UNREADABLE", "Runtime profile could not be read.");
+      }
+      const candidate = validateProfile(parsed);
+      if (entryPath !== this.pathFor(candidate))
+        throw new LocalRuntimeProfileError(
+          "LOCAL_RUNTIME_PROFILE_MISMATCH",
+          "Runtime profile is stored under another identity.",
+        );
+      if (
+        candidate.repository.repositoryHost === repository.repositoryHost &&
+        candidate.repository.repositoryId === repository.repositoryId
+      )
+        matches.push(candidate);
     }
     if (matches.length > 1)
       throw new LocalRuntimeProfileError(
