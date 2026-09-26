@@ -8,7 +8,12 @@ const COMPONENT_CERTIFICATE_FILE = "mtls-certificate.pem";
 const COMPONENT_PRIVATE_KEY_FILE = "mtls-private-key.pem";
 const COMPONENT_CA_CERTIFICATE_FILE = "mtls-ca-certificate.pem";
 
-export type LocalMtlsRole = "admission" | "executor";
+/**
+ * Runtime mTLS roles. `control` is the control-plane principal (CLI / setup
+ * host) that may observe Executor owner state; it never holds execution
+ * authority. The browser is never an mTLS principal.
+ */
+export type LocalMtlsRole = "admission" | "executor" | "control";
 
 export interface LocalMtlsIdentity {
   readonly certificate: Buffer;
@@ -22,7 +27,7 @@ export class LocalTransportSecurityError extends Error {
   readonly code = "LOCAL_TRANSPORT_MTLS_CONFIGURATION_INVALID" as const;
 
   constructor() {
-    super("Non-loopback local Runtime requires valid owner-only Admission and Executor mTLS identities.");
+    super("Non-loopback local Runtime requires a valid owner-only mTLS identity.");
     this.name = "LocalTransportSecurityError";
   }
 }
@@ -61,9 +66,55 @@ export function loadLocalMtlsIdentity(
   if (certificateBytes === undefined || privateKeyBytes === undefined || caCertificateBytes === undefined) {
     throw new LocalTransportSecurityError();
   }
+  return verifiedIdentity(component, ownId, peerRole, peerId, certificateBytes, privateKeyBytes, caCertificateBytes);
+}
 
+/** Control-plane principal identity: `ctl_` followed by a bounded opaque ID. */
+export function isLocalControlId(value: unknown): value is string {
+  return typeof value === "string" && /^ctl_[A-Za-z0-9_-]{16,64}$/u.test(value);
+}
+
+/** Explicitly supplied identity material; its storage and provisioning belong to the caller (#1223). */
+export interface LocalMtlsIdentityMaterial {
+  readonly certificate: Buffer;
+  readonly privateKey: Buffer;
+  readonly caCertificate: Buffer;
+}
+
+/**
+ * Validate an explicitly supplied Control identity that observes the pinned
+ * Executor. The certificate must carry `urn:inari:local:control:<controlId>`,
+ * match its private key and chain to the supplied CA. No file is read here.
+ */
+export function createLocalControlMtlsIdentity(
+  controlId: string,
+  executorId: string,
+  material: LocalMtlsIdentityMaterial,
+): LocalMtlsIdentity {
+  if (!isLocalControlId(controlId) || !/^exec_[A-Za-z0-9_-]{16,64}$/u.test(executorId))
+    throw new LocalTransportSecurityError();
+  return verifiedIdentity(
+    "control",
+    controlId,
+    "executor",
+    executorId,
+    material.certificate,
+    material.privateKey,
+    material.caCertificate,
+  );
+}
+
+function verifiedIdentity(
+  role: LocalMtlsRole,
+  ownId: string,
+  peerRole: LocalMtlsRole,
+  peerId: string,
+  certificateBytes: Buffer,
+  privateKeyBytes: Buffer,
+  caCertificateBytes: Buffer,
+): LocalMtlsIdentity {
   try {
-    const certificate = assertIdentityCertificate(certificateBytes, component, ownId);
+    const certificate = assertIdentityCertificate(certificateBytes, role, ownId);
     const privateKey = createPrivateKey(privateKeyBytes);
     if (!certificate.checkPrivateKey(privateKey)) throw new LocalTransportSecurityError();
     const caCertificate = parseCertificate(caCertificateBytes);
