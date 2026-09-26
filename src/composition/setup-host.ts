@@ -281,6 +281,8 @@ export function createOwnedRuntimeLifecycle(dependencies: RuntimeLifecycleDepend
   const spawnRuntime = dependencies.start ?? ((env: NodeJS.ProcessEnv) => startLocalRuntime(env));
   let runtime: SupervisedLocalRuntime | undefined;
   let lastFailure: SetupDiagnostic | undefined;
+  /** An owned pair whose shutdown was not confirmed; no new pair may start while it may still run. */
+  let unconfirmed: SupervisedLocalRuntime | undefined;
   let closed = false;
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -291,17 +293,39 @@ export function createOwnedRuntimeLifecycle(dependencies: RuntimeLifecycleDepend
     return next;
   }
 
+  const stopUnconfirmed = (): SetupDiagnostic =>
+    diagnostic("SETUP_RUNTIME_STOP_UNCONFIRMED", "The owned local Runtime did not confirm shutdown.");
+
+  /** Stops an owned pair; an unconfirmed stop is retained so no second pair can start beside it. */
+  async function stopOwned(current: SupervisedLocalRuntime): Promise<boolean> {
+    try {
+      await current.stop();
+      return true;
+    } catch {
+      unconfirmed = current;
+      lastFailure = stopUnconfirmed();
+      return false;
+    }
+  }
+
   function watch(started: SupervisedLocalRuntime): void {
-    void started.exited.then(async (exit) => {
+    void started.exited.then((exit) => {
       if (runtime !== started) return; // Intentional stop by this owner.
-      runtime = undefined;
       lastFailure = diagnostic(
         "SETUP_RUNTIME_CHILD_EXITED",
         `${exit.component} stopped unexpectedly; the owned local Runtime was stopped.`,
       );
-      await started.stop().catch(() => undefined);
+      // Sibling cleanup runs in the lifecycle queue: the pair stays owned until
+      // its stop settles, so no start can spawn a second pair beside it.
+      void serialize(async () => {
+        if (runtime !== started) return; // Already stopped by restart or shutdown.
+        await stopOwned(started);
+        runtime = undefined;
+      });
     });
   }
+
+  const unconfirmedResult = (): RuntimeLifecycleResult => ({ outcome: "unknown", diagnostics: [stopUnconfirmed()] });
 
   async function spawnOwned(): Promise<RuntimeLifecycleResult> {
     try {
@@ -324,6 +348,7 @@ export function createOwnedRuntimeLifecycle(dependencies: RuntimeLifecycleDepend
 
   async function start(): Promise<RuntimeLifecycleResult> {
     if (closed) return failed("SETUP_HOST_CLOSED", "The setup host is shutting down.");
+    if (unconfirmed !== undefined) return unconfirmedResult();
     const current = await probe();
     if (runtime !== undefined) {
       return current.status === "healthy"
@@ -358,6 +383,7 @@ export function createOwnedRuntimeLifecycle(dependencies: RuntimeLifecycleDepend
     restart: (_request: RuntimeLifecycleRequest) =>
       serialize(async () => {
         if (closed) return failed("SETUP_HOST_CLOSED", "The setup host is shutting down.");
+        if (unconfirmed !== undefined) return unconfirmedResult();
         const current = runtime;
         if (current === undefined)
           return failed(
@@ -365,23 +391,14 @@ export function createOwnedRuntimeLifecycle(dependencies: RuntimeLifecycleDepend
             "This setup host did not start the local Runtime; restart it where it was started.",
           );
         runtime = undefined;
-        try {
-          await current.stop();
-        } catch {
-          return {
-            outcome: "unknown" as const,
-            diagnostics: [
-              diagnostic("SETUP_RUNTIME_STOP_UNCONFIRMED", "The owned local Runtime did not confirm shutdown."),
-            ],
-          };
-        }
+        if (!(await stopOwned(current))) return unconfirmedResult();
         return spawnOwned();
       }),
     owns: () => runtime !== undefined,
     shutdown: () =>
       serialize(async () => {
         closed = true;
-        const current = runtime;
+        const current = runtime ?? unconfirmed;
         runtime = undefined;
         if (current !== undefined) await current.stop();
       }),

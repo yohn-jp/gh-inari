@@ -173,6 +173,117 @@ test("owned Runtime lifecycle reports child crashes and start failures truthfull
   assert.equal((await unconfirmed.start(request)).outcome, "unknown");
 });
 
+/** An owned pair whose stop() stays pending until released, recording how many pairs are alive. */
+function deferredPair(alive: { count: number; max: number }) {
+  let exit: (value: { component: "executor" | "admission"; code: number | null; signal: null }) => void = () => {};
+  const exited = new Promise<{ component: "executor" | "admission"; code: number | null; signal: null }>(
+    (resolve) => (exit = resolve),
+  );
+  let release: (outcome: "stopped" | "unconfirmed") => void = () => {};
+  const released = new Promise<"stopped" | "unconfirmed">((resolve) => (release = resolve));
+  let began: () => void = () => {};
+  const stopBegan = new Promise<void>((resolve) => (began = resolve));
+  let stops = 0;
+  alive.count += 1;
+  alive.max = Math.max(alive.max, alive.count);
+  const runtime: SupervisedLocalRuntime = {
+    executorId: "exec_0123456789abcdef",
+    admissionId: "adm_0123456789abcdef",
+    exited,
+    stop: async () => {
+      stops += 1;
+      began();
+      if ((await released) === "unconfirmed") throw new Error("child did not stop");
+      alive.count -= 1;
+      exit({ component: "executor", code: 0, signal: null });
+      return false;
+    },
+  };
+  return {
+    runtime,
+    stopBegan,
+    stops: () => stops,
+    crash: (component: "executor" | "admission") => exit({ component, code: 1, signal: null }),
+    release,
+  };
+}
+
+const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("unexpected child exit cleanup is serialized: no new pair spawns before the sibling stop settles", async () => {
+  const alive = { count: 0, max: 0 };
+  const pairs: ReturnType<typeof deferredPair>[] = [];
+  const lifecycle = createOwnedRuntimeLifecycle({
+    probe: async () => ({ status: alive.count > 0 ? "healthy" : "not-running" }),
+    start: async () => {
+      const pair = deferredPair(alive);
+      pairs.push(pair);
+      return pair.runtime;
+    },
+  });
+  assert.equal((await lifecycle.start(request)).outcome, "succeeded");
+  assert.equal(pairs.length, 1);
+
+  // 1-2. The owned admission child crashes; the sibling cleanup starts and stays pending.
+  pairs[0]!.crash("admission");
+  await pairs[0]!.stopBegan;
+  // 3. A start arrives while cleanup is unfinished.
+  const recovery = lifecycle.start(request);
+  await tick();
+  // 4. No new pair is spawned and the crashed pair is still owned until its stop settles.
+  assert.equal(pairs.length, 1);
+  assert.equal(lifecycle.owns(), true);
+  assert.equal((await lifecycle.observe(generation)).status, "healthy");
+
+  // 5-6. Releasing the cleanup lets the recovery start proceed.
+  pairs[0]!.release("stopped");
+  const result = await recovery;
+  assert.equal(result.outcome, "succeeded");
+  assert.deepEqual(result.diagnostics, []);
+  // 7. Exactly two starts in total and never two live pairs at once.
+  assert.equal(pairs.length, 2);
+  assert.equal(pairs[0]!.stops(), 1);
+  assert.equal(alive.max, 1);
+  assert.equal(alive.count, 1);
+  assert.equal(lifecycle.owns(), true);
+
+  const shutdown = lifecycle.shutdown();
+  pairs[1]!.release("stopped");
+  await shutdown;
+  assert.equal(alive.count, 0);
+});
+
+test("an unconfirmed crash cleanup is never treated as stopped and blocks new pairs", async () => {
+  const alive = { count: 0, max: 0 };
+  const pairs: ReturnType<typeof deferredPair>[] = [];
+  const owner = createOwnedRuntimeLifecycle({
+    probe: async () => ({ status: pairs.length === 0 ? "not-running" : "unhealthy" }),
+    start: async () => {
+      const pair = deferredPair(alive);
+      pairs.push(pair);
+      return pair.runtime;
+    },
+  });
+  assert.equal((await owner.start(request)).outcome, "succeeded");
+  pairs[0]!.crash("executor");
+  await pairs[0]!.stopBegan;
+  const blocked = owner.start(request);
+  pairs[0]!.release("unconfirmed");
+  const result = await blocked;
+  assert.equal(result.outcome, "unknown");
+  assert.equal(result.diagnostics[0]?.code, "SETUP_RUNTIME_STOP_UNCONFIRMED");
+  const restart = await owner.restart(request);
+  assert.equal(restart.outcome, "unknown");
+  assert.equal(restart.diagnostics[0]?.code, "SETUP_RUNTIME_STOP_UNCONFIRMED");
+  assert.equal(pairs.length, 1);
+  const observed = await owner.observe(generation);
+  assert.equal(observed.status, "unhealthy");
+  assert.equal(observed.diagnostics.at(-1)?.code, "SETUP_RUNTIME_STOP_UNCONFIRMED");
+  // Shutdown retries the owned pair and reports the unconfirmed stop instead of succeeding.
+  await assert.rejects(owner.shutdown());
+  assert.equal(pairs.length, 1);
+});
+
 test("CLI Runtime lifecycle only observes and names the owning entrypoints", async () => {
   const lifecycle = createObservedRuntimeLifecycle({ probe: async () => ({ status: "not-running" }) });
   const observed = await lifecycle.observe(generation);
