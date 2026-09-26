@@ -20,7 +20,7 @@ import {
 } from "../change-execution-port.js";
 import { DelegatorTrustError, resolveDelegator } from "../agent-authority/delegator-trust.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
-import { TrustedChangeExecutor } from "../change-trusted-executor.js";
+import { ChangeTrustedExecutorError, TrustedChangeExecutor } from "../change-trusted-executor.js";
 import { GitHubAdapterCore as GitHubAdapter } from "../github/adapter-core.js";
 import {
   GitHubAppInstallationCredentialBroker,
@@ -295,6 +295,41 @@ async function withOwnerFailures<T>(
     return await run(keep);
   } catch (error: unknown) {
     if (owner !== undefined) throw owner;
+    throw error;
+  }
+}
+
+function isExactChangeTrustedExecutorError(error: unknown): error is ChangeTrustedExecutorError {
+  try {
+    return (
+      error instanceof ChangeTrustedExecutorError &&
+      Object.getPrototypeOf(error) === ChangeTrustedExecutorError.prototype
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Preserve only the bounded Change error produced by the trusted executor
+ * when it crosses the installation broker's callback sanitization boundary.
+ */
+export async function withChangeFailures<T>(
+  run: (keep: <R>(operation: () => Promise<R>) => Promise<R>) => Promise<T>,
+): Promise<T> {
+  let changeFailure: ChangeTrustedExecutorError | undefined;
+  const keep = async <R>(operation: () => Promise<R>): Promise<R> => {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      if (isExactChangeTrustedExecutorError(error)) changeFailure = error;
+      throw error;
+    }
+  };
+  try {
+    return await run(keep);
+  } catch (error: unknown) {
+    if (changeFailure !== undefined) throw changeFailure;
     throw error;
   }
 }
@@ -591,26 +626,32 @@ function createDelegates(
       const executor: ChangeExecutionPort = {
         read: (changeRequest) => projectChange(executionBroker, repository, target, changeRequest),
         execute: (changeRequest) =>
-          changeRequest.operation === "merge"
-            ? executionBroker.withSemanticPullRequestMutationExecutor({ target }, (semanticExecutor) =>
-                executionBroker.withRepositoryReadCapability({}, async (capability) =>
-                  new TrustedChangeExecutor({
-                    reader: buildReader(capability, repository, target, changeRequest),
-                    effectAuthorizer,
-                    execution,
-                    target,
-                    semanticPullRequestMutationExecutor: semanticExecutor,
-                  }).execute(changeRequest),
+          withChangeFailures((keep) =>
+            changeRequest.operation === "merge"
+              ? executionBroker.withSemanticPullRequestMutationExecutor({ target }, (semanticExecutor) =>
+                  executionBroker.withRepositoryReadCapability({}, async (capability) =>
+                    keep(() =>
+                      new TrustedChangeExecutor({
+                        reader: buildReader(capability, repository, target, changeRequest),
+                        effectAuthorizer,
+                        execution,
+                        target,
+                        semanticPullRequestMutationExecutor: semanticExecutor,
+                      }).execute(changeRequest),
+                    ),
+                  ),
+                )
+              : executionBroker.withRepositoryReadCapability({}, async (capability) =>
+                  keep(() =>
+                    new TrustedChangeExecutor({
+                      reader: buildReader(capability, repository, target, changeRequest),
+                      effectAuthorizer,
+                      execution,
+                      target,
+                    }).execute(changeRequest),
+                  ),
                 ),
-              )
-            : executionBroker.withRepositoryReadCapability({}, async (capability) =>
-                new TrustedChangeExecutor({
-                  reader: buildReader(capability, repository, target, changeRequest),
-                  effectAuthorizer,
-                  execution,
-                  target,
-                }).execute(changeRequest),
-              ),
+          ),
       };
       if (establishedApp === undefined) throw new Error("GitHub App installation identity is unavailable.");
       return { executor, app: establishedApp };

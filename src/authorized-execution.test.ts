@@ -7,6 +7,7 @@ import { validateCapabilityClaim, type CapabilityClaim } from "./agent-authority
 import { createCapabilityExecutionProvenance } from "./agent-authority/capability-provenance.js";
 import { projectChangeFromGitHubEvidence, type ChangeGitHubEvidence, type ChangeProjectionResult } from "./change.js";
 import { changeMutationRequest, type ChangeExecutionPort } from "./change-execution-port.js";
+import { ChangeTrustedExecutorError } from "./change-trusted-executor.js";
 import { assertTrustedExecution, INARI_ISSUER_PRINCIPAL, type RepositoryIdentity } from "./github/effect-authorizer.js";
 import {
   createAuthorizedExecution,
@@ -226,6 +227,60 @@ test("executes Change work after receiving only an authorized domain context", a
   assert.deepEqual(executor.events, ["execute", "read"]);
   assert.equal(JSON.stringify(input).includes("provider-token"), false);
   assert.equal("credential" in input, false);
+});
+
+test("projects bounded Change failure phase, diagnostics, and evidence", async () => {
+  const input = authorized(
+    "change.issue",
+    changeMutationRequest("issue", ISSUE),
+    { kind: "change.implement", issue: ISSUE },
+    { kind: "change", issue: ISSUE },
+  );
+  const diagnostics = [{ code: "bounded-diagnostic", path: "execution", message: "Change failed safely." }] as never;
+  const evidence = Object.freeze({ outcome: "recovery-required", testEvidence: "bounded" }) as never;
+  const changeFailure = new ChangeTrustedExecutorError(
+    "CHANGE_EXECUTION_RECOVERY_REQUIRED",
+    "Change execution requires governed recovery.",
+    diagnostics,
+    evidence,
+  );
+  const executor: ChangeExecutionPort = {
+    execute: async () => {
+      throw changeFailure;
+    },
+    read: async () => projection("absent"),
+  };
+
+  const result = await executeAuthorizedExecution(input, { changeExecutor: executor, app: APP });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.phase, "recovery-required");
+  assert.deepEqual(result.failure?.diagnostics, diagnostics);
+  assert.deepEqual(result.failure?.evidence, evidence);
+});
+
+test("unknown Change execution failures remain generic and discard raw detail", async () => {
+  const input = authorized(
+    "change.issue",
+    changeMutationRequest("issue", ISSUE),
+    { kind: "change.implement", issue: ISSUE },
+    { kind: "change", issue: ISSUE },
+  );
+  const providerSecret = "raw-provider-secret-must-not-escape";
+  const executor: ChangeExecutionPort = {
+    execute: async () => {
+      throw new Error(providerSecret);
+    },
+    read: async () => projection("absent"),
+  };
+
+  const result = await executeAuthorizedExecution(input, { changeExecutor: executor, app: APP });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.phase, "execution");
+  assert.equal(result.failure?.diagnostics, undefined);
+  assert.equal(result.failure?.evidence, undefined);
+  assert.equal(JSON.stringify(result).includes(providerSecret), false);
 });
 
 test("executes branch advancement and publication through their existing delegates", async () => {
