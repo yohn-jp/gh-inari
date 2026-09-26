@@ -31,6 +31,7 @@ import {
 } from "../agent-authority/delegator.js";
 import { DelegatorTrustError, loadDelegatorTrust } from "../agent-authority/delegator-trust.js";
 import { issuerKeyReference, localExecutorAppId } from "../executor/issuer-input.js";
+import { createLocalExecutorObservationPort } from "../executor/observation.js";
 import { GitHubAppDeviceFlowClient, type GitHubAppUserCredential } from "../github/app-user-credential.js";
 import {
   GitHubAppUserCredentialBroker,
@@ -44,7 +45,6 @@ import {
   readExistingLocalJson,
   validateLocalAdmissionConfig,
   validateLocalCliConfig,
-  validateLocalExecutorConfig,
 } from "../local-control/config.js";
 import { validateLocalRuntimeEndpoint } from "../local-control/runtime-discovery.js";
 import {
@@ -71,13 +71,15 @@ import {
   type SetupGeneration,
   type SetupObservation,
   type SetupObservationPort,
+  type ExecutorObservationPort,
   validateRuntimeFailure,
 } from "../runtime-contracts/index.js";
 import {
   executorBindingFor,
   executorCredentialFor,
+  executorCustodyFromObservation,
   readAuthorityReference,
-  readExecutorCustodyEvidence,
+  readExecutorObservation,
   type ExecutorBindingProjection,
   type ExecutorCredentialProjection,
   type ExecutorCustodyEvidence,
@@ -444,12 +446,24 @@ function selectCustody(
 export async function readSetupConfigurationEvidence(
   repository: RepositoryIdentity,
   environment: NodeJS.ProcessEnv,
+  executorPort: ExecutorObservationPort = createLocalExecutorObservationPort({ environment }),
 ): Promise<SetupConfigurationEvidence> {
   const config = read(() => new SetupConfigStore({ environment }).read(repository));
-  const executor = read(() =>
-    readExistingLocalJson("executor", "config.json", validateLocalExecutorConfig, environment),
+  // Executor identity, App custody and repository bindings come only from the Executor owner port (#1223).
+  const executor = await readExecutorObservation(
+    executorPort,
+    config.state === "present" && config.value.executor !== undefined,
   );
-  const custody = read(() => readExecutorCustodyEvidence(environment));
+  const observation = executor.state === "present" ? executor.observation : undefined;
+  const custody: Read<ExecutorCustodyEvidence> =
+    executor.state === "unreadable"
+      ? { state: "unreadable" }
+      : observation === undefined
+        ? { state: "absent" }
+        : (() => {
+            const value = executorCustodyFromObservation(observation);
+            return value === undefined ? { state: "absent" } : { state: "present", value };
+          })();
   const recordedAuthority = config.state === "present" ? config.value.authority : undefined;
   const authority = read(() => readAuthorityReference(recordedAuthority, environment));
   const admission = read(() =>
@@ -475,8 +489,7 @@ export async function readSetupConfigurationEvidence(
   const unreadable = (
     [
       ["setup-config", config],
-      ["executor/config.json", executor],
-      ["executor/custody", custody],
+      ["executor", executor],
       ["authority", authority],
       ["admission/config.json", admission],
       ["admission/runtime-authority.json", pin],
@@ -492,7 +505,7 @@ export async function readSetupConfigurationEvidence(
   const evidence = {
     repository,
     ...(value(config) === undefined ? {} : { config: value(config) }),
-    ...(value(executor) === undefined ? {} : { executorConfigId: value(executor)!.id }),
+    ...(observation === undefined ? {} : { executorConfigId: observation.executorId }),
     ...(value(custody) === undefined ? {} : { executorCustody: value(custody) }),
     ...(selected === undefined ? {} : { custody: selected }),
     ...(binding === undefined ? {} : { binding }),
@@ -792,6 +805,11 @@ export interface SetupObservationOptions {
   readonly lifecycle?: RuntimeLifecyclePort;
   readonly sessionReadiness?: SessionReadinessPort;
   readonly now?: () => Date;
+  /**
+   * Executor owner observation (#1223): the co-located local adapter by
+   * default, or an explicitly configured observation client.
+   */
+  readonly executor?: ExecutorObservationPort;
 }
 
 const VALID_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u;
@@ -859,7 +877,8 @@ export async function observeSetup(
 ): Promise<SetupObservation> {
   const environment = options.environment ?? process.env;
   const now = options.now ?? (() => new Date());
-  const evidence = await readSetupConfigurationEvidence(repository, environment);
+  const executor = options.executor ?? createLocalExecutorObservationPort({ environment });
+  const evidence = await readSetupConfigurationEvidence(repository, environment, executor);
   const generation: SetupGeneration = { repository, configuration: evidence.generation };
   const [trust, health, observedReadiness] = await Promise.all([
     repositoryTrustStatus(evidence, options.provider, now()),
@@ -872,7 +891,7 @@ export async function observeSetup(
   // for the generation observed at the start.
   const readiness: DimensionResult<"session-readiness"> =
     observedReadiness.status === "ready" &&
-    (await readSetupConfigurationEvidence(repository, environment)).generation !== evidence.generation
+    (await readSetupConfigurationEvidence(repository, environment, executor)).generation !== evidence.generation
       ? {
           status: "unknown",
           diagnostics: [

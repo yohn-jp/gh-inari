@@ -730,7 +730,7 @@ test("#1201 a second repository configures and binds its own dedicated App throu
   const w = world();
   try {
     await bound(w);
-    const firstBefore = resolveRepositoryComponentBinding(repository, { environment: w.environment });
+    const firstBefore = await resolveRepositoryComponentBinding(repository, { environment: w.environment });
     const second = { repositoryHost: "github.com", repositoryId: "1330755861", nameWithOwner: "yohn-jp/second" };
     const DEDICATED_APP = "5151";
     const action = createSetupActionPort({
@@ -766,7 +766,7 @@ test("#1201 a second repository configures and binds its own dedicated App throu
     const bindResult = await action.perform(actionRequest("executor.bind-repository", await generationOf()));
     assert.equal(bindResult.outcome, "succeeded", JSON.stringify(bindResult.diagnostics));
 
-    const secondBinding = resolveRepositoryComponentBinding(second, { environment: w.environment });
+    const secondBinding = await resolveRepositoryComponentBinding(second, { environment: w.environment });
     assert.equal(secondBinding.app?.appId, DEDICATED_APP);
     assert.equal(secondBinding.executor?.appCredential?.appId, DEDICATED_APP);
     assert.equal(secondBinding.executor?.appCredential?.fingerprint, receipt.publicFingerprint);
@@ -778,7 +778,7 @@ test("#1201 a second repository configures and binds its own dedicated App throu
     const evidence = await readSetupConfigurationEvidence(second, w.environment);
     assert.equal(evidence.binding?.status, "bound");
     // The first repository's App, credential and binding are untouched.
-    assert.deepEqual(resolveRepositoryComponentBinding(repository, { environment: w.environment }), firstBefore);
+    assert.deepEqual(await resolveRepositoryComponentBinding(repository, { environment: w.environment }), firstBefore);
     assert.equal(executorIssuerCustody(w.environment)?.appId, APP_ID);
     assert.notEqual(firstBefore.executor?.appCredential?.fingerprint, receipt.publicFingerprint);
     assert.equal(storedText(w).includes("PRIVATE KEY"), false);

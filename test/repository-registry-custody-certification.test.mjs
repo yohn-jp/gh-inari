@@ -5,9 +5,10 @@
 // movement, and the existing Local Runtime Executor execution path for the
 // adopted repository.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { createPublicKey, generateKeyPairSync, verify } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,10 +18,7 @@ import { createDelegatorRecord } from "../src/agent-authority/delegator-operatio
 import { delegatorPublicKeyFingerprint } from "../src/agent-authority/delegator-key.ts";
 import { setupLocalAdmission } from "../src/admission/setup.ts";
 import { importLegacyLocalAuthority, listLocalAuthorityIdentities } from "../src/authority/index.ts";
-import {
-  resolveRepositoryComponentBinding,
-  readExecutorCustodyEvidence,
-} from "../src/composition/repository-component-binding.ts";
+import { resolveRepositoryComponentBinding } from "../src/composition/repository-component-binding.ts";
 import { migrateLegacySetupConfig } from "../src/composition/setup-config-migration.ts";
 import {
   SetupConfigStore,
@@ -31,6 +29,7 @@ import { observeSetup } from "../src/composition/setup-observation.ts";
 import { ExecutorAppCredentialStore, ExecutorCredentialStore } from "../src/executor/credential-store.ts";
 import { issuerExecutionEnvironment } from "../src/executor/enrollment/issuer-reference.ts";
 import { resolveLocalExecutorRepository } from "../src/executor/execution.ts";
+import { createLocalExecutorObservationPort } from "../src/executor/observation.ts";
 import { ExecutorRepositoryBindingStore } from "../src/executor/repository-binding-store.ts";
 import { ensureLocalExecutorConfiguration } from "../src/executor/setup.ts";
 import {
@@ -42,6 +41,7 @@ import {
 } from "../src/local-control/config.ts";
 import { setupLocalAuthority } from "../src/local-control/identity.ts";
 import { RepositoryRegistry } from "../src/local-control/repository-registry.ts";
+import { ExecutorObservationClient } from "../src/local-control/executor-observation-client.ts";
 import { LocalRuntimeProfileStore } from "../src/local-runtime-profile.ts";
 import { findSetupSecretMaterial } from "../src/runtime-contracts/index.ts";
 
@@ -133,7 +133,7 @@ function freshProcessBindings(home, repositories) {
   const code = `
     const { resolveRepositoryComponentBinding } = await import(${JSON.stringify(moduleUrl)});
     const repositories = JSON.parse(process.argv[1]);
-    process.stdout.write(JSON.stringify(repositories.map((repository) => resolveRepositoryComponentBinding(repository))));
+    process.stdout.write(JSON.stringify(await Promise.all(repositories.map((repository) => resolveRepositoryComponentBinding(repository)))));
   `;
   const output = execFileSync(
     process.execPath,
@@ -141,6 +141,51 @@ function freshProcessBindings(home, repositories) {
     { cwd: projectRoot, env: { PATH: process.env.PATH, INARI_CONFIG_HOME: home }, encoding: "utf8" },
   );
   return JSON.parse(output);
+}
+
+/**
+ * A separately hosted Executor: its own process and config home, reachable
+ * only through the #1223 owner observation route on its loopback endpoint.
+ */
+async function startSeparateExecutor(executorHome, executorId) {
+  const code = `
+    import { createLocalExecutorHttpServer } from "./src/local-control/executor-server.ts";
+    import { createLocalExecutorObservationPort } from "./src/executor/observation.ts";
+    const executorId = process.env.INARI_TEST_EXECUTOR_ID;
+    const owner = createLocalExecutorObservationPort({ environment: process.env });
+    const server = createLocalExecutorHttpServer({
+      config: { version: 1, id: executorId, listen: { host: "127.0.0.1", port: 0 }, provider: { kind: "github", credentialProfile: "default" } },
+      listenPort: 0,
+      version: "custody-certification",
+      executorId,
+      execute: async () => { throw new Error("execution is not part of observation"); },
+      observeOwner: () => owner.observe(),
+    });
+    server.once("listening", () => console.log(JSON.stringify({ port: server.address().port })));
+    process.once("SIGTERM", () => server.close(() => process.exit(0)));
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+    cwd: projectRoot,
+    env: { PATH: process.env.PATH, INARI_CONFIG_HOME: executorHome, INARI_TEST_EXECUTOR_ID: executorId },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")));
+  child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")));
+  const deadline = Date.now() + 20_000;
+  while (!stdout.includes("\n")) {
+    if (child.exitCode !== null || Date.now() > deadline) throw new Error(`Executor did not start: ${stderr}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const { port } = JSON.parse(stdout.split("\n")[0]);
+  return {
+    endpoint: `http://127.0.0.1:${port}`,
+    async stop() {
+      child.kill("SIGTERM");
+      if (child.exitCode === null) await once(child, "close");
+    },
+  };
 }
 
 const unavailableProvider = {
@@ -262,8 +307,8 @@ test("#1201 certifies the composed multi-repository registry and custody migrati
       new RepositoryRegistry({ environment }).list().map((item) => item.repositoryId),
       ["101", "202", "303"],
     );
-    const [first, second, third] = [adopted, dedicated, shared].map((repository) =>
-      resolveRepositoryComponentBinding(repository, { environment }),
+    const [first, second, third] = await Promise.all(
+      [adopted, dedicated, shared].map((repository) => resolveRepositoryComponentBinding(repository, { environment })),
     );
     // Independent bindings, no cross-repository leakage.
     assert.deepEqual(
@@ -320,6 +365,47 @@ test("#1201 certifies the composed multi-repository registry and custody migrati
     // A fresh process without any matching legacy export reconstructs the same bindings.
     assert.deepEqual(freshProcessBindings(home, [adopted, dedicated, shared]), [first, second, third]);
 
+    // A separately hosted Executor: its owner state moves to another config home and process. The
+    // composition keeps only registry, setup, Authority and Admission state and observes the Executor
+    // solely through the explicitly configured observation client; nothing is shared on disk.
+    const executorHome = mkdtempSync(path.join(root, "executor-host-"));
+    renameSync(path.join(home, "executor"), path.join(executorHome, "executor"));
+    const separate = await startSeparateExecutor(executorHome, executor.id);
+    try {
+      assert.equal(existsSync(path.join(home, "executor")), false);
+      const remote = new ExecutorObservationClient({ endpoint: separate.endpoint, executorId: executor.id });
+      const remoteBindings = await Promise.all(
+        [adopted, dedicated, shared].map((repository) =>
+          resolveRepositoryComponentBinding(repository, { environment, executor: remote }),
+        ),
+      );
+      assert.deepEqual(remoteBindings, [first, second, third]);
+      for (const repository of [adopted, dedicated, shared]) {
+        const observed = await observeSetup(repository, {
+          environment,
+          provider: unavailableProvider,
+          executor: remote,
+        });
+        assert.equal(observed.configuration.status, "configured", JSON.stringify(observed.configuration));
+        assert.equal(observed.providerBinding.status, "bound", repository.nameWithOwner);
+      }
+      // The local adapter of the composition host has no Executor to observe; there is no fallback.
+      await assert.rejects(resolveRepositoryComponentBinding(adopted, { environment }), {
+        code: "REPOSITORY_COMPONENT_BINDING_UNREADABLE",
+      });
+    } finally {
+      await separate.stop();
+    }
+    // An unreachable remote Executor fails closed for a repository that recorded one.
+    await assert.rejects(
+      resolveRepositoryComponentBinding(adopted, {
+        environment,
+        executor: new ExecutorObservationClient({ endpoint: separate.endpoint, executorId: executor.id }),
+      }),
+      (error) => error.code === "REPOSITORY_COMPONENT_BINDING_UNREADABLE" && error.subjects.includes("executor"),
+    );
+    renameSync(path.join(executorHome, "executor"), path.join(home, "executor"));
+
     // The existing Local Runtime Executor execution path acts for the adopted repository with its
     // App-scoped credential, and for the dedicated repository with its own App, never another.
     const provider = github(
@@ -354,9 +440,11 @@ test("#1201 certifies the composed multi-repository registry and custody migrati
     );
     const rerun = await migrateLegacySetupConfig(adopted, { environment });
     assert.equal(rerun.outcome, "canonical");
-    assert.deepEqual(resolveRepositoryComponentBinding(adopted, { environment }), first);
+    assert.deepEqual(await resolveRepositoryComponentBinding(adopted, { environment }), first);
     assert.equal(
-      readExecutorCustodyEvidence(environment).credentials.every((item) => item.source === "app-scoped"),
+      (await createLocalExecutorObservationPort({ environment }).observe()).apps.every(
+        (item) => item.source === "app-scoped",
+      ),
       true,
     );
 
@@ -364,12 +452,12 @@ test("#1201 certifies the composed multi-repository registry and custody migrati
     const renamed = { ...dedicated, nameWithOwner: "acme/two-renamed" };
     store.update(renamed, store.read(dedicated).revision, {});
     for (const observed of [renamed, dedicated]) {
-      const after = resolveRepositoryComponentBinding(observed, { environment });
+      const after = await resolveRepositoryComponentBinding(observed, { environment });
       assert.deepEqual(after.repository, renamed);
       assert.deepEqual(after.executor, second.executor);
       assert.deepEqual(after.authority, second.authority);
     }
-    assert.deepEqual(resolveRepositoryComponentBinding(shared, { environment }), third);
+    assert.deepEqual(await resolveRepositoryComponentBinding(shared, { environment }), third);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

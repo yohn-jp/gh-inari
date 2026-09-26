@@ -36,12 +36,8 @@ import {
   type LocalConfigMigrationBlocker,
 } from "../authority/local-migration.js";
 import { SetupTrustSelectionError, selectSetupAuthority } from "../authority/setup-trust.js";
-import {
-  ExecutorEnrollmentOwner,
-  executorAppCustody,
-  executorIssuerCustody,
-  type ExecutorEnrollmentOwnerOptions,
-} from "../executor/enrollment/owner.js";
+import { ExecutorEnrollmentOwner, type ExecutorEnrollmentOwnerOptions } from "../executor/enrollment/owner.js";
+import { createLocalExecutorObservationPort } from "../executor/observation.js";
 import { LocalExecutorError, ensureLocalExecutorConfiguration } from "../executor/setup.js";
 import { bindLocalCliAdmissionRoute, ensureLocalCliTopology } from "../local-control/config.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
@@ -63,6 +59,7 @@ import {
   type SetupDiagnostic,
   type SetupJournalPort,
   type SetupObservationPort,
+  type ExecutorObservationPort,
 } from "../runtime-contracts/index.js";
 import { executorCredentialFor, type ExecutorCredentialProjection } from "./repository-component-binding.js";
 import { SetupConfigStore, SetupConfigStoreError, type SetupConfigPatch } from "./setup-config-store.js";
@@ -98,6 +95,11 @@ export interface SetupAdapterOptions {
   readonly sessionReadiness?: SessionReadinessPort;
   /** Shared setup record store; injectable so persistence failures can be exercised. */
   readonly configStore?: SetupConfigStore;
+  /**
+   * Executor owner observation (#1223): the co-located local adapter by
+   * default, or an explicitly configured observation client.
+   */
+  readonly executorObservation?: ExecutorObservationPort;
   /** Executor owner verification seams (tests); production uses the installation broker. */
   readonly executorVerification?: Pick<ExecutorEnrollmentOwnerOptions, "verifyProvider" | "verifyInstallation">;
   readonly fetch?: typeof globalThis.fetch;
@@ -186,21 +188,18 @@ function receipt(
   });
 }
 
-/**
- * Public custody state of one App: its App-scoped credential and the legacy
- * single-App projection, which a projected enrollment writes first (#1199).
- */
-function custodyState(environment: NodeJS.ProcessEnv, appId: string): string {
+/** Owner-observed custody state of one App through the Executor observation port (#1223). */
+async function custodyState(executor: ExecutorObservationPort, appId: string): Promise<string> {
   try {
-    const legacy = executorIssuerCustody(environment);
-    const scoped = executorAppCustody(environment).apps.find((app) => app.appId === appId);
-    return JSON.stringify([
-      legacy === undefined ? "absent" : `${legacy.appId}:${legacy.generation}:${legacy.fingerprint}`,
-      scoped === undefined ? "absent" : `${scoped.generation}:${scoped.fingerprint}`,
-    ]);
+    const app = (await executor.observe()).apps.find((item) => item.appId === appId);
+    return app === undefined ? "absent" : `${app.source}:${app.generation}:${app.fingerprint}`;
   } catch {
     return "unreadable";
   }
+}
+
+function executorPort(options: SetupAdapterOptions, environment: NodeJS.ProcessEnv): ExecutorObservationPort {
+  return options.executorObservation ?? createLocalExecutorObservationPort({ environment });
 }
 
 /**
@@ -210,6 +209,7 @@ function custodyState(environment: NodeJS.ProcessEnv, appId: string): string {
  */
 export function createExecutorSetupEnrollmentPort(options: SetupAdapterOptions = {}): SecretEnrollmentPort {
   const environment = options.environment ?? process.env;
+  const executor = executorPort(options, environment);
   return Object.freeze({
     owner: "executor" as const,
     kinds: Object.freeze(["executor-issuer-private-key"] as const),
@@ -228,7 +228,7 @@ export function createExecutorSetupEnrollmentPort(options: SetupAdapterOptions =
         return receipt(request, [
           diagnostic("SETUP_APP_ID_INVALID", "A numeric Issuer App ID from the same action is required."),
         ]);
-      const evidence = await readSetupConfigurationEvidence(request.repository, environment);
+      const evidence = await readSetupConfigurationEvidence(request.repository, environment, executor);
       if (
         request.operationId !==
         setupOperationId("executor.configure", { repository: request.repository, configuration: evidence.generation })
@@ -267,13 +267,13 @@ export function createExecutorSetupEnrollmentPort(options: SetupAdapterOptions =
           ),
         ]);
       }
-      const before = custodyState(environment, appId);
+      const before = await custodyState(executor, appId);
       try {
         const enrolled = await owner.enrollStream(capability, request, secret, signal);
         return receipt(request, [], enrolled.publicFingerprint);
       } catch (error: unknown) {
         // Reconcile from fresh owner evidence: unchanged custody proves no effect.
-        if (before !== "unreadable" && custodyState(environment, appId) === before)
+        if (before !== "unreadable" && (await custodyState(executor, appId)) === before)
           return receipt(request, [
             diagnostic("SETUP_ENROLLMENT_REJECTED", "The Executor rejected the key; custody is unchanged."),
           ]);
@@ -300,6 +300,7 @@ function appCustody(evidence: SetupConfigurationEvidence, appId: string): Execut
 
 export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupActionPort {
   const environment = options.environment ?? process.env;
+  const executor = executorPort(options, environment);
   const store = options.configStore ?? new SetupConfigStore({ environment });
   const provider =
     options.provider ?? createAppUserSetupProvider({ environment, fetch: options.fetch, now: options.now });
@@ -444,7 +445,7 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
       }
     }
 
-    const current = await readSetupConfigurationEvidence(repository, environment);
+    const current = await readSetupConfigurationEvidence(repository, environment, executor);
     if (current.admission === undefined || current.pin === undefined) {
       try {
         setupLocalAdmission(adopted, environment);
@@ -460,7 +461,7 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
     }
 
     // Route the local CLI to the configured Admission, as `admission setup` does.
-    const routed = await readSetupConfigurationEvidence(repository, environment);
+    const routed = await readSetupConfigurationEvidence(repository, environment, executor);
     if (routed.admission !== undefined && routed.cliAdmissionRouteId !== routed.admission.id) {
       try {
         ensureLocalCliTopology(environment);
@@ -495,7 +496,7 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
         ).diagnostics,
       ]);
     }
-    const final = await readSetupConfigurationEvidence(repository, environment);
+    const final = await readSetupConfigurationEvidence(repository, environment, executor);
     const missing = missingConfiguration(final, environment);
     if (missing.length > 0)
       return outcome(request, "failed", [
@@ -701,7 +702,7 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
           diagnostic("SETUP_ACTION_UNSUPPORTED", "The action is not a canonical Setup action of this generation."),
         ]);
       // Authorization, identity and freshness precede every protected effect.
-      const evidence = await readSetupConfigurationEvidence(repository, environment);
+      const evidence = await readSetupConfigurationEvidence(repository, environment, executor);
       if (
         !sameRepository(evidence.repository, repository) ||
         !sameSetupGeneration({ repository, configuration: evidence.generation }, request.generation)
@@ -726,11 +727,13 @@ export function createLocalSetupPorts(options: SetupAdapterOptions = {}): LocalS
   const environment = options.environment ?? process.env;
   const provider =
     options.provider ?? createAppUserSetupProvider({ environment, fetch: options.fetch, now: options.now });
-  const shared = { ...options, environment, provider };
+  const executor = executorPort(options, environment);
+  const shared = { ...options, environment, provider, executorObservation: executor };
   return Object.freeze({
     observation: createSetupObservationPort({
       environment,
       provider,
+      executor,
       ...(options.lifecycle === undefined ? {} : { lifecycle: options.lifecycle }),
       sessionReadiness:
         options.sessionReadiness ??

@@ -8,6 +8,7 @@ import { createDelegatorRecord } from "../agent-authority/delegator-operations.j
 import { setupLocalAdmission } from "../admission/setup.js";
 import { listLocalAuthorityIdentities, prepareLocalAuthorityIdentity } from "../authority/index.js";
 import { ExecutorAppCredentialStore, ExecutorCredentialStore } from "../executor/credential-store.js";
+import { createLocalExecutorObservationPort } from "../executor/observation.js";
 import { ExecutorRepositoryBindingStore } from "../executor/repository-binding-store.js";
 import { ensureLocalExecutorConfiguration } from "../executor/setup.js";
 import { writeLocalJson } from "../local-control/config.js";
@@ -16,7 +17,7 @@ import { RepositoryRegistry } from "../local-control/repository-registry.js";
 import { findSetupSecretMaterial } from "../runtime-contracts/index.js";
 import {
   RepositoryComponentBindingError,
-  readExecutorCustodyEvidence,
+  executorCustodyFromObservation,
   resolveRepositoryComponentBinding,
 } from "./repository-component-binding.js";
 import { SetupConfigStore, setupStateFileKey, validateSetupConfigRecord } from "./setup-config-store.js";
@@ -103,8 +104,8 @@ test("#1201 two repositories resolve independent bindings: shared App intentiona
       app: { appId: SHARED_APP, installationId: "72" },
       executor: { configId: executor.id, issuerKeyFingerprint: shared.fingerprint },
     });
-    const first = resolveRepositoryComponentBinding(one, { environment: w.environment });
-    const second = resolveRepositoryComponentBinding(two, { environment: w.environment });
+    const first = await resolveRepositoryComponentBinding(one, { environment: w.environment });
+    const second = await resolveRepositoryComponentBinding(two, { environment: w.environment });
     // Shared-App compatibility: one credential generation, two independent repository bindings.
     assert.equal(first.executor?.appCredential?.fingerprint, second.executor?.appCredential?.fingerprint);
     assert.equal(first.executor?.appCredential?.source, "app-scoped");
@@ -128,12 +129,12 @@ test("#1201 two repositories resolve independent bindings: shared App intentiona
       app: { appId: DEDICATED_APP, installationId: "73" },
       executor: { configId: executor.id, issuerKeyFingerprint: dedicated.fingerprint },
     });
-    const third = resolveRepositoryComponentBinding(three, { environment: w.environment });
+    const third = await resolveRepositoryComponentBinding(three, { environment: w.environment });
     assert.equal(third.executor?.appCredential?.appId, DEDICATED_APP);
     assert.notEqual(third.executor?.appCredential?.fingerprint, shared.fingerprint);
     assert.equal(third.executor?.binding?.appId, DEDICATED_APP);
-    assert.deepEqual(resolveRepositoryComponentBinding(one, { environment: w.environment }), first);
-    assert.deepEqual(resolveRepositoryComponentBinding(two, { environment: w.environment }), second);
+    assert.deepEqual(await resolveRepositoryComponentBinding(one, { environment: w.environment }), first);
+    assert.deepEqual(await resolveRepositoryComponentBinding(two, { environment: w.environment }), second);
     for (const projection of [first, second, third]) {
       assert.deepEqual(serializedLeaks(projection, w.home), []);
       assert.deepEqual(findSetupSecretMaterial(projection), []);
@@ -151,7 +152,7 @@ test("#1201 one Authority identity serves both repositories by reference, withou
     record(w.environment, one, { authority: reference });
     record(w.environment, two, { authority: reference });
     for (const repository of [one, two]) {
-      const projection = resolveRepositoryComponentBinding(repository, { environment: w.environment });
+      const projection = await resolveRepositoryComponentBinding(repository, { environment: w.environment });
       assert.deepEqual(projection.authority?.identity, { ...reference, custody: "authority-id" });
       assert.deepEqual(projection.conflicts, []);
       assert.deepEqual(serializedLeaks(projection, w.home), []);
@@ -173,9 +174,11 @@ test("#1201 one Authority identity serves both repositories by reference, withou
       },
     );
     assert.deepEqual(
-      resolveRepositoryComponentBinding(
-        { ...two, repositoryId: "1004", nameWithOwner: "acme/four" },
-        { environment: w.environment },
+      (
+        await resolveRepositoryComponentBinding(
+          { ...two, repositoryId: "1004", nameWithOwner: "acme/four" },
+          { environment: w.environment },
+        )
       ).conflicts,
       ["authority"],
     );
@@ -195,8 +198,8 @@ test("#1201 incomplete Authority-ID custody is unreadable, not projected as conf
       },
     });
     unlinkSync(path.join(w.home, "authority", "keys", identity.authorityId, "private-key.pem"));
-    assert.throws(
-      () => resolveRepositoryComponentBinding(one, { environment: w.environment }),
+    await assert.rejects(
+      resolveRepositoryComponentBinding(one, { environment: w.environment }),
       (error: unknown) => error instanceof RepositoryComponentBindingError && error.subjects.includes("authority"),
     );
   } finally {
@@ -214,7 +217,7 @@ test("#1201 rename preserves immutable identity and bindings; a fresh process ne
       app: { appId: SHARED_APP, installationId: "71" },
       executor: { configId: executor.id, issuerKeyFingerprint: credential.fingerprint },
     });
-    const before = resolveRepositoryComponentBinding(one, { environment: w.environment });
+    const before = await resolveRepositoryComponentBinding(one, { environment: w.environment });
     const renamed = { ...one, nameWithOwner: "acme/renamed" };
     record(w.environment, renamed, {});
     const registry = new RepositoryRegistry({ environment: w.environment }).get(one.repositoryId);
@@ -222,13 +225,13 @@ test("#1201 rename preserves immutable identity and bindings; a fresh process ne
     // Either name resolves the same immutable repository and the same bindings.
     const fresh = { INARI_CONFIG_HOME: w.home };
     for (const observed of [renamed, one]) {
-      const after = resolveRepositoryComponentBinding(observed, { environment: fresh });
+      const after = await resolveRepositoryComponentBinding(observed, { environment: fresh });
       assert.deepEqual(after.repository, { ...one, nameWithOwner: "acme/renamed" });
       assert.deepEqual(after.executor, before.executor);
       assert.equal(after.endpoint, "https://inari.example.com");
     }
     // Legacy Executor exports in a shell never select or override the canonical binding.
-    const exported = resolveRepositoryComponentBinding(renamed, {
+    const exported = await resolveRepositoryComponentBinding(renamed, {
       environment: {
         ...fresh,
         INARI_GITHUB_APP_ID: DEDICATED_APP,
@@ -250,7 +253,9 @@ test("#1201 legacy custody and setup are compatibility input only and never over
     const legacyStore = new ExecutorCredentialStore(w.environment);
     const legacy = legacyStore.save(executor.id, SHARED_APP, pem()).record;
     legacyStore.recordBinding(legacy.generation, { ...one, installationId: "71" });
-    const legacyEvidence = readExecutorCustodyEvidence(w.environment);
+    const legacyEvidence = executorCustodyFromObservation(
+      await createLocalExecutorObservationPort({ environment: w.environment }).observe(),
+    );
     assert.deepEqual(
       legacyEvidence?.credentials.map((item) => [item.appId, item.source]),
       [[SHARED_APP, "legacy"]],
@@ -274,7 +279,7 @@ test("#1201 legacy custody and setup are compatibility input only and never over
       validateSetupConfigRecord,
       w.environment,
     );
-    const compatible = resolveRepositoryComponentBinding(one, { environment: w.environment });
+    const compatible = await resolveRepositoryComponentBinding(one, { environment: w.environment });
     assert.equal(compatible.setup?.source, "legacy");
     assert.equal(compatible.registered, false);
 
@@ -290,7 +295,7 @@ test("#1201 legacy custody and setup are compatibility input only and never over
         executor: { configId: executor.id, issuerKeyFingerprint: canonical.fingerprint },
       }),
     );
-    const resolved = resolveRepositoryComponentBinding(one, { environment: w.environment });
+    const resolved = await resolveRepositoryComponentBinding(one, { environment: w.environment });
     assert.equal(resolved.setup?.source, "canonical");
     assert.equal(resolved.app?.appId, SHARED_APP);
     assert.equal(resolved.executor?.appCredential?.source, "app-scoped");
@@ -314,7 +319,7 @@ test("#1201 contradicting owner evidence is reported as a bounded conflict; unre
       app: { appId: SHARED_APP, installationId: "71" },
       executor: { configId: executor.id, issuerKeyFingerprint: credential.fingerprint },
     });
-    assert.deepEqual(resolveRepositoryComponentBinding(one, { environment: w.environment }).conflicts, [
+    assert.deepEqual((await resolveRepositoryComponentBinding(one, { environment: w.environment })).conflicts, [
       "executor-binding",
     ]);
 
@@ -329,7 +334,7 @@ test("#1201 contradicting owner evidence is reported as a bounded conflict; unre
       }),
       w.environment,
     );
-    const projection = resolveRepositoryComponentBinding(one, { environment: w.environment });
+    const projection = await resolveRepositoryComponentBinding(one, { environment: w.environment });
     assert.equal(projection.admission?.executorId, executor.id);
     assert.match(projection.admission?.id ?? "", /^adm_/u);
     assert.deepEqual(serializedLeaks(projection, w.home), []);
@@ -341,10 +346,78 @@ test("#1201 contradicting owner evidence is reported as a bounded conflict; unre
       (value) => value,
       w.environment,
     );
-    assert.throws(
-      () => resolveRepositoryComponentBinding(one, { environment: w.environment }),
-      (error: unknown) =>
-        error instanceof RepositoryComponentBindingError && error.subjects.includes("executor/custody"),
+    await assert.rejects(
+      resolveRepositoryComponentBinding(one, { environment: w.environment }),
+      (error: unknown) => error instanceof RepositoryComponentBindingError && error.subjects.includes("executor"),
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("#1201 Executor evidence comes only from the injected owner observation port", async () => {
+  const w = world();
+  try {
+    const executorId = "exec_0123456789abcdef";
+    const fingerprint = `sha256:${"d".repeat(64)}`;
+    const observed = {
+      version: 1 as const,
+      executorId,
+      apps: [
+        {
+          appId: SHARED_APP,
+          generation: "generation-remote-0001",
+          fingerprint,
+          providerVerified: true,
+          source: "app-scoped" as const,
+        },
+      ],
+      bindings: [
+        {
+          repositoryHost: one.repositoryHost,
+          repositoryId: one.repositoryId,
+          nameWithOwner: one.nameWithOwner,
+          appId: SHARED_APP,
+          installationId: "71",
+          generation: "generation-remote-0001",
+          fingerprint,
+          status: "bound" as const,
+          source: "app-scoped" as const,
+        },
+      ],
+    };
+    const calls: string[] = [];
+    const port = { observe: async () => (calls.push("observe"), observed) };
+    const unavailable = {
+      observe: async () => {
+        throw new Error("unreachable");
+      },
+    };
+    // Before a repository records an Executor, an unavailable Executor only means no evidence yet.
+    const unconfigured = await resolveRepositoryComponentBinding(one, {
+      environment: w.environment,
+      executor: unavailable,
+    });
+    assert.equal(unconfigured.executor, undefined);
+    record(w.environment, one, {
+      app: { appId: SHARED_APP, installationId: "71" },
+      executor: { configId: executorId, issuerKeyFingerprint: fingerprint },
+    });
+    // No Executor files exist in this config home: every Executor fact is the port's.
+    const projection = await resolveRepositoryComponentBinding(one, { environment: w.environment, executor: port });
+    assert.deepEqual(calls, ["observe"]);
+    assert.equal(projection.executor?.componentId, executorId);
+    assert.equal(projection.executor?.appCredential?.fingerprint, fingerprint);
+    assert.deepEqual(
+      [projection.executor?.binding?.installationId, projection.executor?.binding?.status],
+      ["71", "bound"],
+    );
+    assert.deepEqual(projection.conflicts, []);
+    assert.deepEqual(readdirSync(w.home).sort(), ["repositories"]);
+    // Once recorded, an unavailable Executor fails closed instead of reading anything else.
+    await assert.rejects(
+      resolveRepositoryComponentBinding(one, { environment: w.environment, executor: unavailable }),
+      (error: unknown) => error instanceof RepositoryComponentBindingError && error.subjects.includes("executor"),
     );
   } finally {
     w.cleanup();

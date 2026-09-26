@@ -28,17 +28,19 @@
  * its existing public component identity.
  */
 import { listLocalAuthorityIdentities } from "../authority/index.js";
-import { legacyExecutorCustodyPresent } from "../executor/credential-migration.js";
-import { executorAppCustody, executorIssuerCustody } from "../executor/enrollment/owner.js";
+import { createLocalExecutorObservationPort } from "../executor/observation.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import {
   readExistingLocalJson,
   validateLocalAdmissionConfig,
   validateLocalAuthorityConfig,
-  validateLocalExecutorConfig,
 } from "../local-control/config.js";
 import { RepositoryRegistry } from "../local-control/repository-registry.js";
-import { assertSecretFreeSetupJson } from "../runtime-contracts/index.js";
+import {
+  assertSecretFreeSetupJson,
+  type ExecutorObservation,
+  type ExecutorObservationPort,
+} from "../runtime-contracts/index.js";
 import {
   SetupConfigStore,
   type SetupConfigApp,
@@ -128,12 +130,7 @@ export interface RepositoryComponentBinding {
 }
 
 export type RepositoryComponentBindingSubject =
-  | "repository-registry"
-  | "setup-config"
-  | "executor/config.json"
-  | "executor/custody"
-  | "authority"
-  | "admission/config.json";
+  "repository-registry" | "setup-config" | "executor" | "authority" | "admission/config.json";
 
 export class RepositoryComponentBindingError extends Error {
   readonly code = "REPOSITORY_COMPONENT_BINDING_UNREADABLE" as const;
@@ -154,72 +151,66 @@ function sameRepository(
 }
 
 /**
- * Read all public Executor custody evidence without creating owner
- * directories. App-scoped custody is canonical. The legacy single-App index is
- * projected only for an App without App-scoped custody, and its bindings only
- * for repository IDs without an App-scoped binding while they name the same
- * generation as that App's selected credential. Returns `undefined` when the
+ * Executor custody evidence from one `ExecutorObservationPort` observation
+ * (#1223). The Executor already resolved canonical App-scoped custody over
+ * labelled legacy compatibility evidence; every credential it reports is held
+ * by the observed Executor configuration. Returns `undefined` when the
  * Executor holds no custody at all.
  */
-export function readExecutorCustodyEvidence(
-  environment: NodeJS.ProcessEnv = process.env,
-): ExecutorCustodyEvidence | undefined {
-  const scoped = executorAppCustody(environment);
-  const legacy = legacyExecutorCustodyPresent(environment) ? executorIssuerCustody(environment) : undefined;
-  const credentials: ExecutorCredentialProjection[] = scoped.apps.map((app) =>
-    Object.freeze({
-      configId: app.configId,
-      appId: app.appId,
-      generation: app.generation,
-      fingerprint: app.fingerprint,
-      providerVerified: app.providerVerified,
-      source: "app-scoped" as const,
-    }),
-  );
-  const bindings: ExecutorBindingProjection[] = scoped.bindings.map((binding) =>
-    Object.freeze({
-      repositoryHost: binding.repositoryHost,
-      repositoryId: binding.repositoryId,
-      appId: binding.appId,
-      installationId: binding.installationId,
-      generation: binding.generation,
-      fingerprint: binding.fingerprint,
-      status: binding.status,
-      source: "app-scoped" as const,
-    }),
-  );
-  if (legacy !== undefined) {
-    if (!credentials.some((credential) => credential.appId === legacy.appId))
-      credentials.push(
+export function executorCustodyFromObservation(observation: ExecutorObservation): ExecutorCustodyEvidence | undefined {
+  if (observation.apps.length === 0 && observation.bindings.length === 0) return undefined;
+  return Object.freeze({
+    credentials: Object.freeze(
+      observation.apps.map((app) =>
         Object.freeze({
-          configId: legacy.configId,
-          appId: legacy.appId,
-          generation: legacy.generation,
-          fingerprint: legacy.fingerprint,
-          providerVerified: legacy.providerVerified,
-          source: "legacy" as const,
+          configId: observation.executorId,
+          appId: app.appId,
+          generation: app.generation,
+          fingerprint: app.fingerprint,
+          providerVerified: app.providerVerified,
+          source: app.source,
         }),
-      );
-    const selected = credentials.find((credential) => credential.appId === legacy.appId)!;
-    if (selected.generation === legacy.generation && selected.fingerprint === legacy.fingerprint)
-      for (const binding of legacy.bindings) {
-        if (bindings.some((item) => sameRepository(item, binding))) continue;
-        bindings.push(
-          Object.freeze({
-            repositoryHost: binding.repositoryHost,
-            repositoryId: binding.repositoryId,
-            appId: legacy.appId,
-            installationId: binding.installationId,
-            generation: legacy.generation,
-            fingerprint: legacy.fingerprint,
-            status: selected.providerVerified ? ("bound" as const) : ("stale" as const),
-            source: "legacy" as const,
-          }),
-        );
-      }
+      ),
+    ),
+    bindings: Object.freeze(
+      observation.bindings.map((binding) =>
+        Object.freeze({
+          repositoryHost: binding.repositoryHost,
+          repositoryId: binding.repositoryId,
+          appId: binding.appId,
+          installationId: binding.installationId,
+          generation: binding.generation,
+          fingerprint: binding.fingerprint,
+          status: binding.status,
+          source: binding.source,
+        }),
+      ),
+    ),
+  });
+}
+
+/** Result of observing the Executor for one repository context. */
+export type ExecutorObservationRead =
+  | { readonly state: "present"; readonly observation: ExecutorObservation }
+  /** No Executor evidence, and the repository has not recorded an Executor yet. */
+  | { readonly state: "absent" }
+  | { readonly state: "unreadable" };
+
+/**
+ * Observe the Executor through its owner port. A failed observation is
+ * unreadable once the repository has recorded an Executor configuration, so a
+ * configured repository fails closed; before that, it only means no Executor
+ * evidence exists yet. Owner files are never consulted as a fallback.
+ */
+export async function readExecutorObservation(
+  port: ExecutorObservationPort,
+  recordedExecutor: boolean,
+): Promise<ExecutorObservationRead> {
+  try {
+    return Object.freeze({ state: "present" as const, observation: await port.observe() });
+  } catch {
+    return Object.freeze({ state: recordedExecutor ? ("unreadable" as const) : ("absent" as const) });
   }
-  if (credentials.length === 0 && bindings.length === 0) return undefined;
-  return Object.freeze({ credentials: Object.freeze(credentials), bindings: Object.freeze(bindings) });
 }
 
 /** The current credential of exactly this App, canonical before legacy. */
@@ -270,6 +261,12 @@ export function readAuthorityReference(
 
 export interface RepositoryComponentBindingOptions {
   readonly environment?: NodeJS.ProcessEnv;
+  /**
+   * Executor owner observation (#1223). Defaults to the co-located local
+   * adapter; a separately hosted Executor is observed through an explicitly
+   * configured `ExecutorObservationClient`.
+   */
+  readonly executor?: ExecutorObservationPort;
 }
 
 type Read<T> = { readonly ok: true; readonly value: T | undefined } | { readonly ok: false };
@@ -288,17 +285,17 @@ function read<T>(load: () => T | undefined): Read<T> {
  * `repositoryHost + repositoryId`; a registered name wins over the caller's.
  * Unreadable evidence fails closed with the unreadable subjects.
  */
-export function resolveRepositoryComponentBinding(
+export async function resolveRepositoryComponentBinding(
   repository: RepositoryIdentity,
   options: RepositoryComponentBindingOptions = {},
-): RepositoryComponentBinding {
+): Promise<RepositoryComponentBinding> {
   const environment = options.environment ?? process.env;
   const registry = read(() => new RepositoryRegistry({ environment }).get(repository.repositoryId));
   const setup = read(() => new SetupConfigStore({ environment }).observe(repository));
-  const executor = read(() =>
-    readExistingLocalJson("executor", "config.json", validateLocalExecutorConfig, environment),
+  const executor = await readExecutorObservation(
+    options.executor ?? createLocalExecutorObservationPort({ environment }),
+    setup.ok && setup.value?.record.executor !== undefined,
   );
-  const custody = read(() => readExecutorCustodyEvidence(environment));
   const admission = read(() =>
     readExistingLocalJson("admission", "config.json", validateLocalAdmissionConfig, environment),
   );
@@ -308,8 +305,7 @@ export function resolveRepositoryComponentBinding(
     [
       ["repository-registry", registry],
       ["setup-config", setup],
-      ["executor/config.json", executor],
-      ["executor/custody", custody],
+      ["executor", { ok: executor.state !== "unreadable" }],
       ["authority", authority],
       ["admission/config.json", admission],
     ] as const
@@ -335,8 +331,9 @@ export function resolveRepositoryComponentBinding(
           nameWithOwner: registered.nameWithOwner,
         },
   );
-  const componentId = value(executor)?.id;
-  const evidence = value(custody);
+  const observation = executor.state === "present" ? executor.observation : undefined;
+  const componentId = observation?.executorId;
+  const evidence = observation === undefined ? undefined : executorCustodyFromObservation(observation);
   const binding = executorBindingFor(evidence, identity);
   const appId = record?.app?.appId ?? binding?.appId;
   const credential = appId === undefined ? undefined : executorCredentialFor(evidence, appId);
