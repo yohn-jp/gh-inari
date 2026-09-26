@@ -1,25 +1,8 @@
 #!/usr/bin/env node
-// Static setup wizard bundle, following the apps/dashboard convention.
-// Root build/command wiring and asset delivery belong to #1121.
-import { build } from "esbuild";
-import { copyFile, mkdir, rm } from "node:fs/promises";
+// Local app build into apps/setup-console/dist; the packaged product build is
+// scripts/build-setup-console.mjs (output dist/setup-console/).
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildSetupConsole } from "../../../scripts/build-setup-console.mjs";
 
-const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outputDirectory = path.join(appRoot, "dist");
-
-await rm(outputDirectory, { recursive: true, force: true });
-await mkdir(outputDirectory, { recursive: true });
-await build({
-  bundle: true,
-  entryPoints: { "setup-console": path.join(appRoot, "src/browser.ts") },
-  format: "esm",
-  outdir: outputDirectory,
-  platform: "browser",
-  sourcemap: false,
-  target: "es2022",
-  logLevel: "warning",
-});
-await copyFile(path.join(appRoot, "index.html"), path.join(outputDirectory, "index.html"));
-await copyFile(path.join(appRoot, "styles.css"), path.join(outputDirectory, "styles.css"));
+await buildSetupConsole(path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), "dist"));

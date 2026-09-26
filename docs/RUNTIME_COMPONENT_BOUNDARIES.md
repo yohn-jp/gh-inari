@@ -143,6 +143,8 @@ Some imports inside a role's closure cannot be proven safe. A non-literal dynami
 
 All 17 baseline exceptions (#1106: 5, #1108: 7, #1109: 5) are retired. The local role commands load only the selected private implementation through `src/composition/local-runtime-roles.ts`; ordinary CLI clients and the browser console use public ports and status projections.
 
+Product wiring (#1121) stays in the `composition` role: `src/composition/setup-host.ts` builds the one Setup Application from `createLocalSetupPorts`, supplies the Runtime lifecycle owner (observe-only for the CLI; Supervisor-owned for the setup/control host) and hosts the packaged setup console with the Setup API. The CLI loads it only for `inari setup status|next|console`. Composition owns process and listener lifecycle; it never parses secret material, and enrollment bytes pass through it unread to the owning component.
+
 The baseline has no Admission (#1107) violation. #1107 must keep it that way.
 
 During extraction, a frozen cross-role edge is treated as the historical boundary itself: traversal does not continue through that target under the caller's role, because the target module is checked independently under its owning Runtime role. When code moves from a frozen source into modules of that same owner role, only the exact forbidden targets already recorded for the frozen source may follow that owner-internal path. The ledger itself is unchanged; a new caller, target, owner, wildcard, unresolved import or dynamic import still fails.

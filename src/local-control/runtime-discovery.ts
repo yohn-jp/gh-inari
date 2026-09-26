@@ -10,7 +10,8 @@ import {
 } from "./config.js";
 
 export const LOCAL_RUNTIME_DISCOVERY_VERSION = 1 as const;
-export type LocalRuntimeComponent = "admission" | "executor" | "console";
+/** `setup` is the owned local Setup/control host; `console` is the legacy status console. */
+export type LocalRuntimeComponent = "admission" | "executor" | "console" | "setup";
 
 export interface LocalRuntimeEndpoint {
   readonly version: typeof LOCAL_RUNTIME_DISCOVERY_VERSION;
@@ -41,9 +42,10 @@ function invalid(): LocalRuntimeDiscoveryError {
   return new LocalRuntimeDiscoveryError("LOCAL_RUNTIME_ENDPOINT_INVALID", "Local Runtime discovery state is invalid.");
 }
 
-function endpointIdPrefix(component: LocalRuntimeComponent): "adm_" | "exec_" | "cnsl_" {
+function endpointIdPrefix(component: LocalRuntimeComponent): "adm_" | "exec_" | "cnsl_" | "stp_" {
   if (component === "admission") return "adm_";
   if (component === "executor") return "exec_";
+  if (component === "setup") return "stp_";
   return "cnsl_";
 }
 
@@ -65,7 +67,10 @@ export function validateLocalRuntimeEndpoint(value: unknown): LocalRuntimeEndpoi
   if (
     Object.keys(record).some((key) => !["version", "component", "id", "endpoint", "instanceId"].includes(key)) ||
     record.version !== LOCAL_RUNTIME_DISCOVERY_VERSION ||
-    (record.component !== "admission" && record.component !== "executor" && record.component !== "console")
+    (record.component !== "admission" &&
+      record.component !== "executor" &&
+      record.component !== "console" &&
+      record.component !== "setup")
   ) {
     throw invalid();
   }
@@ -79,7 +84,7 @@ export function validateLocalRuntimeEndpoint(value: unknown): LocalRuntimeEndpoi
   }
   if (
     (component === "admission" && endpoint.protocol !== "http:") ||
-    (component === "console" && endpoint.protocol !== "http:") ||
+    ((component === "console" || component === "setup") && endpoint.protocol !== "http:") ||
     (component === "executor" && endpoint.protocol !== "http:" && endpoint.protocol !== "https:") ||
     endpoint.hostname !== "127.0.0.1" ||
     endpoint.port.length === 0 ||
@@ -154,7 +159,7 @@ export function publishLocalRuntimeEndpoint(
   scheme: LocalRuntimeEndpointScheme = "http",
 ): LocalRuntimeEndpoint {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw invalid();
-  if ((component === "admission" || component === "console") && scheme !== "http") throw invalid();
+  if (component !== "executor" && scheme !== "http") throw invalid();
   const candidate = validateLocalRuntimeEndpoint({
     version: LOCAL_RUNTIME_DISCOVERY_VERSION,
     component,

@@ -66,6 +66,40 @@ test("the local Runtime console is one closed command projecting the canonical s
   assert.deepEqual(command.optionIds, ["help", "json"]);
 });
 
+test("setup Application commands are closed metadata beside the repository-onboarding setup root", () => {
+  assert.equal(getCommandForPositionals(["setup"])?.id, "root.setup");
+  assert.equal(getCommandForPositionals(["setup", "status"])?.id, "setup.status");
+  assert.equal(getCommandForPositionals(["setup", "next"])?.id, "setup.next");
+  assert.equal(getCommandForPositionals(["setup", "console"])?.id, "setup.console");
+  assert.equal(getCommandForPositionals(["setup", "start"]), undefined);
+  assert.equal(getCommandForPositionals(["setup", "status", "extra"]), undefined);
+  assert.deepEqual(
+    projectCommandHelp(["setup"]).commands.map((entry) => entry.id),
+    ["root.setup"],
+  );
+  assert.deepEqual(
+    INARI_COMMANDS.filter((entry) => entry.domain === "setup").map((entry) => entry.id),
+    ["setup.status", "setup.next", "setup.console"],
+  );
+  assert.deepEqual(
+    projectCommandHelp(["setup", "next"]).commands.map((entry) => entry.id),
+    ["setup.next"],
+  );
+  const next = INARI_COMMANDS.find((entry) => entry.id === "setup.next");
+  assert.deepEqual(next?.optionIds, ["help", "json", "repository", "repositoryId", "yes", "input", "enrollmentFile"]);
+  assert.equal(getOption("input").repeatable, true);
+  assert.equal(getOption("enrollmentFile").repeatable, true);
+  assert.equal(
+    commandUsage(next!),
+    "setup next [--repository <repository>] [--repository-id <id>] [--yes] [--input <id=value> ...] [--enrollment-file <id=path> ...]",
+  );
+  assert.equal(helpInvocation("setup"), "inari setup --help");
+  assert.deepEqual(
+    tokenizeCommandArgv(["setup", "next", "--input", "app-id=1", "--enrollment-file", "issuer-key=k.pem"]).positionals,
+    ["setup", "next"],
+  );
+});
+
 test("the shared tokenizer consumes every value-taking option before command identity", () => {
   const cases: readonly (readonly string[])[] = [
     ["--repository", "acme/inari", "issue", "create"],

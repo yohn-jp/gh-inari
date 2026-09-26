@@ -285,6 +285,10 @@ function actionForm(action: SetupAction, view: SetupConsoleView): VNode {
       id: controlId(action, "form"),
       "data-action-id": action.id,
       "aria-busy": busy ? "true" : "false",
+      // Requiredness is enforced by the controller and the Setup Application. A
+      // re-render empties the native file input while the selected file stays
+      // in memory, so native validation would block a valid submission.
+      novalidate: true,
     },
     h(
       "fieldset",

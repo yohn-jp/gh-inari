@@ -32,6 +32,7 @@ export type CommandDomain =
   | "change"
   | "authority"
   | "session"
+  | "setup"
   | "runtime"
   | "executor"
   | "admission"
@@ -47,6 +48,9 @@ export type CommandId =
   | "root.doctor"
   | "root.setup"
   | "root.init"
+  | "setup.status"
+  | "setup.next"
+  | "setup.console"
   | "issue.schema"
   | "issue.contract"
   | "issue.validate"
@@ -199,7 +203,12 @@ export type OptionId =
   | "mergeStrategy"
   | "retry"
   | "pullRequest"
-  | "executionEvidence";
+  | "executionEvidence"
+  | "repositoryId"
+  | "detail"
+  | "yes"
+  | "input"
+  | "enrollmentFile";
 
 export interface CommandOptionDefinition {
   readonly id: OptionId;
@@ -229,6 +238,7 @@ export interface CommandDefinition {
 
 const ROOT_OPTIONS = ["help", "json"] as const;
 const SETUP_OPTIONS = ["help", "json", "repository", "endpoint", "configHome", "authorityId", "privateKey"] as const;
+const SETUP_APPLICATION_OPTIONS = ["help", "json", "repository", "repositoryId"] as const;
 const ARTIFACT_OPTIONS = ["help", "json", "template", "repository"] as const;
 const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "policy"] as const;
 const EXISTING_OPTIONS = ["help", "json", "template", "repository", "policy"] as const;
@@ -753,6 +763,51 @@ export const COMMAND_OPTIONS = {
     "JSON file with immutable post-authorization execution evidence (implementation branch and targeted-test results); on change ready, may instead be an envelope additionally carrying the caller-held Implementation authorization record; never mutates GitHub.",
     "path",
   ),
+  repositoryId: option(
+    "repositoryId",
+    "repository-id",
+    ["--repository-id"],
+    "string",
+    "required",
+    "Decimal GitHub repository ID; defaults to the recorded Runtime profile or a credential-free public repository read.",
+    "id",
+  ),
+  detail: option(
+    "detail",
+    "detail",
+    ["--detail"],
+    "boolean",
+    "none",
+    "Show every setup step, owner observation and diagnostic.",
+  ),
+  yes: option(
+    "yes",
+    "yes",
+    ["--yes"],
+    "boolean",
+    "none",
+    "Confirm the offered setup action's summary without an interactive prompt.",
+  ),
+  input: option(
+    "input",
+    "input",
+    ["--input"],
+    "string",
+    "required",
+    "Secret-free input of the offered setup action; repeat for multiple inputs.",
+    "id=value",
+    true,
+  ),
+  enrollmentFile: option(
+    "enrollmentFile",
+    "enrollment-file",
+    ["--enrollment-file"],
+    "string",
+    "required",
+    "File reference for an enrollment input; its bytes stream unparsed to the owning component; repeat for multiple inputs.",
+    "id=path",
+    true,
+  ),
 } satisfies Record<OptionId, CommandOptionDefinition>;
 
 const COMMAND_OPTIONS_BY_ID: Readonly<Record<OptionId, CommandOptionDefinition>> = COMMAND_OPTIONS;
@@ -814,6 +869,30 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     ["init"],
     "Initialize local topology and report ordered execution setup state.",
     [...ROOT_OPTIONS],
+  ),
+  command(
+    "setup.status",
+    "setup",
+    "status",
+    ["setup", "status"],
+    "Report the canonical local setup state and the one next action from the shared Setup Application.",
+    [...SETUP_APPLICATION_OPTIONS, "detail"],
+  ),
+  command(
+    "setup.next",
+    "setup",
+    "next",
+    ["setup", "next"],
+    "Perform the offered next setup action through its owner; confirmation and inputs are explicit.",
+    [...SETUP_APPLICATION_OPTIONS, "yes", "input", "enrollmentFile"],
+  ),
+  command(
+    "setup.console",
+    "setup",
+    "console",
+    ["setup", "console"],
+    "Start, or report the already running, owned loopback setup/control host serving the browser setup console.",
+    [...SETUP_APPLICATION_OPTIONS],
   ),
   command(
     "issue.schema",
@@ -1843,6 +1922,7 @@ export function helpInvocation(
     | "release"
     | "authority"
     | "session"
+    | "setup"
     | "runtime"
     | "executor"
     | "admission"
