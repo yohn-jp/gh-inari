@@ -1029,9 +1029,7 @@ async function certifyWorkerFirstRouting(modules) {
     "Dashboard asset route was not served by Static Assets",
   );
   requireCondition(
-    assets.calls.length === 2 &&
-      assets.calls[0] === "/.well-known/inari" &&
-      assets.calls[1] === "/dashboard",
+    assets.calls.length === 2 && assets.calls[0] === "/.well-known/inari" && assets.calls[1] === "/dashboard",
     "Dynamic or unknown well-known routing invoked Static Assets",
   );
 }
