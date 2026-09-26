@@ -44,7 +44,12 @@ import { parseImplementationIssueBody } from "../implementation-contract.js";
 import { LocalRuntimeProfileStore } from "../local-runtime-profile.js";
 import { LocalRuntimeConfigError, readAppPrivateKey } from "../relay/local-runtime-config-credentials.js";
 import type { LocalExecutorEvidenceRequest } from "../local-control/executor-http.js";
-import { ExecutorCredentialStore, type StoredIssuerKey } from "./credential-store.js";
+import { ExecutorAppCredentialStore, issuerKeyFingerprint, type StoredAppCredential } from "./credential-store.js";
+import {
+  ExecutorRepositoryBindingStore,
+  repositoryBindingState,
+  type ExecutorRepositoryBinding,
+} from "./repository-binding-store.js";
 import { LocalExecutorError } from "./errors.js";
 import { issuerKeyMissing, issuerKeyReference, requireLocalExecutorAppId } from "./issuer-input.js";
 
@@ -119,9 +124,11 @@ function sameLocator(left: string, right: string): boolean {
 /**
  * Bind the Issuer App installation credential for one repository (#1182).
  *
- * The Executor's own custody records the installation each verified key
- * generation acts for; `inari setup next` (executor.bind-repository) writes it
- * through the Executor owner. A legacy Local Runtime profile written by
+ * The Executor's own repository binding (#1199) records the App, installation
+ * and exact verified App credential generation the repository acts through;
+ * `inari setup next` (executor.bind-repository) writes it through the Executor
+ * owner. A binding whose generation is no longer the App's current verified
+ * generation is stale and never satisfies execution. A legacy Local Runtime profile written by
  * `inari setup --endpoint` remains a binding source. When both exist they must
  * name the same App, installation and repository; a contradiction or a
  * half-migrated state is a bounded failure, never a silent preference. The App
@@ -133,10 +140,12 @@ async function localExecutorIssuerBinding(
 ): Promise<LocalExecutorIssuerBinding> {
   const configuredAppId = requireLocalExecutorAppId(environment);
   const privateKeyPem = issuerPrivateKey(environment);
-  let custody: StoredIssuerKey | undefined;
+  let bound: ExecutorRepositoryBinding | undefined;
+  let credential: StoredAppCredential | undefined;
   let profile: Awaited<ReturnType<LocalRuntimeProfileStore["findForRepository"]>>;
   try {
-    custody = new ExecutorCredentialStore(environment).current();
+    bound = new ExecutorRepositoryBindingStore(environment).find(repository.repositoryHost, repository.nameWithOwner);
+    credential = bound === undefined ? undefined : new ExecutorAppCredentialStore(environment).current(bound.appId);
     profile = await new LocalRuntimeProfileStore({ environment }).findForRepository({
       repositoryHost: repository.repositoryHost,
       repositoryNameWithOwner: repository.nameWithOwner,
@@ -147,15 +156,11 @@ async function localExecutorIssuerBinding(
       "The repository setup binding could not be read.",
     );
   }
-  const bound = custody?.bindings?.find(
-    (item) =>
-      sameLocator(item.repositoryHost, repository.repositoryHost) &&
-      sameLocator(item.nameWithOwner, repository.nameWithOwner),
-  );
-  if (bound !== undefined && custody !== undefined) {
+  if (bound !== undefined && repositoryBindingState(bound, credential) !== "bound") bound = undefined;
+  if (bound !== undefined) {
     if (
       profile !== undefined &&
-      (profile.app.appId !== custody.appId ||
+      (profile.app.appId !== bound.appId ||
         profile.app.installationId !== bound.installationId ||
         profile.repository.repositoryId !== bound.repositoryId)
     )
@@ -163,11 +168,14 @@ async function localExecutorIssuerBinding(
         "EXECUTOR_REPOSITORY_BINDING_INCONSISTENT",
         "The Executor repository binding and the Local Runtime profile name different App installations.",
       );
+    // The Issuer key this Executor runs with must be the exact verified generation the binding names.
+    if (bound.appId === configuredAppId && issuerKeyFingerprint(Buffer.from(privateKeyPem)) !== bound.fingerprint)
+      throw issuerBindingMismatch();
   }
   const source =
-    bound !== undefined && custody !== undefined
+    bound !== undefined
       ? {
-          appId: custody.appId,
+          appId: bound.appId,
           installationId: bound.installationId,
           repository: {
             repositoryHost: bound.repositoryHost,

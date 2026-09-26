@@ -1,4 +1,13 @@
-/** Executor-only Issuer key custody. The public index is the atomic commit point. */
+/**
+ * Executor-only Issuer key custody. The public index is the atomic commit point.
+ *
+ * Two owner layouts live here (#1199):
+ * - `ExecutorAppCredentialStore`: App-scoped custody, one credential per App
+ *   under `executor/apps/<appId>/` (`credential.json` + `issuer-<generation>.pem`).
+ * - `ExecutorCredentialStore`: the legacy single-App `executor/issuer/` store.
+ *   It stays the setup-compatible projection of one App and the adoption
+ *   source of `./credential-migration.ts`; this leaf never deletes it.
+ */
 import { createHash, createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
 import {
   constants,
@@ -9,6 +18,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -251,7 +261,7 @@ export class ExecutorCredentialStore {
     configId: string,
     appId: string,
     pem: Buffer,
-    expected?: StoredIssuerKey,
+    expected?: Pick<StoredIssuerKey, "generation" | "fingerprint">,
   ): { record: StoredIssuerKey; changed: boolean } {
     const fingerprint = issuerKeyFingerprint(pem);
     const directory = ensureLocalComponentDirectory("executor", this.#environment, "issuer");
@@ -263,7 +273,7 @@ export class ExecutorCredentialStore {
     appId: string,
     pem: Buffer,
     fingerprint: string,
-    expected: StoredIssuerKey | undefined,
+    expected: Pick<StoredIssuerKey, "generation" | "fingerprint"> | undefined,
     directory: string,
   ): { record: StoredIssuerKey; changed: boolean } {
     const current = this.current();
@@ -324,6 +334,243 @@ export class ExecutorCredentialStore {
         }
       }
       throw failure();
+    }
+  }
+}
+
+/**
+ * One App-scoped Issuer credential (#1199). The identity is the App, never a
+ * repository: many repositories may bind to it without copying its key.
+ */
+export interface StoredAppCredential {
+  readonly configId: string;
+  readonly appId: string;
+  readonly generation: string;
+  readonly fingerprint: string;
+  readonly providerVerified: boolean;
+  /** Owner-selected key file inside the App directory; never projected publicly. */
+  readonly file: string;
+}
+
+/** Public identity of one App credential generation, as adopted or expected. */
+export type AppCredentialGeneration = Pick<StoredAppCredential, "generation" | "fingerprint">;
+
+const APP_INDEX = "credential.json";
+const APPS = "apps";
+const MAX_APP_CREDENTIALS = 32;
+const APP_ID = /^[1-9][0-9]{0,19}$/u;
+
+function validAppCredential(record: unknown): record is StoredAppCredential {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) return false;
+  const value = record as Record<string, unknown>;
+  return (
+    Object.keys(value).every((key) =>
+      ["configId", "appId", "generation", "fingerprint", "providerVerified", "file"].includes(key),
+    ) &&
+    typeof value.configId === "string" &&
+    IDENTIFIER.test(value.configId) &&
+    typeof value.appId === "string" &&
+    APP_ID.test(value.appId) &&
+    typeof value.generation === "string" &&
+    IDENTIFIER.test(value.generation) &&
+    typeof value.fingerprint === "string" &&
+    FINGERPRINT.test(value.fingerprint) &&
+    typeof value.providerVerified === "boolean" &&
+    value.file === `issuer-${value.generation}.pem`
+  );
+}
+
+function absent(file: string): boolean {
+  try {
+    lstatSync(file);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw failure();
+  }
+}
+
+/**
+ * App-scoped Executor Issuer custody (#1199). Each App owns an independent
+ * directory, index and key generation, so enrolling or replacing App A never
+ * reads, replaces or invalidates App B. Reads never create directories.
+ */
+export class ExecutorAppCredentialStore {
+  readonly #environment: NodeJS.ProcessEnv;
+  constructor(environment: NodeJS.ProcessEnv = process.env) {
+    this.#environment = environment;
+  }
+
+  #directory(appId: string, create: boolean): string | undefined {
+    if (!APP_ID.test(appId)) throw failure();
+    if (!create && absent(localComponentPath("executor", `${APPS}/${appId}`, this.#environment))) return undefined;
+    try {
+      return ensureLocalComponentDirectory("executor", this.#environment, APPS, appId);
+    } catch {
+      throw failure();
+    }
+  }
+
+  current(appId: string): StoredAppCredential | undefined {
+    const directory = this.#directory(appId, false);
+    if (directory === undefined) return undefined;
+    const index = path.join(directory, APP_INDEX);
+    if (absent(index)) return undefined;
+    try {
+      const record: unknown = JSON.parse(secureRead(index, MAX_INDEX_BYTES).toString("utf8"));
+      if (!validAppCredential(record) || record.appId !== appId) throw failure();
+      const pem = secureRead(path.join(directory, record.file), MAX_KEY_BYTES);
+      if (issuerKeyFingerprint(pem) !== record.fingerprint) throw failure();
+      return record;
+    } catch {
+      throw failure();
+    }
+  }
+
+  /** Every App credential, bounded; an unexpected entry fails closed instead of being skipped. */
+  list(): readonly StoredAppCredential[] {
+    if (absent(localComponentPath("executor", APPS, this.#environment))) return [];
+    let entries: string[];
+    try {
+      entries = readdirSync(ensureLocalComponentDirectory("executor", this.#environment, APPS)).sort();
+    } catch {
+      throw failure();
+    }
+    if (entries.length > MAX_APP_CREDENTIALS || !entries.every((entry) => APP_ID.test(entry))) throw failure();
+    return entries.flatMap((appId) => {
+      const record = this.current(appId);
+      return record === undefined ? [] : [record];
+    });
+  }
+
+  /** Key bytes of the current generation, for Executor-owned verification only. No key path leaves this store. */
+  readKey(record: Pick<StoredAppCredential, "appId"> & AppCredentialGeneration): Buffer {
+    const current = this.current(record.appId);
+    if (current === undefined || current.generation !== record.generation || current.fingerprint !== record.fingerprint)
+      throw failure();
+    const directory = this.#directory(record.appId, false);
+    if (directory === undefined) throw failure();
+    const pem = secureRead(path.join(directory, current.file), MAX_KEY_BYTES);
+    if (issuerKeyFingerprint(pem) !== current.fingerprint) throw failure();
+    return pem;
+  }
+
+  markProviderVerified(appId: string, generation: string): StoredAppCredential {
+    const current = this.current(appId);
+    if (current === undefined || current.generation !== generation) throw failure();
+    if (current.providerVerified) return current;
+    const next = { ...current, providerVerified: true };
+    this.#publish(next, current);
+    return next;
+  }
+
+  /**
+   * Enroll a key for one App under a new generation. A different key replaces
+   * the current generation only when `expected` names it exactly.
+   */
+  save(
+    configId: string,
+    appId: string,
+    pem: Buffer,
+    expected?: AppCredentialGeneration,
+  ): { record: StoredAppCredential; changed: boolean } {
+    const fingerprint = issuerKeyFingerprint(pem);
+    return this.#commit(
+      { configId, appId, generation: randomBytes(24).toString("base64url"), fingerprint, providerVerified: false },
+      pem,
+      expected,
+    );
+  }
+
+  /**
+   * Adopt an existing key generation without regenerating it (#1199
+   * migration). The generation, fingerprint and verification state are kept;
+   * the key bytes must match the fingerprint.
+   */
+  adopt(
+    source: Omit<StoredAppCredential, "file">,
+    pem: Buffer,
+    expected?: AppCredentialGeneration,
+  ): { record: StoredAppCredential; changed: boolean } {
+    if (issuerKeyFingerprint(pem) !== source.fingerprint) throw failure();
+    return this.#commit(source, pem, expected);
+  }
+
+  #commit(
+    source: Omit<StoredAppCredential, "file">,
+    pem: Buffer,
+    expected: AppCredentialGeneration | undefined,
+  ): { record: StoredAppCredential; changed: boolean } {
+    const record: StoredAppCredential = {
+      configId: source.configId,
+      appId: source.appId,
+      generation: source.generation,
+      fingerprint: source.fingerprint,
+      providerVerified: source.providerVerified,
+      file: `issuer-${source.generation}.pem`,
+    };
+    if (!validAppCredential(record)) throw failure();
+    const current = this.current(record.appId);
+    if (current !== undefined && current.configId !== record.configId) throw failure();
+    if (current?.fingerprint === record.fingerprint) return { record: current, changed: false };
+    if (
+      current !== undefined &&
+      (expected === undefined ||
+        expected.generation !== current.generation ||
+        expected.fingerprint !== current.fingerprint)
+    )
+      throw failure();
+    if (current === undefined && expected !== undefined) throw failure();
+    const directory = this.#directory(record.appId, true) as string;
+    const key = path.join(directory, record.file);
+    let created = false;
+    try {
+      if (absent(key)) {
+        privateWrite(key, pem);
+        created = true;
+      } else if (!secureRead(key, MAX_KEY_BYTES).equals(pem)) {
+        // A key file left by an interrupted adoption is reused only when it is byte-identical.
+        throw failure();
+      }
+      this.#publish(record, current);
+      return { record, changed: true };
+    } catch {
+      if (created) {
+        try {
+          if (this.current(record.appId)?.generation !== record.generation) unlinkSync(key);
+        } catch {
+          /* absent, or custody unreadable: never remove a key that may be published */
+        }
+      }
+      throw failure();
+    }
+  }
+
+  #publish(next: StoredAppCredential, expected: StoredAppCredential | undefined): void {
+    const directory = this.#directory(next.appId, true) as string;
+    const temporary = path.join(directory, `credential-${randomBytes(24).toString("base64url")}.tmp`);
+    try {
+      privateWrite(temporary, Buffer.from(JSON.stringify(next)));
+      // Compare-and-publish: the generation observed before the write must still be current.
+      if (this.current(next.appId)?.generation !== expected?.generation) throw failure();
+      renameSync(temporary, path.join(directory, APP_INDEX));
+    } catch {
+      try {
+        unlinkSync(temporary);
+      } catch {
+        /* absent after publication */
+      }
+      throw failure();
+    }
+    try {
+      const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try {
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      /* The atomic index is already visible; directory fsync is best effort. */
     }
   }
 }

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { ExecutorCredentialStore, issuerKeyFingerprint, type StoredIssuerKey } from "../credential-store.js";
+import { adoptLegacyExecutorCustody } from "../credential-migration.js";
 import { LocalExecutorError } from "../errors.js";
 import { issuerKeyReference, localExecutorAppId, localExecutorIssuerKeyStatus } from "../issuer-input.js";
 
@@ -56,6 +57,16 @@ export function issuerExecutionEnvironment(configId: string, environment: NodeJS
       "EXECUTOR_ISSUER_CUSTODY_UNVERIFIED",
       "The managed Executor Issuer key is stored but not yet verified for an App installation. Run `inari setup next` to bind the repository.",
     );
+  // #1199: the Executor adopts legacy single-App custody and its bindings into
+  // App-scoped custody before execution reads repository bindings.
+  try {
+    adoptLegacyExecutorCustody(environment);
+  } catch {
+    throw new LocalExecutorError(
+      "EXECUTOR_ISSUER_CUSTODY_UNAVAILABLE",
+      "The managed Executor Issuer custody could not be adopted safely.",
+    );
+  }
   const resolved: NodeJS.ProcessEnv = { ...environment };
   delete resolved.GITHUB_APP_ID;
   delete resolved.GITHUB_APP_PRIVATE_KEY_FILE;
