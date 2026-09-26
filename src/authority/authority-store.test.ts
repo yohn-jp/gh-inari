@@ -135,6 +135,7 @@ test("prepare adopts existing custody and never regenerates a key", async () => 
       () => prepareLocalAuthorityIdentity("runtime-alpha", environment),
       code("RUNTIME_AUTHORITY_KEY_NOT_FOUND"),
     );
+    assert.throws(() => listLocalAuthorityIdentities(environment), code("RUNTIME_AUTHORITY_KEY_NOT_FOUND"));
     await assert.rejects(readFile(keyPath(environment, "runtime-alpha")), { code: "ENOENT" });
   } finally {
     await cleanup();

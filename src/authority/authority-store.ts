@@ -184,10 +184,17 @@ export function listLocalAuthorityIdentities(
       fail("AUTHORITY_STORE_UNSAFE", "Runtime Authority key store contains an unexpected entry.");
     const config = readConfig(entry.name, environment);
     if (config === undefined) continue;
-    if (fingerprints.has(config.publicKeyFingerprint))
+    // A descriptor is only a complete identity while its owner key still
+    // exists and matches. Enumeration must not project broken custody as
+    // usable public identity.
+    const identity = openLocalAuthorityCustody(
+      { authorityId: entry.name, publicKeyFingerprint: config.publicKeyFingerprint },
+      environment,
+    ).identity;
+    if (fingerprints.has(identity.publicKeyFingerprint))
       fail("AUTHORITY_IDENTITY_CONFLICT", "One Runtime Authority key is stored under more than one Authority ID.");
-    fingerprints.add(config.publicKeyFingerprint);
-    identities.push(publicIdentity(config));
+    fingerprints.add(identity.publicKeyFingerprint);
+    identities.push(identity);
   }
   return Object.freeze(identities);
 }
@@ -215,12 +222,7 @@ export function openLocalAuthorityCustody(
   if (config === undefined) fail("AUTHORITY_IDENTITY_NOT_FOUND", "Runtime Authority identity is not configured.");
   if (selector.publicKeyFingerprint !== undefined && selector.publicKeyFingerprint !== config.publicKeyFingerprint)
     fail("AUTHORITY_IDENTITY_MISMATCH", "Runtime Authority identity does not match the expected fingerprint.");
-  let key: DelegatorKeyPair | undefined;
-  try {
-    key = loadEntryKey(authorityId, environment);
-  } catch {
-    key = undefined;
-  }
+  const key = loadEntryKey(authorityId, environment);
   if (key === undefined) fail("RUNTIME_AUTHORITY_KEY_NOT_FOUND", "Runtime Authority private key could not be loaded.");
   if (!keyMatches(key, config))
     fail("RUNTIME_AUTHORITY_KEY_MISMATCH", "Runtime Authority key does not match its custody descriptor.");
