@@ -4,10 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
-import {
-  createEndpointOnboardingDescriptor,
-  encodeEndpointOnboardingDescriptor,
-} from "../src/endpoint-onboarding.ts";
+import { createEndpointOnboardingDescriptor, encodeEndpointOnboardingDescriptor } from "../src/endpoint-onboarding.ts";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outdir = path.join(repositoryRoot, "dist-hosted-worker");
