@@ -1467,6 +1467,8 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
     );
     assert.notEqual(staleIntegration.exitCode, 0);
     assert.equal(directRoute, true);
+    // The direct route could not resolve the contract either: the Session failure is the minimal cause.
+    assert.equal(JSON.parse(staleIntegration.stdout).error.code, "ADMISSION_SESSION_BINDING_NOT_FOUND");
     assert.equal(
       executions.some((entry) => entry.operation === "pullRequest.publish"),
       false,

@@ -3763,16 +3763,29 @@ async function runArtifactCommand(
         localSessionFailure = error;
       }
     }
-    const adapter = createAdapter(dependencies, root, parsed.options.repository);
-    await adapter.resolveRepositoryContext();
-    const contract = await compileRepositoryGovernedContract(
-      adapter,
-      domain,
-      templateSelector(parsed, rest[0], domain),
-      {
-        templateResolver: dependencies.templateResolver,
-      },
-    );
+    const compileDirect = async () => {
+      const directAdapter = createAdapter(dependencies, root, parsed.options.repository);
+      await directAdapter.resolveRepositoryContext();
+      const compiled = await compileRepositoryGovernedContract(
+        directAdapter,
+        domain,
+        templateSelector(parsed, rest[0], domain),
+        {
+          templateResolver: dependencies.templateResolver,
+        },
+      );
+      return { adapter: directAdapter, contract: compiled };
+    };
+    let direct: Awaited<ReturnType<typeof compileDirect>>;
+    try {
+      direct = await compileDirect();
+    } catch (error: unknown) {
+      // When the selected Session failed and the direct route cannot even resolve the
+      // governed contract, the Session failure is the minimal cause to report.
+      if (localSessionFailure !== undefined) throw localSessionFailure;
+      throw error;
+    }
+    const { adapter, contract } = direct;
     const document = await resolveArtifactInputDocument(parsed, contract);
     const preparedDocument = mergeOptionMetadata(document, parsed.options);
     if (domain === "issue") {
