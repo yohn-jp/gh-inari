@@ -8,6 +8,7 @@ import { createDelegatorRecord } from "../agent-authority/delegator-operations.j
 import { generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
 import type { Delegator } from "../agent-authority/delegator.js";
 import { projectSetupState } from "../application/setup/index.js";
+import { validateLocalAdmissionConfig, writeLocalJson } from "../local-control/config.js";
 import { publishLocalRuntimeEndpoint } from "../local-control/runtime-discovery.js";
 import { findSetupSecretMaterial, type SetupGeneration } from "../runtime-contracts/index.js";
 import { SetupConfigStore } from "./setup-config-store.js";
@@ -206,6 +207,49 @@ test("Admission readiness is repository-bound owner evidence, never process heal
     );
   } finally {
     server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#1182 readiness that raced a setup configuration change is never adopted for the old generation", async () => {
+  const { root, environment } = home();
+  try {
+    const admissionId = "adm_abcdefghijklmnopqrstuvwx";
+    writeLocalJson(
+      "admission",
+      "config.json",
+      {
+        version: 1,
+        id: admissionId,
+        listen: { host: "127.0.0.1", port: 0 },
+        executor: { id: "exec_abcdefghijklmnopqrstuvwx" },
+      },
+      validateLocalAdmissionConfig,
+      environment,
+    );
+    writeLocalJson("admission", "runtime-authority.json", record(), (value) => value as Delegator, environment);
+    let raceConfiguration = false;
+    const sessionReadiness = {
+      observe: async () => {
+        if (raceConfiguration) new SetupConfigStore({ environment }).update(repository, 0, { app: { appId: "4242" } });
+        return { status: "ready" as const, observedAt: new Date().toISOString(), diagnostics: [] };
+      },
+    };
+    const steady = await observeSetup(repository, { environment, provider, sessionReadiness });
+    assert.equal(steady.sessionReadiness.status, "ready");
+
+    raceConfiguration = true;
+    const raced = await observeSetup(repository, { environment, provider, sessionReadiness });
+    assert.equal(raced.sessionReadiness.status, "unknown");
+    assert.equal(raced.sessionReadiness.diagnostics[0]?.code, "SETUP_SESSION_READINESS_STALE");
+    // The generation reported is the one observed at the start, and it is now stale.
+    const current = await observeSetup(repository, {
+      environment,
+      provider,
+      sessionReadiness: { observe: sessionReadiness.observe },
+    });
+    assert.notEqual(current.generation.configuration, raced.generation.configuration);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

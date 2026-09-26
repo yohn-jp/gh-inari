@@ -1094,8 +1094,15 @@ test("local Change commands use the production Admission authority and its exact
 });
 
 /** A repository-governed PR contract compiled from provider-shaped default-branch evidence (trusted provenance). */
-async function governedPullRequestContract(): Promise<unknown> {
-  const template = "## Summary\n\nSummarize the change.\n";
+function governedPullRequestAdapter(role: "implementation" | "integration") {
+  // The ordinary Implementation contract carries the linked-Issue section policy;
+  // an integration-style contract does not.
+  const template =
+    role === "implementation"
+      ? "## Summary\n\nSummarize the change.\n\n## Linked issue\n\nCloses #\n"
+      : "## Summary\n\nSummarize the change.\n";
+  const policy =
+    "version: 1\ntemplates:\n  - template: default\n    sections:\n      - section: linked_issue\n        linkedIssue: true\n";
   const context = {
     hostname: "github.com",
     host: "github.com",
@@ -1105,21 +1112,28 @@ async function governedPullRequestContract(): Promise<unknown> {
     url: "https://github.com/acme/inari",
     repositoryId: "123456789",
   };
-  return compileRepositoryGovernedContract(
-    {
-      resolveRepositoryContext: async () => context,
-      getRepositoryContext: async () => context,
-      getRepositoryDefaultBranch: async () => "main",
-      findBranch: async (name: string) => ({ name, ref: `refs/heads/${name}`, sha: "7".repeat(40) }),
-      getRepositoryTree: async () => ({
-        sha: "8".repeat(40),
-        entries: [{ path: ".github/PULL_REQUEST_TEMPLATE.md", type: "blob" as const, sha: "6".repeat(40) }],
-      }),
-      getRepositoryBlob: async () => template,
-    } as never,
-    "pr",
-    "default",
-  );
+  return {
+    resolveRepositoryContext: async () => context,
+    getRepositoryContext: async () => context,
+    getRepositoryDefaultBranch: async () => "main",
+    findBranch: async (name: string) => ({ name, ref: `refs/heads/${name}`, sha: "7".repeat(40) }),
+    getRepositoryTree: async () => ({
+      sha: "8".repeat(40),
+      entries: [
+        { path: ".github/PULL_REQUEST_TEMPLATE.md", type: "blob" as const, sha: "6".repeat(40) },
+        ...(role === "implementation"
+          ? [{ path: ".github/inari/pr-policy.yml", type: "blob" as const, sha: "5".repeat(40) }]
+          : []),
+      ],
+    }),
+    getRepositoryBlob: async (sha: string) => (sha === "5".repeat(40) ? policy : template),
+  };
+}
+
+async function governedPullRequestContract(
+  role: "implementation" | "integration" = "implementation",
+): Promise<unknown> {
+  return compileRepositoryGovernedContract(governedPullRequestAdapter(role) as never, "pr", "default");
 }
 
 test("#1181 local pr publish and pr create go through the selected Admission Session, never a user credential", async () => {
@@ -1131,7 +1145,8 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
   const branch = "feat/1029-local-cli-admission-path";
   const sessionId = "sess_cli-pr-1029";
   const local = localAuthority(environment);
-  const contract = await governedPullRequestContract();
+  const implementationContract = await governedPullRequestContract("implementation");
+  let contract = implementationContract;
   const executions: { readonly operation: string; readonly request: unknown }[] = [];
   const contractReads: unknown[] = [];
   const projection = projectChangeFromGitHubEvidence({
@@ -1281,6 +1296,20 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
     assert.equal(publishedOutput.mutation, true);
     assert.equal(executions.at(-1)?.operation, "pullRequest.publish");
 
+    // Compatibility work identities the canonical validator accepts (`workIdentity.issue`,
+    // a bare IssueReference) are ordinary Implementation publications and route locally too.
+    const original = JSON.parse(await readFile(requestPath, "utf8")) as Record<string, unknown>;
+    for (const workIdentity of [{ issue: implementation }, implementation]) {
+      const compatPath = path.join(configRoot, "publication-compat.json");
+      await writeFile(compatPath, JSON.stringify({ ...original, workIdentity }));
+      executions.length = 0;
+      const compatDenied = await capture(["pr", "publish", "--from", compatPath, "--json"], noSelector, dependencies);
+      assert.equal(JSON.parse(compatDenied.stdout).error.code, "ADMISSION_SESSION_SELECTOR_REQUIRED");
+      const compat = await capture(["pr", "publish", "--from", compatPath, "--json"], selected, dependencies);
+      assert.equal(JSON.parse(compat.stdout).route, "local-admission", compat.stdout);
+      assert.equal(executions.at(-1)?.operation, "pullRequest.publish");
+    }
+
     executions.length = 0;
     const created = await capture(
       [
@@ -1288,6 +1317,8 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
         "create",
         "--field",
         "summary=Implement the local admission route.",
+        "--field",
+        `linked_issue=Closes #${issue}`,
         "--title",
         "feat: local admission PR",
         "--head",
@@ -1317,6 +1348,39 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
     assert.equal(publication.expectedBase, "main");
     assert.equal(publication.headRevision, head);
     assert.match(publication.body, /Implement the local admission route\./u);
+    // Unspecified PR metadata stays unspecified on the Local Admission path.
+    assert.equal(Object.hasOwn(publication, "draft"), false);
+    assert.equal(Object.hasOwn(publication, "maintainerCanModify"), false);
+
+    executions.length = 0;
+    const metadata = await capture(
+      [
+        "pr",
+        "create",
+        "--field",
+        "summary=Implement the local admission route.",
+        "--field",
+        `linked_issue=Closes #${issue}`,
+        "--title",
+        "feat: local admission PR",
+        "--head",
+        branch,
+        "--base",
+        "main",
+        "--draft",
+        "--maintainer-can-modify",
+        "--json",
+      ],
+      selected,
+      dependencies,
+    );
+    assert.equal(metadata.exitCode, 0, metadata.stdout);
+    const withMetadata = executions.find((entry) => entry.operation === "pullRequest.publish")?.request as Record<
+      string,
+      unknown
+    >;
+    assert.equal(withMetadata.draft, true);
+    assert.equal(withMetadata.maintainerCanModify, true);
 
     // A head other than the governed Implementation branch is refused before any publication.
     executions.length = 0;
@@ -1331,6 +1395,60 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
       false,
     );
     assert.equal(userCredentialUsed, false);
+
+    // Without a Session, an Implementation contract is refused, never published through the user path.
+    let userPublication = false;
+    const implementationAdapter = {
+      ...governedPullRequestAdapter("implementation"),
+      createPullRequest: async () => {
+        userPublication = true;
+        throw new Error("must not publish through the user path");
+      },
+    };
+    const sessionless = await capture(
+      [
+        "pr",
+        "create",
+        "--field",
+        "summary=x",
+        "--field",
+        `linked_issue=Closes #${issue}`,
+        "--title",
+        "t",
+        "--head",
+        branch,
+        "--base",
+        "main",
+        "--json",
+      ],
+      noSelector,
+      { repositoryRoot, createAdapter: (() => implementationAdapter) as never },
+    );
+    assert.equal(JSON.parse(sessionless.stdout).error.code, "ADMISSION_SESSION_SELECTOR_REQUIRED");
+    assert.equal(userPublication, false);
+
+    // A non-Implementation governed contract keeps its existing direct route even on the local Runtime.
+    contract = await governedPullRequestContract("integration");
+    executions.length = 0;
+    let directRoute = false;
+    const integration = await capture(
+      ["pr", "create", "--field", "summary=x", "--title", "t", "--head", "issue/1029-x", "--base", "main", "--json"],
+      selected,
+      {
+        repositoryRoot,
+        createAdapter: (() => {
+          directRoute = true;
+          throw new Error("direct route selected");
+        }) as never,
+      },
+    );
+    assert.notEqual(integration.exitCode, 0);
+    assert.equal(directRoute, true);
+    assert.equal(
+      executions.some((entry) => entry.operation === "pullRequest.publish"),
+      false,
+    );
+    contract = implementationContract;
   } finally {
     for (const server of [admissionServer, executorServer])
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));

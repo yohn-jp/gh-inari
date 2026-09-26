@@ -2594,12 +2594,11 @@ async function publishPullRequestThroughLocalAdmission(
  * published through the Session's `pullRequest.publish` route for the governed
  * Implementation's exact branch and provider head revision.
  */
-async function createPullRequestThroughLocalAdmission(
+async function readLocalPullRequestContext(
   parsed: ParsedArgs,
   positional: string | undefined,
   context: LocalAdmissionSessionContext,
-): Promise<number> {
-  const issue = context.binding.task.number;
+): Promise<{ readonly contract: CanonicalContract; readonly change: unknown }> {
   const owned = await context.client.readPullRequestContext(
     { id: context.binding.repository.id, name: context.binding.repository.name },
     templateSelector(parsed, positional, "pr") ?? "default",
@@ -2607,10 +2606,19 @@ async function createPullRequestThroughLocalAdmission(
   );
   if (!validateCanonicalContract(owned.contract).valid)
     throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid governed PR contract.");
+  return { contract: owned.contract as CanonicalContract, change: owned.change };
+}
+
+async function createPullRequestThroughLocalAdmission(
+  parsed: ParsedArgs,
+  owned: { readonly contract: CanonicalContract; readonly change: unknown },
+  context: LocalAdmissionSessionContext,
+): Promise<number> {
+  const issue = context.binding.task.number;
   const current = validateChangeProjectionResult(owned.change);
   if (current.projection === undefined)
     throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid Change projection.");
-  const contract = owned.contract as CanonicalContract;
+  const contract = owned.contract;
   const document = mergeOptionMetadata(await resolveArtifactInputDocument(parsed, contract), parsed.options);
   const prepared = preparePullRequestArtifact(contract, document);
   const projection = current.projection;
@@ -2656,22 +2664,36 @@ async function createPullRequestThroughLocalAdmission(
       headRevision,
       title: prepared.artifact.title,
       body: prepared.artifact.body,
-      draft: true,
+      ...(prepared.artifact.draft === undefined ? {} : { draft: prepared.artifact.draft }),
+      ...(prepared.artifact.maintainerCanModify === undefined
+        ? {}
+        : { maintainerCanModify: prepared.artifact.maintainerCanModify }),
     },
     context,
   );
 }
 
-/** Whether a PR publication request is an ordinary Issue-bound Implementation publication. */
+/**
+ * Whether a PR publication request is an ordinary Issue-bound Implementation
+ * publication. The canonical validator's normalized work identity is the
+ * authority, so compatibility inputs (`workIdentity.issue`, bare
+ * IssueReferences) route exactly like the canonical `implementation` shape.
+ * Only a normalized release identity keeps the direct operator contract; an
+ * unparseable identity fails closed on the local Runtime route.
+ */
 function implementationPublication(input: unknown): boolean {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) return false;
-  const identity = (input as Record<string, unknown>).workIdentity;
-  return (
-    typeof identity === "object" &&
-    identity !== null &&
-    !Array.isArray(identity) &&
-    Object.hasOwn(identity, "implementation") &&
-    !Object.hasOwn(identity, "release")
+  const identity = tryValidatePrPublicationRequest(input).workIdentity;
+  return identity === undefined || !("release" in identity);
+}
+
+/**
+ * Whether a repository-governed PR contract is the ordinary Implementation
+ * contract: the canonical role is carried by its linked-Issue section policy,
+ * which integration, Epic, Authority and release contracts do not declare.
+ */
+function implementationPullRequestContract(contract: CanonicalContract): boolean {
+  return contract.sections.some((section) =>
+    section.fields.some((field) => effectiveFieldConstraints(contract, field).linkedIssue === true),
   );
 }
 
@@ -3720,12 +3742,18 @@ async function runArtifactCommand(
 
     rejectGovernedPolicyOverride(parsed.options.policy);
     const localEnvironment = dependencies.environment ?? process.env;
-    if (domain === "pr" && configuredLocalAdmissionTopology(localEnvironment))
-      return createPullRequestThroughLocalAdmission(
-        parsed,
-        rest[0],
-        requireLocalAdmissionSessionContext(root, parsed, localEnvironment),
-      );
+    // #1181: on the local Runtime the repository-governed contract's canonical role
+    // selects the route. Ordinary Implementation PRs publish only through the
+    // Admission Session; integration, Epic, Authority and release contracts keep
+    // their existing direct contract. A missing Session never reroutes an
+    // Implementation PR to the user path.
+    const localTopology = domain === "pr" && configuredLocalAdmissionTopology(localEnvironment);
+    if (localTopology && (localEnvironment.INARI_SESSION_ID ?? "").length > 0) {
+      const context = requireLocalAdmissionSessionContext(root, parsed, localEnvironment);
+      const owned = await readLocalPullRequestContext(parsed, rest[0], context);
+      if (implementationPullRequestContract(owned.contract))
+        return createPullRequestThroughLocalAdmission(parsed, owned, context);
+    }
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
     await adapter.resolveRepositoryContext();
     const contract = await compileRepositoryGovernedContract(
@@ -3743,6 +3771,13 @@ async function runArtifactCommand(
       const created = await createGovernedIssue(adapter, prepared.artifact);
       console.log(JSON.stringify({ ok: true, artifact: created.artifact, governance: created.governance }));
       return 0;
+    }
+    if (localTopology && implementationPullRequestContract(contract)) {
+      requireLocalAdmissionSessionContext(root, parsed, localEnvironment);
+      throw new CliError(
+        "ADMISSION_RESPONSE_INVALID",
+        "The Session-owned PR contract role disagrees with the repository-governed contract.",
+      );
     }
     const prepared = preparePullRequestArtifact(contract, preparedDocument);
     const created = await createGovernedPullRequest(adapter, prepared.artifact);

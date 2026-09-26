@@ -830,11 +830,28 @@ export async function observeSetup(
   const now = options.now ?? (() => new Date());
   const evidence = await readSetupConfigurationEvidence(repository, environment);
   const generation: SetupGeneration = { repository, configuration: evidence.generation };
-  const [trust, health, readiness] = await Promise.all([
+  const [trust, health, observedReadiness] = await Promise.all([
     repositoryTrustStatus(evidence, options.provider, now()),
     healthStatus(options.lifecycle, generation),
     sessionReadinessStatus(options.sessionReadiness, evidence, generation),
   ]);
+  // #1182: Admission readiness is evaluated against live owner state, so it binds to
+  // this generation only if the configuration is unchanged when observation ends. A
+  // readiness report that raced a setup change is never adopted as `ready` evidence
+  // for the generation observed at the start.
+  const readiness: DimensionResult<"session-readiness"> =
+    observedReadiness.status === "ready" &&
+    (await readSetupConfigurationEvidence(repository, environment)).generation !== evidence.generation
+      ? {
+          status: "unknown",
+          diagnostics: [
+            diagnostic(
+              "SETUP_SESSION_READINESS_STALE",
+              "Setup configuration changed while Admission readiness was observed; observe again.",
+            ),
+          ],
+        }
+      : observedReadiness;
   const observedAt = now().toISOString();
   const id = evidence.generation;
   return validateSetupObservation({
