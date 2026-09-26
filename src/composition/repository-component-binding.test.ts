@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, unlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -178,6 +178,28 @@ test("#1201 one Authority identity serves both repositories by reference, withou
         { environment: w.environment },
       ).conflicts,
       ["authority"],
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
+
+test("#1201 incomplete Authority-ID custody is unreadable, not projected as configured identity", async () => {
+  const w = world();
+  try {
+    const { identity } = prepareLocalAuthorityIdentity("runtime-broken", w.environment);
+    record(w.environment, one, {
+      authority: {
+        authorityId: identity.authorityId,
+        publicKeyFingerprint: identity.publicKeyFingerprint,
+      },
+    });
+    unlinkSync(path.join(w.home, "authority", "keys", identity.authorityId, "private-key.pem"));
+    assert.throws(
+      () => resolveRepositoryComponentBinding(one, { environment: w.environment }),
+      (error: unknown) =>
+        error instanceof RepositoryComponentBindingError && error.subjects.includes("authority"),
     );
   } finally {
     w.cleanup();

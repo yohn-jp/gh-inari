@@ -27,7 +27,7 @@
  * transport, discovery and mTLS are unchanged; Admission is referenced only by
  * its existing public component identity.
  */
-import { readLocalAuthorityIdentity } from "../authority/index.js";
+import { listLocalAuthorityIdentities } from "../authority/index.js";
 import { legacyExecutorCustodyPresent } from "../executor/credential-migration.js";
 import { executorAppCustody, executorIssuerCustody } from "../executor/enrollment/owner.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
@@ -249,7 +249,9 @@ export function readAuthorityReference(
   environment: NodeJS.ProcessEnv = process.env,
 ): AuthorityReferenceProjection | undefined {
   if (recorded !== undefined) {
-    const identity = readLocalAuthorityIdentity(recorded.authorityId, environment);
+    const identity = listLocalAuthorityIdentities(environment).find(
+      (candidate) => candidate.authorityId === recorded.authorityId,
+    );
     if (identity !== undefined)
       return Object.freeze({
         authorityId: identity.authorityId,
