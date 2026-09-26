@@ -61,6 +61,22 @@ globalThis.fetch = async (input, init) => {
       appUserAuthProfile: "device-flow",
       relayConnectionBase: "wss://relay.example.test/connect",
     });
+  if (url.origin === "https://github.com" && method === "POST" && route === "login/device/code")
+    return respond({
+      device_code: "setup-cert-device",
+      user_code: "CERT-1122",
+      verification_uri: "https://github.com/login/device",
+      expires_in: 900,
+      interval: 1,
+    });
+  if (url.origin === "https://github.com" && method === "POST" && route === "login/oauth/access_token")
+    return respond({
+      access_token: "setup-cert-user-token",
+      refresh_token: "setup-cert-refresh-token",
+      expires_in: 3600,
+      refresh_token_expires_in: 3600,
+      token_type: "bearer",
+    });
   if (url.origin !== "https://api.github.com") throw new Error(`Unexpected provider origin: ${url.origin}`);
   const authorization = new Headers(init?.headers).get("authorization") ?? "";
   if (method === "POST" && route === `app/installations/${installationId}/access_tokens`) {
@@ -131,6 +147,7 @@ globalThis.fetch = async (input, init) => {
   if (method === "GET" && route === `${prefix}/git/commits/${publishedCommit}`)
     return respond({ sha: publishedCommit, tree: { sha: publishedTree } });
   if (method === "GET" && route.startsWith(`${prefix}/git/trees/`)) {
+    if (current.trustUnavailable) return respond({ message: "Canonical trust is temporarily unavailable" }, 503);
     const ref = route.slice(`${prefix}/git/trees/`.length);
     const published = ref === publishedTree || ref === publishedCommit || (ref === "main" && current.merged);
     return respond({

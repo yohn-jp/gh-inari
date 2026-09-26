@@ -344,7 +344,7 @@ test(
   },
 );
 
-test("packed browser recovers a legacy profile after a partial migration failure", { timeout: 120_000 }, async () => {
+test("packed browser recovers a legacy profile and publishes first trust PR", { timeout: 120_000 }, async () => {
   const browserPath = locateBrowser();
   assert.ok(browserPath, "BLOCKED / NOT CHECKED: no Chromium-compatible browser is installed");
   const { chromium } = await import("playwright-core");
@@ -388,7 +388,7 @@ test("packed browser recovers a legacy profile after a partial migration failure
   try {
     await mkdir(workspace);
     await mkdir(configHome);
-    await writeFile(providerState, JSON.stringify({ merged: false }));
+    await writeFile(providerState, JSON.stringify({ merged: false, trustUnavailable: true }));
     await writeFile(providerLog, "");
     await writeFile(
       path.join(configHome, "app-user-credential.json"),
@@ -437,7 +437,10 @@ test("packed browser recovers a legacy profile after a partial migration failure
       privateKey,
     );
     assert.equal(legacy.state, "trust-pending");
-    assert.equal(JSON.parse(await readFile(providerState, "utf8")).merged, false);
+    assert.equal(legacy.publication, undefined);
+    const initialProviderState = JSON.parse(await readFile(providerState, "utf8"));
+    assert.equal(initialProviderState.pr, undefined);
+    await writeFile(providerState, JSON.stringify({ ...initialProviderState, trustUnavailable: false }));
     const issuer = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const issuerPublicKeyFile = path.join(root, "issuer-public.pem");
     await writeFile(issuerPublicKeyFile, issuer.publicKey.export({ type: "spki", format: "pem" }));
@@ -510,14 +513,25 @@ test("packed browser recovers a legacy profile after a partial migration failure
     await bind.locator('button[type="submit"]').click();
     const binding = await (await bindResponse).json();
     assert.equal(binding.outcome, "succeeded", JSON.stringify(binding.diagnostics));
-    await page.waitForSelector('[data-stage="unknown"]');
-    const blockedCli = run("setup", "status", "--json", "--repository", repository, "--repository-id", "44332211");
-    assert.equal(blockedCli.state.stage, "unknown");
-    assert.equal(await page.locator('form.action[data-action-id^="authority.publish-trust:"]').count(), 0);
-    assert.match((await page.textContent("body")) ?? "", /SETUP_TRUST_UNAVAILABLE/u);
+    const publication = page.locator('form.action[data-action-id^="authority.publish-trust:"]');
+    await publication.waitFor();
+    const untrustedCli = run("setup", "status", "--json", "--repository", repository, "--repository-id", "44332211");
+    assert.equal(
+      untrustedCli.state.dimensions.find((item) => item.dimension === "repository-trust")?.status,
+      "untrusted",
+    );
+    await publication.locator("input[data-acknowledge]").check();
+    const publicationResponse = page.waitForResponse(
+      (response) => response.url() === `${started.endpoint}/api/setup/actions`,
+    );
+    await publication.locator('button[type="submit"]').click();
+    const published = await (await publicationResponse).json();
+    assert.equal(published.outcome, "succeeded", JSON.stringify(published.diagnostics));
+    assert.ok(published.diagnostics.some((item) => item.code === "SETUP_TRUST_PUBLICATION_PENDING"));
     const pending = JSON.parse(await readFile(providerState, "utf8"));
     assert.equal(pending.pr, true);
     assert.equal(pending.merged, false);
+    await page.waitForSelector('[data-stage="pending-human-trust"]');
     await writeFile(providerState, JSON.stringify({ ...pending, merged: true }));
     await page.getByRole("button", { name: "Refresh state" }).click();
     const bootstrap = await page.evaluate(async () =>
@@ -537,9 +551,9 @@ test("packed browser recovers a legacy profile after a partial migration failure
     const trustedCli = run("setup", "status", "--json", "--repository", repository, "--repository-id", "44332211");
     assert.equal(trustedCli.state.dimensions.find((item) => item.dimension === "repository-trust")?.status, "trusted");
     await page.reload();
-    await page.waitForFunction(() => document.querySelector('[data-stage="unknown"]') === null);
+    await page.waitForFunction(() => document.querySelector('[data-stage="pending-human-trust"]') === null);
     console.log(
-      "packed Chromium legacy migration, injected partial failure, recovery, preserved Authority, and provider-side merge trust recheck: PASS; first publication is PRODUCTION_BLOCKER",
+      "packed Chromium legacy migration, injected partial failure, recovery, first trust publication, and provider-side merge trust recheck: PASS",
     );
   } finally {
     await browser?.close().catch(() => undefined);

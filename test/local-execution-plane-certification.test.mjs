@@ -15,7 +15,7 @@ const projectRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 let cliEntry;
 const tsx = path.join(projectRoot, "node_modules/.bin/tsx");
 const issue = 1030;
-const repository = "acme/inari";
+const repository = "cert-owner/renamed-project";
 const repositoryId = "469000001";
 const branch = "feat/1030-local-certification";
 const pullRequest = 10300;
@@ -89,9 +89,9 @@ if (role === "executor") {
     const method = String(init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     const route = decodeURIComponent(url.pathname).replace(/^\/+/, "");
     appendFileSync(providerLog, JSON.stringify({ method, route, search: url.search }) + "\n");
-    const prefix = "repos/acme/inari/";
+    const prefix = "repos/cert-owner/renamed-project/";
     const permissions = { metadata: "read", contents: "write", issues: "write", pull_requests: "write" };
-    const repository = { id: Number(fixture.repositoryId), node_id: "R_local_certification", full_name: "acme/inari", fork: false, default_branch: "main" };
+    const repository = { id: Number(fixture.repositoryId), node_id: "R_local_certification", full_name: "cert-owner/renamed-project", fork: false, default_branch: "main" };
     const authorization = new Headers(init?.headers).get("authorization") ?? "";
     if (method === "POST" && route === "app/installations/" + fixture.installationId + "/access_tokens") {
       // Issuer App authority: the App JWT must be signed by the Issuer private key.
@@ -113,7 +113,7 @@ if (role === "executor") {
     if (authorization !== "Bearer " + fixture.installationToken && authorization !== "token " + fixture.installationToken) {
       return respond({ message: "Executor provider request lacked Issuer installation authority" }, 401);
     }
-    if (method === "GET" && route === "repos/acme/inari") return respond(repository);
+    if (method === "GET" && route === "repos/cert-owner/renamed-project") return respond(repository);
     if (method === "GET" && route === prefix + "git/ref/heads/main") {
       return respond({ ref: "refs/heads/main", object: { type: "commit", sha: fixture.policySha } });
     }
@@ -127,7 +127,7 @@ if (role === "executor") {
     }
     if (method === "GET" && route === prefix + "issues/" + fixture.issue) {
       return respond({ number: fixture.issue, title: "feat: local certification", state: "open", body: fixture.issueBody,
-        html_url: "https://github.com/acme/inari/issues/" + fixture.issue, labels: [], assignees: [] });
+        html_url: "https://github.com/cert-owner/renamed-project/issues/" + fixture.issue, labels: [], assignees: [] });
     }
     if (method === "GET" && route === prefix + "issues/" + fixture.issue + "/dependencies/blocked_by") return respond([]);
     if (method === "GET" && route === prefix + "git/ref/heads/" + fixture.branch) {
@@ -142,13 +142,13 @@ if (role === "executor") {
     }
     if (method === "GET" && route === prefix + "pulls") {
       const state = readState();
-      return respond([{ number: fixture.pullRequest, head: { ref: fixture.branch, repo: { full_name: "acme/inari" } },
+      return respond([{ number: fixture.pullRequest, head: { ref: fixture.branch, repo: { full_name: "cert-owner/renamed-project" } },
         base: { ref: "main" }, user: { login: "inari-issuer[bot]" }, state: state.pullRequestState,
         draft: true, merged_at: null }]);
     }
     if (method === "GET" && route === prefix + "pulls/" + fixture.pullRequest) {
       return respond({ number: fixture.pullRequest, title: "feat: local certification", body: "Local certification PR",
-        html_url: "https://github.com/acme/inari/pull/" + fixture.pullRequest,
+        html_url: "https://github.com/cert-owner/renamed-project/pull/" + fixture.pullRequest,
         state: readState().pullRequestState, user: { login: "inari-issuer[bot]" },
         head: { ref: fixture.branch }, base: { ref: "main" }, draft: true, merged: false });
     }
@@ -488,7 +488,7 @@ test(
       historicalPortOccupants.push(await occupyPort(8765, true));
       historicalPortOccupants.push(await occupyPort(8766, true));
       git(workspace, "init", "-q");
-      git(workspace, "remote", "add", "origin", "https://github.com/acme/inari.git");
+      git(workspace, "remote", "add", "origin", "https://github.com/cert-owner/renamed-project.git");
       git(workspace, "checkout", "-q", "-b", branch);
       await writeFile(preloadFile, providerPreload);
       await writeFile(fixtureFile, "{}");
@@ -669,7 +669,7 @@ test(
       const unselectedWorkspace = path.join(directory, "workspace-unselected");
       await mkdir(unselectedWorkspace);
       git(unselectedWorkspace, "init", "-q");
-      git(unselectedWorkspace, "remote", "add", "origin", "https://github.com/acme/inari.git");
+      git(unselectedWorkspace, "remote", "add", "origin", "https://github.com/cert-owner/renamed-project.git");
       git(unselectedWorkspace, "checkout", "-q", "-b", "main");
       const unselectedState = jsonOutput(
         command(["init", "--json"], { cwd: unselectedWorkspace, env: operatorEnv }),
@@ -902,7 +902,9 @@ test(
       assert.ok((await executionCount(executorLog)) > mutationsBefore, "Change mutation did not cross Executor HTTP");
       const providerCalls = await events(providerLog);
       assert.ok(
-        providerCalls.some((call) => call.method === "PATCH" && call.route === `repos/acme/inari/pulls/${pullRequest}`),
+        providerCalls.some(
+          (call) => call.method === "PATCH" && call.route === `repos/cert-owner/renamed-project/pulls/${pullRequest}`,
+        ),
       );
 
       async function denied(value, selector, label) {

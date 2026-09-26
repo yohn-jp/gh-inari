@@ -114,7 +114,7 @@ test(
 );
 
 test(
-  "packed legacy upgrade and trust recheck reproduce the shared setup publication blocker",
+  "packed shared setup publishes first trust PR after legacy recovery and rechecks provider merge",
   { timeout: 120_000 },
   async () => {
     const packed = await installPackedCli();
@@ -145,18 +145,8 @@ test(
     try {
       await mkdir(workspace);
       await mkdir(configHome);
-      await writeFile(providerState, JSON.stringify({ merged: false }));
+      await writeFile(providerState, JSON.stringify({ merged: false, trustUnavailable: true }));
       await writeFile(providerLog, "");
-      await writeFile(
-        path.join(configHome, "app-user-credential.json"),
-        JSON.stringify({
-          version: 1,
-          access_token: "setup-cert-user-token",
-          refresh_token: "setup-cert-refresh-token",
-          access_token_expires_at: "2099-01-01T00:00:00.000Z",
-        }),
-        { mode: 0o600 },
-      );
       const templateRoot = checkout;
       const templateDirectory = path.join(workspace, ".github", "inari", "pull-requests");
       await mkdir(templateDirectory, { recursive: true });
@@ -199,21 +189,25 @@ test(
         "--private-key",
         privateKey,
       ];
+      const authorization = run(...args.filter((arg) => arg !== "--json"));
+      assert.equal(authorization.status, 0, `${authorization.stdout} ${authorization.stderr}`);
+      assert.match(authorization.stdout, /CERT-1122/u);
+      assert.equal(existsSync(path.join(configHome, "app-user-credential.json")), true);
       const result = json(run(...args), "packed repository setup");
       assert.equal(result.state, "trust-pending");
       assert.equal(result.repository.repositoryId, "44332211");
-      assert.equal(result.publication?.pullRequest.number, 31);
-      assert.equal(result.trust.status, "pending-human-trust");
-      const pending = JSON.parse(await readFile(providerState, "utf8"));
-      assert.equal(pending.merged, false);
-      assert.equal(pending.pr, true);
-      assert.equal(JSON.parse(pending.artifact.content).id, authorityId);
+      assert.equal(result.publication, undefined);
+      const initialProvider = JSON.parse(await readFile(providerState, "utf8"));
+      assert.equal(initialProvider.pr, undefined);
+      await writeFile(providerState, JSON.stringify({ ...initialProvider, trustUnavailable: false }));
       const routes = (await readFile(providerLog, "utf8"))
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line).route);
       assert.ok(routes.includes("user/installations"));
       assert.ok(routes.includes("user/installations/77/repositories"));
+      assert.ok(routes.includes("login/device/code"));
+      assert.ok(routes.includes("login/oauth/access_token"));
       const setupArguments = ["--json", "--repository", repository, "--repository-id", "44332211"];
       const application = json(run("setup", "status", ...setupArguments), "shared setup state after legacy profile");
       assert.equal(application.state.repository.repositoryId, "44332211");
@@ -273,7 +267,7 @@ test(
       const admissionPin = JSON.parse(
         await readFile(path.join(configHome, "admission", "runtime-authority.json"), "utf8"),
       );
-      assert.deepEqual(admissionPin, JSON.parse(pending.artifact.content));
+      assert.deepEqual(admissionPin, bootstrap.authority);
       assert.deepEqual(admissionPin.capabilityCeiling, ["change.implement"]);
       const bindingState = json(run("setup", "status", ...setupArguments), "shared setup binding state");
       assert.equal(
@@ -288,16 +282,37 @@ test(
       );
       const bound = JSON.parse(bindingRun.stdout);
       assert.equal(bound.result.outcome, "succeeded", JSON.stringify(bound.result.diagnostics));
-      const publicationState = json(run("setup", "status", ...setupArguments), "shared setup publication state");
-      assert.equal(publicationState.state.stage, "unknown");
+      const beforeTrustRead = JSON.parse(await readFile(providerState, "utf8"));
+      await writeFile(providerState, JSON.stringify({ ...beforeTrustRead, trustUnavailable: true }));
+      const unavailable = json(run("setup", "status", ...setupArguments), "shared setup unavailable trust");
       assert.equal(
-        publicationState.state.dimensions.find((item) => item.dimension === "repository-trust")?.diagnostics[0]?.code,
-        "SETUP_TRUST_UNAVAILABLE",
+        unavailable.state.dimensions.find((item) => item.dimension === "repository-trust")?.status,
+        "unknown",
       );
       assert.equal(
-        publicationState.state.actions.some((action) => action.kind === "authority.publish-trust"),
+        unavailable.state.actions.some((action) => action.kind === "authority.publish-trust"),
         false,
       );
+      await writeFile(providerState, JSON.stringify(beforeTrustRead));
+      const publicationState = json(run("setup", "status", ...setupArguments), "shared setup publication state");
+      assert.equal(
+        publicationState.state.dimensions.find((item) => item.dimension === "repository-trust")?.status,
+        "untrusted",
+      );
+      assert.equal(
+        publicationState.state.actions.find((action) => action.id === publicationState.state.nextAction.actionId)?.kind,
+        "authority.publish-trust",
+      );
+      const published = json(run("setup", "next", ...setupArguments, "--yes"), "shared setup first trust publication");
+      assert.equal(published.result.outcome, "succeeded");
+      assert.equal(published.result.diagnostics[0]?.code, "SETUP_TRUST_PUBLICATION_PENDING");
+      const pending = JSON.parse(await readFile(providerState, "utf8"));
+      assert.equal(pending.merged, false);
+      assert.equal(pending.pr, true);
+      assert.deepEqual(JSON.parse(pending.artifact.content), admissionPin);
+      const waiting = json(run("setup", "status", ...setupArguments), "shared setup human wait");
+      assert.equal(waiting.state.stage, "pending-human-trust");
+      assert.equal(waiting.state.nextAction.kind, "wait");
       const retryArgs = args.slice(0, -2);
       const repeated = json(run(...retryArgs), "setup while trust PR awaits human merge");
       assert.equal(repeated.state, "trust-pending");
@@ -317,7 +332,7 @@ test(
         "trusted",
       );
       console.log(
-        "packed CLI App-user scope, deterministic trust PR, partial migration recovery, and provider-side merge trust recheck: PASS; shared setup first publication: PRODUCTION_BLOCKER",
+        "packed CLI Device Flow, App-user scope, unavailable-trust denial, first deterministic trust PR, human wait, partial migration recovery, and provider-side merge trust recheck: PASS",
       );
     } finally {
       await rm(root, { recursive: true, force: true });
