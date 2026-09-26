@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -7,6 +7,11 @@ import {
   bindLocalCliAdmissionRoute,
   configuredLocalRuntimeBindHost,
   createLocalPrivateFile,
+  listExistingLocalStorageDirectory,
+  localStoragePath,
+  MAX_LOCAL_STORAGE_DIRECTORY_ENTRIES,
+  readExistingLocalStorageJson,
+  replaceLocalStorageJsonIfCurrent,
   readExistingLocalJson,
   readLocalJson,
   replaceLocalJsonIfCurrent,
@@ -350,6 +355,168 @@ test("non-mutating private reads keep directory modes and still reject unsafe st
     assert.throws(
       () => readExistingLocalJson("cli", "config.json", validateLocalCliConfig, environment),
       (error: unknown) => error instanceof Error && "code" in error && error.code === "LOCAL_CONTROL_UNSAFE_STORAGE",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function localControlCode(code: string): (error: unknown) => boolean {
+  return (error: unknown) => error instanceof Error && "code" in error && error.code === code;
+}
+
+function validateCounter(value: unknown): { readonly count: number } {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Object.keys(value).join() !== "count" ||
+    typeof (value as { count?: unknown }).count !== "number"
+  ) {
+    throw new Error("invalid counter");
+  }
+  return { count: (value as { count: number }).count };
+}
+
+test("config-home storage paths are bounded and never address component roots", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    assert.equal(
+      localStoragePath("store/entry/record.json", environment),
+      path.join(environment.INARI_CONFIG_HOME as string, "store", "entry", "record.json"),
+    );
+    for (const relativePath of [
+      "",
+      "store//x.json",
+      "../store/x.json",
+      "store/../x.json",
+      ".store/x.json",
+      "/x.json",
+    ]) {
+      assert.throws(
+        () => localStoragePath(relativePath, environment),
+        localControlCode("LOCAL_CONTROL_INVALID_CONFIG"),
+      );
+    }
+    for (const component of ["cli", "authority", "admission", "executor", "runtime"]) {
+      assert.throws(
+        () => localStoragePath(`${component}/x.json`, environment),
+        localControlCode("LOCAL_CONTROL_INVALID_CONFIG"),
+      );
+      assert.throws(
+        () =>
+          replaceLocalStorageJsonIfCurrent(
+            `${component}/x.json`,
+            undefined,
+            { count: 1 },
+            validateCounter,
+            environment,
+          ),
+        localControlCode("LOCAL_CONTROL_INVALID_CONFIG"),
+      );
+    }
+    assert.throws(
+      () => readExistingLocalStorageJson("record.json", validateCounter, environment),
+      localControlCode("LOCAL_CONTROL_INVALID_CONFIG"),
+    );
+    assert.equal(readExistingLocalStorageJson("store/1/record.json", validateCounter, environment), undefined);
+    assert.equal(listExistingLocalStorageDirectory("store", 8, environment), undefined);
+    await assert.rejects(lstat(environment.INARI_CONFIG_HOME as string));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("config-home storage compare-and-replace is atomic, owner-only and rejects hard links", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const record = "store/1/record.json";
+    const file = localStoragePath(record, environment);
+    assert.deepEqual(replaceLocalStorageJsonIfCurrent(record, undefined, { count: 1 }, validateCounter, environment), {
+      count: 1,
+    });
+    assert.deepEqual(replaceLocalStorageJsonIfCurrent(record, undefined, { count: 1 }, validateCounter, environment), {
+      count: 1,
+    });
+    assert.equal((await lstat(file)).mode & 0o777, 0o600);
+    assert.equal((await lstat(path.dirname(file))).mode & 0o777, 0o700);
+    assert.equal((await lstat(localStoragePath("store", environment))).mode & 0o777, 0o700);
+    assert.throws(
+      () => replaceLocalStorageJsonIfCurrent(record, { count: 7 }, { count: 2 }, validateCounter, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
+    );
+    assert.throws(
+      () => replaceLocalStorageJsonIfCurrent(record, undefined, { count: 2 }, validateCounter, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
+    );
+    assert.deepEqual(readExistingLocalStorageJson(record, validateCounter, environment), { count: 1 });
+    assert.deepEqual(
+      replaceLocalStorageJsonIfCurrent(record, { count: 1 }, { count: 2 }, validateCounter, environment),
+      {
+        count: 2,
+      },
+    );
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { count: 2 });
+
+    const alias = path.join(root, "alias.json");
+    await link(file, alias);
+    assert.throws(
+      () => readExistingLocalStorageJson(record, validateCounter, environment),
+      localControlCode("LOCAL_CONTROL_UNSAFE_STORAGE"),
+    );
+    assert.throws(
+      () => replaceLocalStorageJsonIfCurrent(record, { count: 2 }, { count: 3 }, validateCounter, environment),
+      localControlCode("LOCAL_CONTROL_UNSAFE_STORAGE"),
+    );
+    assert.deepEqual(JSON.parse(await readFile(alias, "utf8")), { count: 2 });
+    await rm(alias);
+
+    await writeFile(file, `{"count":1}${" ".repeat(64 * 1024)}`, { mode: 0o600 });
+    assert.throws(
+      () => readExistingLocalStorageJson(record, validateCounter, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_TOO_LARGE"),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("config-home storage enumeration is sorted, non-following and bounded", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    replaceLocalStorageJsonIfCurrent("store/b/record.json", undefined, { count: 1 }, validateCounter, environment);
+    replaceLocalStorageJsonIfCurrent("store/a/record.json", undefined, { count: 1 }, validateCounter, environment);
+    const directory = localStoragePath("store", environment);
+    await writeFile(path.join(directory, "c.json"), "{}\n", { mode: 0o600 });
+    await symlink(path.join(directory, "a"), path.join(directory, "0-link"));
+    assert.deepEqual(listExistingLocalStorageDirectory("store", 4, environment), [
+      { name: "0-link", kind: "other" },
+      { name: "a", kind: "directory" },
+      { name: "b", kind: "directory" },
+      { name: "c.json", kind: "file" },
+    ]);
+    assert.throws(
+      () => listExistingLocalStorageDirectory("store", 3, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_TOO_LARGE"),
+    );
+    for (const bound of [0, -1, 1.5, MAX_LOCAL_STORAGE_DIRECTORY_ENTRIES + 1]) {
+      assert.throws(
+        () => listExistingLocalStorageDirectory("store", bound, environment),
+        localControlCode("LOCAL_CONTROL_INVALID_CONFIG"),
+      );
+    }
+    await chmod(directory, 0o770);
+    assert.throws(
+      () => listExistingLocalStorageDirectory("store", 4, environment),
+      localControlCode("LOCAL_CONTROL_UNSAFE_STORAGE"),
+    );
+    assert.equal((await lstat(directory)).mode & 0o7777, 0o770);
+    await chmod(directory, 0o700);
+    const outside = path.join(root, "outside-store");
+    await rename(directory, outside);
+    await symlink(outside, directory);
+    assert.throws(
+      () => listExistingLocalStorageDirectory("store", 4, environment),
+      localControlCode("LOCAL_CONTROL_UNSAFE_STORAGE"),
     );
   } finally {
     await rm(root, { recursive: true, force: true });
