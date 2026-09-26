@@ -13,15 +13,39 @@
  * were once recorded (App ID, Executor configuration, Authority) are never
  * silently rewritten. The record lives in its own file and never touches an
  * operator or owner file.
+ *
+ * Canonical location (#1198): `<config home>/repositories/<repositoryId>/setup.json`
+ * inside the repository registry, keyed by immutable repository ID only.
+ * The legacy `runtime/setup/<key>.json` record is a read-only compatibility
+ * input: it is read only while no canonical record exists, and the first
+ * persisted update copies it forward (revision preserved) without touching
+ * the legacy file. Once the canonical record exists, legacy state is never
+ * consulted again.
  */
 import { createHash } from "node:crypto";
-import { LocalControlError, readExistingLocalJson, replaceLocalJsonIfCurrent } from "../local-control/config.js";
+import {
+  LocalControlError,
+  readExistingLocalJson,
+  readExistingLocalStorageJson,
+  replaceLocalStorageJsonIfCurrent,
+} from "../local-control/config.js";
+import {
+  REPOSITORY_REGISTRY_DIRECTORY,
+  RepositoryRegistry,
+  RepositoryRegistryError,
+  type RepositoryRegistryRecord,
+} from "../local-control/repository-registry.js";
 import { assertSecretFreeSetupJson, validateRepositoryIdentity } from "../runtime-contracts/index.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 
 export const SETUP_CONFIG_VERSION = 1 as const;
-/** Directory below the `runtime` component that holds setup records. */
+/**
+ * Directory below the `runtime` component that holds legacy setup records
+ * (read-only compatibility input) and the setup operation journal.
+ */
 export const SETUP_STATE_DIRECTORY = "setup" as const;
+/** Canonical setup record file inside a repository registry directory. */
+export const SETUP_CONFIG_RECORD_FILE = "setup.json" as const;
 
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
 const CLIENT_ID = /^[A-Za-z0-9._-]{1,64}$/u;
@@ -210,7 +234,7 @@ export function validateSetupConfigRecord(value: unknown): SetupConfigRecord {
   });
 }
 
-/** Relative path of a repository's setup record below the `runtime` component. */
+/** Relative path key of a repository's legacy setup record and journal below the `runtime` component. */
 export function setupStateFileKey(repository: Pick<RepositoryIdentity, "repositoryHost" | "repositoryId">): string {
   return createHash("sha256")
     .update(`${repository.repositoryHost}\u0000${repository.repositoryId}`, "utf8")
@@ -257,6 +281,60 @@ function assertImmutable(current: SetupConfigRecord | undefined, next: SetupConf
     conflict("The recorded Runtime Authority cannot be replaced by setup.");
 }
 
+/** Config-home relative path of the canonical setup record; derived from the repository ID only. */
+export function setupConfigRecordRelativePath(repository: Pick<RepositoryIdentity, "repositoryId">): string {
+  if (typeof repository.repositoryId !== "string" || !DECIMAL_ID.test(repository.repositoryId))
+    throw invalid("Setup repository ID is invalid.");
+  return `${REPOSITORY_REGISTRY_DIRECTORY}/${repository.repositoryId}/${SETUP_CONFIG_RECORD_FILE}`;
+}
+
+function legacySetupRelativePath(repository: RepositoryIdentity): string {
+  return `${SETUP_STATE_DIRECTORY}/${setupStateFileKey(repository)}.json`;
+}
+
+function unreadable(message: string): SetupConfigStoreError {
+  return new SetupConfigStoreError("SETUP_CONFIG_UNREADABLE", message);
+}
+
+/**
+ * Register the observed repository through the registry owner before a
+ * canonical setup write. A rename of the same host+ID refreshes only the
+ * registry display metadata; another host under the same ID is a conflict.
+ */
+export function ensureSetupRepositoryRegistered(
+  repository: RepositoryIdentity,
+  environment: NodeJS.ProcessEnv = process.env,
+): RepositoryRegistryRecord {
+  const registry = new RepositoryRegistry({ environment });
+  try {
+    const current = registry.get(repository.repositoryId);
+    if (current === undefined) return registry.register(repository);
+    if (current.repositoryHost !== repository.repositoryHost)
+      throw new SetupConfigStoreError("SETUP_CONFIG_CONFLICT", "Repository ID is registered under another host.");
+    if (current.nameWithOwner === repository.nameWithOwner) return current;
+    return registry.updateNameWithOwner(current, repository);
+  } catch (error: unknown) {
+    if (error instanceof SetupConfigStoreError) throw error;
+    if (error instanceof RepositoryRegistryError) {
+      if (error.code === "REPOSITORY_REGISTRY_IDENTITY_CONFLICT")
+        throw new SetupConfigStoreError("SETUP_CONFIG_CONFLICT", "Repository ID is registered under another host.");
+      if (error.code === "REPOSITORY_REGISTRY_STALE" || error.code === "REPOSITORY_REGISTRY_METADATA_CONFLICT")
+        throw new SetupConfigStoreError("SETUP_CONFIG_STALE", "Repository registry changed after it was observed.");
+      if (error.code === "REPOSITORY_REGISTRY_UNREADABLE")
+        throw unreadable("Repository registry could not be read safely.");
+    }
+    throw new SetupConfigStoreError("SETUP_CONFIG_STORAGE_FAILED", "Repository registry could not be persisted.");
+  }
+}
+
+/** Where a read record came from. Legacy records are compatibility input only. */
+export type SetupConfigSource = "canonical" | "legacy";
+
+export interface SetupConfigObservation {
+  readonly source: SetupConfigSource;
+  readonly record: SetupConfigRecord;
+}
+
 export interface SetupConfigStoreOptions {
   readonly environment?: NodeJS.ProcessEnv;
 }
@@ -268,30 +346,73 @@ export class SetupConfigStore {
     this.#environment = options.environment ?? process.env;
   }
 
-  #path(repository: RepositoryIdentity): string {
-    return `${SETUP_STATE_DIRECTORY}/${setupStateFileKey(repository)}.json`;
+  /** Read the canonical registry record only, without creating directories or consulting legacy state. */
+  readCanonical(repository: RepositoryIdentity): SetupConfigRecord | undefined {
+    const relativePath = setupConfigRecordRelativePath(repository);
+    let value: SetupConfigRecord | undefined;
+    try {
+      value = readExistingLocalStorageJson(relativePath, validateSetupConfigRecord, this.#environment);
+    } catch {
+      throw unreadable("Setup configuration could not be read safely.");
+    }
+    if (value === undefined) return undefined;
+    if (!sameRepository(value.repository, repository))
+      throw unreadable("Setup configuration is for another repository.");
+    let registered: RepositoryRegistryRecord | undefined;
+    try {
+      registered = new RepositoryRegistry({ environment: this.#environment }).get(repository.repositoryId);
+    } catch {
+      throw unreadable("Repository registry could not be read safely.");
+    }
+    if (registered === undefined || registered.repositoryHost !== repository.repositoryHost)
+      throw unreadable("Setup configuration has no matching repository registry record.");
+    return value;
+  }
+
+  /** Read the legacy `runtime/setup` record only; it is never written. */
+  readLegacy(repository: RepositoryIdentity): SetupConfigRecord | undefined {
+    let value: SetupConfigRecord | undefined;
+    try {
+      value = readExistingLocalJson(
+        "runtime",
+        legacySetupRelativePath(repository),
+        validateSetupConfigRecord,
+        this.#environment,
+      );
+    } catch {
+      throw unreadable("Legacy setup configuration could not be read safely.");
+    }
+    if (value !== undefined && !sameRepository(value.repository, repository))
+      throw unreadable("Legacy setup configuration is for another repository.");
+    return value;
+  }
+
+  /**
+   * The canonical record when present; otherwise the legacy record as
+   * read-only compatibility input. Legacy state never overrides a canonical record.
+   */
+  observe(repository: RepositoryIdentity): SetupConfigObservation | undefined {
+    const canonicalRecord = this.readCanonical(repository);
+    if (canonicalRecord !== undefined) return Object.freeze({ source: "canonical", record: canonicalRecord });
+    const legacy = this.readLegacy(repository);
+    return legacy === undefined ? undefined : Object.freeze({ source: "legacy", record: legacy });
   }
 
   /** Read without creating directories. Unreadable or foreign records fail closed. */
   read(repository: RepositoryIdentity): SetupConfigRecord | undefined {
-    let value: SetupConfigRecord | undefined;
-    try {
-      value = readExistingLocalJson("runtime", this.#path(repository), validateSetupConfigRecord, this.#environment);
-    } catch {
-      throw new SetupConfigStoreError("SETUP_CONFIG_UNREADABLE", "Setup configuration could not be read safely.");
-    }
-    if (value !== undefined && !sameRepository(value.repository, repository))
-      throw new SetupConfigStoreError("SETUP_CONFIG_UNREADABLE", "Setup configuration is for another repository.");
-    return value;
+    return this.observe(repository)?.record;
   }
 
   /**
    * Apply `patch` only while the stored revision still equals
    * `expectedRevision` (0 for an absent record). A patch that changes nothing
-   * returns the current record, so retries are idempotent.
+   * returns the current record, so retries are idempotent. Every write goes
+   * to the canonical registry location; a legacy-only record is copied
+   * forward with its revision continued and the legacy file left untouched.
    */
   update(repository: RepositoryIdentity, expectedRevision: number, patch: SetupConfigPatch): SetupConfigRecord {
-    const current = this.read(repository);
+    const observed = this.observe(repository);
+    const current = observed?.record;
     if ((current?.revision ?? 0) !== expectedRevision)
       throw new SetupConfigStoreError("SETUP_CONFIG_STALE", "Setup configuration changed after it was observed.");
     const { publication, ...rest } = patch;
@@ -312,11 +433,33 @@ export class SetupConfigStore {
     merged.revision = (current?.revision ?? 0) + 1;
     const next = validateSetupConfigRecord(merged);
     assertImmutable(current, next);
+    return this.#persist(repository, observed?.source === "canonical" ? current : undefined, next);
+  }
+
+  /**
+   * Create the canonical record from an explicitly adopted record. Only an
+   * absent canonical record is written; an existing one is never replaced.
+   */
+  adopt(repository: RepositoryIdentity, record: SetupConfigRecord): SetupConfigRecord {
+    const next = validateSetupConfigRecord(record);
+    if (!sameRepository(next.repository, repository))
+      throw new SetupConfigStoreError(
+        "SETUP_CONFIG_CONFLICT",
+        "Adopted setup configuration is for another repository.",
+      );
+    return this.#persist(repository, undefined, next);
+  }
+
+  #persist(
+    repository: RepositoryIdentity,
+    expected: SetupConfigRecord | undefined,
+    next: SetupConfigRecord,
+  ): SetupConfigRecord {
+    ensureSetupRepositoryRegistered(repository, this.#environment);
     try {
-      return replaceLocalJsonIfCurrent(
-        "runtime",
-        this.#path(repository),
-        current,
+      return replaceLocalStorageJsonIfCurrent(
+        setupConfigRecordRelativePath(repository),
+        expected,
         next,
         validateSetupConfigRecord,
         this.#environment,

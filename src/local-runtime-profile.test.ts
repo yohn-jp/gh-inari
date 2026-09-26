@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -83,6 +83,43 @@ test("Runtime profile replacement is compare-and-swap, identity-preserving, and 
     await store.replace(current, next);
     assert.deepEqual(validateLocalRuntimeProfile(next), next);
     assert.throws(() => validateLocalRuntimeProfile({ ...next, token: "x" }), /unknown field/u);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Runtime profile identity lookup matches host and repository ID only and fails closed", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "inari-profile-test-"));
+  try {
+    const store = new LocalRuntimeProfileStore({ configHome: home });
+    const identity = { repositoryHost: "github.com", repositoryId: "99" };
+    assert.equal(await store.findForRepositoryIdentity(identity), undefined);
+    const renamed = { ...profile(), repository: { ...profile().repository, repositoryNameWithOwner: "acme/renamed" } };
+    await store.save(renamed);
+    await store.save({ ...profile(), repository: { ...profile().repository, repositoryId: "100" } });
+    assert.deepEqual(await store.findForRepositoryIdentity(identity), renamed);
+    assert.equal(
+      await store.findForRepositoryIdentity({ repositoryHost: "ghe.example.test", repositoryId: "99" }),
+      undefined,
+    );
+    await store.save({ ...profile(), endpoint: "https://other-endpoint.example.test" });
+    await assert.rejects(store.findForRepositoryIdentity(identity), { code: "LOCAL_RUNTIME_PROFILE_MISMATCH" });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Runtime profile identity lookup rejects unreadable or misplaced profiles instead of skipping them", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "inari-profile-test-"));
+  try {
+    const store = new LocalRuntimeProfileStore({ configHome: home });
+    const saved = await store.save(profile());
+    const identity = { repositoryHost: "github.com", repositoryId: "99" };
+    await writeFile(path.join(path.dirname(saved), "broken.json"), "{", { mode: 0o600 });
+    await assert.rejects(store.findForRepositoryIdentity(identity), { code: "LOCAL_RUNTIME_PROFILE_UNREADABLE" });
+    await rm(path.join(path.dirname(saved), "broken.json"));
+    await writeFile(path.join(path.dirname(saved), "copied.json"), JSON.stringify(profile()), { mode: 0o600 });
+    await assert.rejects(store.findForRepositoryIdentity(identity), { code: "LOCAL_RUNTIME_PROFILE_MISMATCH" });
   } finally {
     await rm(home, { recursive: true, force: true });
   }
