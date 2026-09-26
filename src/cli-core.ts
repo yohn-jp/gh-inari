@@ -29,6 +29,7 @@ import {
   type CanonicalContract,
   SemanticValidationError,
 } from "./contract/index.js";
+import { validateCanonicalContract } from "./contract/ir.js";
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import {
   createActionsChangeExecutionAdapter,
@@ -130,6 +131,7 @@ import {
   type ChangeMutation,
 } from "./change-execution-port.js";
 import { tryProjectImplementationHandoff, type ImplementationHandoffProjectionOptions } from "./change-handoff.js";
+import { validateChangeProjectionResult } from "./change.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { tryProjectGoldenPathImplementation } from "./golden-path-implementation.js";
 import { projectGoldenPathRecovery } from "./golden-path-recovery.js";
@@ -149,7 +151,7 @@ import {
 } from "./semantic-issue-projection.js";
 import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
 import { tryAdaptIntegrationRouting } from "./integration-routing-adapters.js";
-import { publishPullRequest } from "./pr-publication.js";
+import { publishPullRequest, tryValidatePrPublicationRequest } from "./pr-publication.js";
 import {
   canonicalDelegatorPublicKeyJson,
   defaultDelegatorPrivateKeyPath,
@@ -168,7 +170,7 @@ import {
 } from "./agent-authority/delegator-operations.js";
 import { DELEGATOR_ARTIFACT_DIRECTORY } from "./agent-authority/delegator.js";
 import { renderDelegatorArtifact } from "./agent-authority/delegator-trust.js";
-import { MAX_ISSUE_NUMBER, type CapabilityKind } from "./agent-authority/capability.js";
+import { CAPABILITY_KINDS, MAX_ISSUE_NUMBER, type CapabilityKind } from "./agent-authority/capability.js";
 import { registerDelegator, revokeDelegator, rotateDelegator } from "./agent-authority/delegator-lifecycle.js";
 import {
   createSessionCredentialBundle,
@@ -197,11 +199,8 @@ import {
   setupAdmissionRole,
   serveAdmissionRole,
 } from "./composition/local-runtime-roles.js";
-import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
-import { renderLocalApplicationSetupFlow } from "./local-application-state-terminal.js";
 import type { SetupTerminalIO } from "./cli/setup/index.js";
 import { superviseLocalRuntime } from "./local-control/supervisor.js";
-import { startLocalConsole } from "./local-control/console-server.js";
 import {
   createAdmissionChangeExecutionPort,
   createLocalAdmissionClient,
@@ -244,6 +243,7 @@ import {
   tryPlanSemanticPullRequestMutation,
 } from "./semantic-pr-mutation.js";
 import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "./semantic-branch-observation.js";
+import { validateLocalBranchPolicyInput } from "./cli/runtime/branch-observation.js";
 import { GitHubIssueRelationObservationAdapter } from "./github/issue-relation-observation-adapter.js";
 import {
   LocalSemanticPullRequestExecutor,
@@ -1195,33 +1195,67 @@ async function runInitCommand(
   const environment = dependencies.environment ?? process.env;
   const config = ensureLocalCliTopology(environment);
   const configPath = localComponentPath("cli", "config.json", environment);
-  const applicationState = await projectLocalApplicationState({ root, environment });
-  const runtimeStatus = await projectLocalRuntimeReadiness(environment);
+  // #1065: init renders the one canonical Setup Application state over the same owner
+  // evidence as `setup status` and the browser console; no second setup projector.
+  const host = await import("./composition/setup-host.js");
+  let repository: Awaited<ReturnType<typeof host.resolveSetupRepository>> | undefined;
+  let repositoryDiagnostic: { readonly code: string; readonly message: string } | undefined;
+  try {
+    repository = await host.resolveSetupRepository({
+      root,
+      environment,
+      ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
+      ...(typeof parsed.options.repositoryId === "string" ? { repositoryId: parsed.options.repositoryId } : {}),
+      ...(dependencies.setupFetch === undefined ? {} : { fetch: dependencies.setupFetch }),
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof host.SetupHostError)) throw error;
+    repositoryDiagnostic = { code: error.code, message: error.message };
+  }
+  const state =
+    repository === undefined
+      ? undefined
+      : await host
+          .createLocalSetupApplication({
+            environment,
+            root,
+            lifecycle: host.createObservedRuntimeLifecycle({ environment }),
+          })
+          .state(repository);
+  const sessionStart = {
+    command: "inari session start --issue <implementation-number> -- <command...>",
+    requirement:
+      "Session start needs a governed Implementation Issue of this repository checked out on its exact contract branch. A Source Issue or a branch name alone is not an execution contract.",
+  };
   if (json) {
-    console.log(JSON.stringify({ ok: true, operation: "init", configPath, config, applicationState, runtimeStatus }));
+    console.log(
+      JSON.stringify({
+        ok: true,
+        operation: "init",
+        configPath,
+        config,
+        ...(repository === undefined ? {} : { repository }),
+        ...(state === undefined ? {} : { setup: state }),
+        ...(repositoryDiagnostic === undefined ? {} : { diagnostics: [repositoryDiagnostic] }),
+        sessionStart,
+      }),
+    );
   } else {
+    const { renderSetupState } = await import("./cli/setup/index.js");
     console.log("Initialized local CLI topology.");
     console.log(`Config: ${configPath}`);
-    console.log(`Local execution setup: ${applicationState.status}.`);
-    console.log("Ordered setup path:");
-    for (const line of renderLocalApplicationSetupFlow(applicationState)) console.log(line);
-    console.log(`Next: ${applicationState.nextAction.detail}`);
-    for (const command of applicationState.nextAction.commands) console.log(`Run: ${command}`);
-    console.log(`Credential custody: ${applicationState.provider.credentialPath}`);
-    console.log("After setup, run the local Runtime Supervisor:");
-    for (const command of applicationState.runtime.commands) console.log(`Run: ${command}`);
-    console.log(
-      `Issue/Change branch: ${applicationState.changeBranch.status} — ${applicationState.changeBranch.detail}`,
-    );
-    if (applicationState.changeBranch.status === "ready") {
+    if (state === undefined || repository === undefined) {
       console.log(
-        `Then launch the governed child with: inari session start --issue ${applicationState.changeBranch.issue} -- <command...>`,
+        `${repositoryDiagnostic?.code ?? "SETUP_REPOSITORY_UNRESOLVED"}: ${repositoryDiagnostic?.message ?? ""}`,
       );
+      console.log("Rerun with --repository <owner/name> --repository-id <id> to see the setup state.");
+    } else {
+      console.log(`Repository: ${repository.nameWithOwner} (${repository.repositoryId})`);
+      console.log(renderSetupState(state, true));
+      console.log("Run `inari setup next` to perform the next action; `inari setup console` shows this same state.");
     }
-    console.log(
-      `Runtime readiness: executor=${runtimeStatus.executor} admission=${runtimeStatus.admission} overall=${runtimeStatus.overall}`,
-    );
-    console.log("Run `inari runtime console` for a browser view of this same state, including over SSH.");
+    console.log(`Session start: ${sessionStart.command}`);
+    console.log(sessionStart.requirement);
   }
   return 0;
 }
@@ -1352,6 +1386,18 @@ async function runSessionCommand(
     const environment = dependencies.environment ?? process.env;
     const route = requireConfiguredLocalAdmissionRoute(environment);
     const admission = createLocalAdmissionClient({ endpoint: route.endpoint });
+    const context = resolveLocalRepositoryContext({ cwd: root });
+    if (context.hostname !== "github.com") {
+      throw new CliError("REPOSITORY_ID_UNAVAILABLE", "Local Session repository must be hosted on github.com.");
+    }
+    const repository = await admission.resolveRepository(context.nameWithOwner);
+    // #1179: the repository's current branch policy and the governed Implementation's
+    // exact branch come from the owner through Admission; there is no fixed-grammar fallback.
+    const branchObservation = validateLocalBranchPolicyInput(
+      await admission.readBranchPolicy({ id: repository.repositoryId, name: repository.nameWithOwner }, issue),
+    );
+    if (branchObservation === undefined)
+      throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid branch policy observation.");
     const code = await startLocalSession({
       cwd: root,
       issue,
@@ -1359,13 +1405,8 @@ async function runSessionCommand(
       commandArgs: rest.slice(1),
       environment,
       admission,
-      resolveRepository: async () => {
-        const context = resolveLocalRepositoryContext({ cwd: root });
-        if (context.hostname !== "github.com") {
-          throw new CliError("REPOSITORY_ID_UNAVAILABLE", "Local Session repository must be hosted on github.com.");
-        }
-        return admission.resolveRepository(context.nameWithOwner);
-      },
+      branchObservation,
+      resolveRepository: async () => repository,
     });
     return code;
   }
@@ -1470,52 +1511,8 @@ async function runRuntimeCommand(
   }
   if (command === "console") {
     if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", "Unknown Runtime console command.");
-    const definition = getCommand("runtime.console");
-    const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
-    if (parsed.capabilities.length > 0 || unsupported !== undefined) {
-      const optionId = unsupported ?? "capability";
-      const option = getOption(optionId as OptionId);
-      throw new CliError(
-        "INVALID_OPTION",
-        `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by runtime console.`,
-        "$argv",
-        { command: "runtime console", option: optionId },
-      );
-    }
-    const environment = dependencies.environment ?? process.env;
-    const { server, announcement } = await startLocalConsole(root, environment);
-    const shutdown = (): void => {
-      server.close();
-      process.removeListener("SIGINT", shutdown);
-      process.removeListener("SIGTERM", shutdown);
-    };
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
-    server.once("close", () => {
-      process.removeListener("SIGINT", shutdown);
-      process.removeListener("SIGTERM", shutdown);
-    });
-    const port = new URL(announcement.endpoint).port;
-    const sshForward = `-L ${port}:127.0.0.1:${port}`;
-    if (json) {
-      console.log(
-        JSON.stringify({
-          ok: true,
-          operation: "runtime.console",
-          endpoint: announcement.endpoint,
-          sshForward,
-          foreground: true,
-        }),
-      );
-    } else {
-      console.log(`Local setup/runtime console: ${announcement.endpoint}/`);
-      console.log("Loopback-only; this page never renders credentials, tokens, or private key material.");
-      console.log("To reach this console from a workstation browser over SSH, forward the same loopback port:");
-      console.log(`  ssh ${sshForward} <user>@<remote-host>`);
-      console.log(`Then open ${announcement.endpoint}/ in the workstation browser.`);
-      console.log("Press Ctrl-C to stop.");
-    }
-    return 0;
+    // #1065: one console. `runtime console` is the canonical setup/control host.
+    return runSetupApplicationCommand("console", parsed, root, dependencies, json, "runtime.console");
   }
   if (command !== "connect" || rest.length > 0) {
     throw new CliError("UNKNOWN_COMMAND", `Unknown Runtime command "${command ?? ""}".`);
@@ -1592,18 +1589,31 @@ async function runExecutorCommand(
   const environment = dependencies.environment ?? process.env;
   if (command === "setup") {
     const result = await setupExecutorRole(environment);
+    // #1178: an explicit shell reference is legacy input; its explicit, non-destructive
+    // convergence into managed custody is the existing Executor enrollment action.
+    const enrollment =
+      result.issuerCustody === "external-reference"
+        ? "inari setup next --yes --input app-id=<issuer-app-id> --enrollment-file issuer-key=<issuer-key-path>"
+        : undefined;
     const output = {
       ok: true,
       operation: "executor.setup",
       configPath: result.configPath,
       executorId: result.config.id,
       provider: result.config.provider,
+      ...(result.issuerCustody === undefined ? {} : { issuerCustody: result.issuerCustody }),
+      ...(enrollment === undefined ? {} : { enrollment }),
     };
     if (json) console.log(JSON.stringify(output));
     else {
       console.log("Local Executor identity and configuration are ready.");
       console.log(`Executor id: ${result.config.id}`);
       console.log(`Configuration: ${result.configPath}`);
+      if (result.issuerCustody === "managed") console.log("Issuer key: managed Executor custody.");
+      if (enrollment !== undefined) {
+        console.log("Issuer key: explicit shell reference; every shell that starts the Runtime must export it.");
+        console.log(`Enroll it into managed Executor custody once: ${enrollment}`);
+      }
     }
     return 0;
   }
@@ -1754,8 +1764,12 @@ async function runSetupCommand(
       { command: "setup", option: option.id },
     );
   }
+  // #1065/#1184: explicit capability intent for preparing a new Runtime Authority.
+  const capabilityCeiling =
+    parsed.capabilities.length === 0 ? undefined : parseSetupCapabilityIntent(parsed.capabilities);
   const setup = dependencies.setupRepository ?? setupRepository;
   const output = await setup({
+    ...(capabilityCeiling === undefined ? {} : { capabilityCeiling }),
     root,
     json,
     ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
@@ -1794,6 +1808,16 @@ async function runSetupCommand(
     }
   }
   return 0;
+}
+
+function parseSetupCapabilityIntent(values: readonly string[]): CapabilityKind[] {
+  const result: CapabilityKind[] = [];
+  for (const value of values) {
+    if (!CAPABILITY_KINDS.includes(value as CapabilityKind))
+      throw new CliError("INVALID_OPTION", `--capability ${value} is not a delegable capability kind.`, "--capability");
+    if (!result.includes(value as CapabilityKind)) result.push(value as CapabilityKind);
+  }
+  return result;
 }
 
 function splitSetupAssignments(values: readonly string[] | undefined, option: string): Record<string, string> {
@@ -1840,8 +1864,9 @@ async function runSetupApplicationCommand(
   root: string,
   dependencies: CliDependencies,
   json: boolean,
+  consoleOperation: "setup.console" | "runtime.console" = "setup.console",
 ): Promise<number> {
-  const commandId = `setup.${subcommand}` as const;
+  const commandId = subcommand === "console" ? consoleOperation : (`setup.${subcommand}` as const);
   const definition = getCommand(commandId);
   const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
   if (parsed.capabilities.length > 0 || unsupported !== undefined) {
@@ -1849,9 +1874,9 @@ async function runSetupApplicationCommand(
     const option = getOption(optionId as OptionId);
     throw new CliError(
       "INVALID_OPTION",
-      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by setup ${subcommand}.`,
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by ${commandId.replace(".", " ")}.`,
       "$argv",
-      { command: `setup ${subcommand}`, option: optionId },
+      { command: commandId.replace(".", " "), option: optionId },
     );
   }
   const environment = dependencies.environment ?? process.env;
@@ -1871,23 +1896,30 @@ async function runSetupApplicationCommand(
   }
 
   if (subcommand === "console") {
-    const live = await host.findLiveSetupHost(environment);
+    let live: Awaited<ReturnType<typeof host.resolveSetupHostReuse>>;
+    try {
+      live = await host.resolveSetupHostReuse(repository, environment);
+    } catch (error: unknown) {
+      if (error instanceof host.SetupHostError) throw new CliError(error.code, error.message);
+      throw error;
+    }
     if (live !== undefined) {
       const port = new URL(live.endpoint).port;
       if (json)
         console.log(
           JSON.stringify({
             ok: true,
-            operation: "setup.console",
+            operation: consoleOperation,
             endpoint: live.endpoint,
             url: `${live.endpoint}/`,
             sshForward: `-L ${port}:127.0.0.1:${port}`,
+            repository,
             reused: true,
             foreground: false,
           }),
         );
       else {
-        console.log(`The local setup console is already running: ${live.endpoint}/`);
+        console.log(`The local setup console for ${repository.nameWithOwner} is already running: ${live.endpoint}/`);
         console.log("No second host was started.");
       }
       return 0;
@@ -1926,7 +1958,7 @@ async function runSetupApplicationCommand(
       console.log(
         JSON.stringify({
           ok: true,
-          operation: "setup.console",
+          operation: consoleOperation,
           endpoint: handle.origin,
           url: `${handle.origin}/`,
           sshForward,
@@ -2491,6 +2523,178 @@ async function runLocalAdmissionChangeCommand(
   const executionSucceeded =
     evidence === undefined || evidence.outcome === "verified" || evidence.outcome === "returned-existing";
   return projection.valid && executionSucceeded && (entry === undefined || entry.valid) ? 0 : EXIT_VALIDATION;
+}
+
+/**
+ * #1181: an ordinary Issue-bound PR publication selected by the local Runtime
+ * goes CLI -> Admission -> Executor -> Issuer installation credential through
+ * the existing `pullRequest.publish` ExecutionIntent. The CLI never constructs
+ * a provider adapter or asks for a user credential on this route, and a
+ * missing or invalid Session is a denial, never a fallback.
+ */
+async function publishPullRequestThroughLocalAdmission(
+  input: unknown,
+  context: LocalAdmissionSessionContext,
+): Promise<number> {
+  const validation = tryValidatePrPublicationRequest(input);
+  if (!validation.valid || validation.request === undefined) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        operation: "pr.publish",
+        route: "local-admission",
+        classification: "failed",
+        diagnostics: validation.diagnostics,
+        mutation: false,
+      }),
+    );
+    return EXIT_VALIDATION;
+  }
+  if (
+    validation.request.repository.repositoryHost !== "github.com" ||
+    validation.request.repository.repositoryId !== context.binding.repository.id
+  )
+    throw new CliError(
+      "ADMISSION_SESSION_REPOSITORY_MISMATCH",
+      "The PR publication repository does not match the selected Session.",
+    );
+  const intent = createSessionExecutionIntent(context.binding, "pullRequest.publish", input);
+  const raw = await context.client.executeIntent(intent, context.sessionId);
+  if (
+    typeof raw !== "object" ||
+    raw === null ||
+    Array.isArray(raw) ||
+    (raw as Record<string, unknown>).operation !== "pullRequest.publish"
+  )
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid PR publication result.");
+  const result = raw as {
+    readonly status?: unknown;
+    readonly publication?: { readonly ok?: boolean; readonly classification?: string };
+    readonly provenance?: { readonly app?: unknown };
+  };
+  const publication = result.publication;
+  console.log(
+    JSON.stringify({
+      ...(typeof publication === "object" && publication !== null ? publication : {}),
+      ok: result.status === "succeeded" && publication?.ok === true,
+      operation: "pr.publish",
+      route: "local-admission",
+      session: context.sessionId,
+      mutation: publication?.classification === "created",
+    }),
+  );
+  if (result.status === "succeeded" && publication?.ok === true) return 0;
+  return publication === undefined ? EXIT_VALIDATION : EXIT_REMOTE;
+}
+
+/**
+ * #1181: `pr create` on the local Runtime. The repository-governed PR contract
+ * is compiled by the Executor from the protected default branch (read on
+ * behalf of the active Session), rendered by the existing artifact kernel, and
+ * published through the Session's `pullRequest.publish` route for the governed
+ * Implementation's exact branch and provider head revision.
+ */
+async function readLocalPullRequestContext(
+  parsed: ParsedArgs,
+  positional: string | undefined,
+  context: LocalAdmissionSessionContext,
+): Promise<{ readonly contract: CanonicalContract; readonly change: unknown }> {
+  const owned = await context.client.readPullRequestContext(
+    { id: context.binding.repository.id, name: context.binding.repository.name },
+    templateSelector(parsed, positional, "pr") ?? "default",
+    context.sessionId,
+  );
+  if (!validateCanonicalContract(owned.contract).valid)
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid governed PR contract.");
+  return { contract: owned.contract as CanonicalContract, change: owned.change };
+}
+
+async function createPullRequestThroughLocalAdmission(
+  parsed: ParsedArgs,
+  owned: { readonly contract: CanonicalContract; readonly change: unknown },
+  context: LocalAdmissionSessionContext,
+): Promise<number> {
+  const issue = context.binding.task.number;
+  const current = validateChangeProjectionResult(owned.change);
+  if (current.projection === undefined)
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid Change projection.");
+  const contract = owned.contract;
+  const document = mergeOptionMetadata(await resolveArtifactInputDocument(parsed, contract), parsed.options);
+  const prepared = preparePullRequestArtifact(contract, document);
+  const projection = current.projection;
+  const branch = projection.canonicalBranch;
+  const headRevision = projection.candidates.branches.find((candidate) => candidate.candidate.name === branch)
+    ?.candidate.sha;
+  if (branch === undefined || headRevision === undefined)
+    throw new CliError(
+      "CHANGE_PUBLISH_HEAD_UNAVAILABLE",
+      `Implementation #${issue} has no published canonical branch head to open a pull request from.`,
+    );
+  if (prepared.artifact.head !== branch)
+    throw new CliError(
+      "ADMISSION_SESSION_BRANCH_MISMATCH",
+      `The PR head "${prepared.artifact.head}" is not the governed Implementation branch "${branch}".`,
+    );
+  const implementation = {
+    repositoryHost: "github.com",
+    repositoryId: context.binding.repository.id,
+    repository: context.binding.repository.name,
+    number: issue,
+  };
+  return publishPullRequestThroughLocalAdmission(
+    {
+      version: 1,
+      kind: "pr-publication",
+      repository: {
+        repositoryHost: "github.com",
+        repositoryId: context.binding.repository.id,
+        repository: context.binding.repository.name,
+      },
+      workIdentity: { implementation },
+      routing: {
+        version: 1,
+        kind: "integration-routing",
+        mode: "standalone",
+        role: "implementation",
+        implementation,
+        branches: { default: prepared.artifact.base, implementation: branch },
+      },
+      expectedHead: branch,
+      expectedBase: prepared.artifact.base,
+      headRevision,
+      title: prepared.artifact.title,
+      body: prepared.artifact.body,
+      ...(prepared.artifact.draft === undefined ? {} : { draft: prepared.artifact.draft }),
+      ...(prepared.artifact.maintainerCanModify === undefined
+        ? {}
+        : { maintainerCanModify: prepared.artifact.maintainerCanModify }),
+    },
+    context,
+  );
+}
+
+/**
+ * Whether a PR publication request is an ordinary Issue-bound Implementation
+ * publication. The canonical validator's normalized work identity is the
+ * authority, so compatibility inputs (`workIdentity.issue`, bare
+ * IssueReferences) route exactly like the canonical `implementation` shape.
+ * Only a normalized release identity keeps the direct operator contract; an
+ * unparseable identity fails closed on the local Runtime route.
+ */
+function implementationPublication(input: unknown): boolean {
+  const identity = tryValidatePrPublicationRequest(input).workIdentity;
+  return identity === undefined || !("release" in identity);
+}
+
+/**
+ * Whether a repository-governed PR contract is the ordinary Implementation
+ * contract: the canonical role is carried by its linked-Issue section policy,
+ * which integration, Epic, Authority and release contracts do not declare.
+ */
+function implementationPullRequestContract(contract: CanonicalContract): boolean {
+  return contract.sections.some((section) =>
+    section.fields.some((field) => effectiveFieldConstraints(contract, field).linkedIssue === true),
+  );
 }
 
 /**
@@ -3537,16 +3741,51 @@ async function runArtifactCommand(
     }
 
     rejectGovernedPolicyOverride(parsed.options.policy);
-    const adapter = createAdapter(dependencies, root, parsed.options.repository);
-    await adapter.resolveRepositoryContext();
-    const contract = await compileRepositoryGovernedContract(
-      adapter,
-      domain,
-      templateSelector(parsed, rest[0], domain),
-      {
-        templateResolver: dependencies.templateResolver,
-      },
-    );
+    const localEnvironment = dependencies.environment ?? process.env;
+    // #1181: on the local Runtime the repository-governed contract's canonical role
+    // selects the route. Ordinary Implementation PRs publish only through the
+    // Admission Session; integration, Epic, Authority and release contracts keep
+    // their existing direct contract. A missing Session never reroutes an
+    // Implementation PR to the user path.
+    const localTopology = domain === "pr" && configuredLocalAdmissionTopology(localEnvironment);
+    let localSessionFailure: unknown;
+    if (localTopology && (localEnvironment.INARI_SESSION_ID ?? "").length > 0) {
+      try {
+        const context = requireLocalAdmissionSessionContext(root, parsed, localEnvironment);
+        const owned = await readLocalPullRequestContext(parsed, rest[0], context);
+        if (implementationPullRequestContract(owned.contract))
+          return createPullRequestThroughLocalAdmission(parsed, owned, context);
+      } catch (error: unknown) {
+        // Non-Implementation PRs keep their direct route even if an inherited
+        // Implementation Session selector is stale, closed, or otherwise
+        // unavailable. Preserve the failure and rethrow it only if the
+        // repository-governed contract below proves this is an Implementation PR.
+        localSessionFailure = error;
+      }
+    }
+    const compileDirect = async () => {
+      const directAdapter = createAdapter(dependencies, root, parsed.options.repository);
+      await directAdapter.resolveRepositoryContext();
+      const compiled = await compileRepositoryGovernedContract(
+        directAdapter,
+        domain,
+        templateSelector(parsed, rest[0], domain),
+        {
+          templateResolver: dependencies.templateResolver,
+        },
+      );
+      return { adapter: directAdapter, contract: compiled };
+    };
+    let direct: Awaited<ReturnType<typeof compileDirect>>;
+    try {
+      direct = await compileDirect();
+    } catch (error: unknown) {
+      // When the selected Session failed and the direct route cannot even resolve the
+      // governed contract, the Session failure is the minimal cause to report.
+      if (localSessionFailure !== undefined) throw localSessionFailure;
+      throw error;
+    }
+    const { adapter, contract } = direct;
     const document = await resolveArtifactInputDocument(parsed, contract);
     const preparedDocument = mergeOptionMetadata(document, parsed.options);
     if (domain === "issue") {
@@ -3554,6 +3793,14 @@ async function runArtifactCommand(
       const created = await createGovernedIssue(adapter, prepared.artifact);
       console.log(JSON.stringify({ ok: true, artifact: created.artifact, governance: created.governance }));
       return 0;
+    }
+    if (localTopology && implementationPullRequestContract(contract)) {
+      if (localSessionFailure !== undefined) throw localSessionFailure;
+      requireLocalAdmissionSessionContext(root, parsed, localEnvironment);
+      throw new CliError(
+        "ADMISSION_RESPONSE_INVALID",
+        "The Session-owned PR contract role disagrees with the repository-governed contract.",
+      );
     }
     const prepared = preparePullRequestArtifact(contract, preparedDocument);
     const created = await createGovernedPullRequest(adapter, prepared.artifact);
@@ -3708,6 +3955,14 @@ async function runPrPublicationCommand(
   if (typeof parsed.options.from !== "string")
     throw new CliError("INPUT_REQUIRED", "PR publication requires --from <path>.", "--from");
   const input = await readJsonValue(parsed.options.from, "--from");
+  const environment = dependencies.environment ?? process.env;
+  // #1181: the local Runtime owns ordinary Issue-bound publication; release/operator
+  // publications keep their existing direct contract.
+  if (configuredLocalAdmissionTopology(environment) && implementationPublication(input))
+    return publishPullRequestThroughLocalAdmission(
+      input,
+      requireLocalAdmissionSessionContext(root, parsed, environment),
+    );
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
   const result = await publishPullRequest(input, new GitHubPrPublicationAdapter(adapter));
   console.log(JSON.stringify({ ...result, operation: "pr.publish", mutation: result.classification === "created" }));
@@ -5629,6 +5884,8 @@ function classifyExitCode(error: unknown): number {
   )
     return EXIT_VALIDATION;
   if (isGitHubAdapterError(error)) return EXIT_REMOTE;
+  if (isObjectWithCode(error) && error.code === "ADMISSION_OWNER_UNAVAILABLE") return EXIT_REMOTE;
+  if (isObjectWithCode(error) && error.code === "ADMISSION_INTERNAL_FAILURE") return EXIT_INTERNAL;
   if (
     isObjectWithCode(error) &&
     typeof error.code === "string" &&
@@ -5704,6 +5961,11 @@ function classifyExitCode(error: unknown): number {
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_LIFECYCLE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("IMPLEMENTATION_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("REPOSITORY_SETUP_")) return EXIT_VALIDATION;
+  if (
+    isObjectWithCode(error) &&
+    (error.code === "SETUP_HOST_REPOSITORY_CONFLICT" || error.code === "SETUP_HOST_ANNOUNCEMENT_FOREIGN")
+  )
+    return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
   return EXIT_INTERNAL;

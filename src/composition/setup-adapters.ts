@@ -43,6 +43,7 @@ import {
   type ExecutorIssuerCustodyStatus,
 } from "../executor/enrollment/owner.js";
 import { LocalExecutorError, ensureLocalExecutorConfiguration } from "../executor/setup.js";
+import { bindLocalCliAdmissionRoute, ensureLocalCliTopology } from "../local-control/config.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import {
   MAX_SETUP_DIAGNOSTICS,
@@ -152,7 +153,7 @@ function providerDiagnostic(error: unknown): SetupDiagnostic {
   if (stage === "authorization")
     return diagnostic(
       "SETUP_APP_USER_AUTHORIZATION_REQUIRED",
-      "App-user authorization is required; authorize the Inari App for this operator and retry.",
+      "App-user authorization is required; run `inari setup --endpoint <endpoint-url>` (Device Flow) for this repository, then retry.",
     );
   if (stage === "installation")
     return diagnostic("SETUP_APP_INSTALLATION_REQUIRED", "The Inari App is not installed for this repository.");
@@ -336,7 +337,7 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
     if (profile === undefined)
       return diagnostic(
         "SETUP_AUTHORITY_PREPARATION_REQUIRED",
-        "No Runtime Authority exists to adopt; preparing a new one needs explicit capability intent outside this action.",
+        "No Runtime Authority exists to adopt. Prepare one with explicit capability intent: `inari setup --endpoint <endpoint-url> --capability change.implement`, then retry.",
       );
     let key;
     let local: readonly Delegator[];
@@ -446,6 +447,23 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
           diagnostic(
             error instanceof LocalAdmissionError ? error.code : "SETUP_ADMISSION_UNCONFIRMED",
             "Admission could not be configured with the adopted Runtime Authority.",
+          ),
+        ]);
+      }
+    }
+
+    // Route the local CLI to the configured Admission, as `admission setup` does.
+    const routed = await readSetupConfigurationEvidence(repository, environment);
+    if (routed.admission !== undefined && routed.cliAdmissionRouteId !== routed.admission.id) {
+      try {
+        ensureLocalCliTopology(environment);
+        bindLocalCliAdmissionRoute({ id: routed.admission.id }, environment);
+      } catch {
+        return outcome(request, effects.length === 0 ? "failed" : "unknown", [
+          ...effects,
+          diagnostic(
+            "SETUP_CLI_ROUTE_UNBOUND",
+            "The local CLI could not be routed to the configured Admission; its existing route is kept.",
           ),
         ]);
       }
@@ -604,7 +622,14 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
     } catch (error: unknown) {
       return outcome(request, "failed", [providerDiagnostic(error)]);
     }
-    const comparison = compareCanonicalTrust(records, authority);
+    const comparison = compareCanonicalTrust(records, authority, options.now?.() ?? new Date());
+    if (comparison === "inactive")
+      return outcome(request, "failed", [
+        diagnostic(
+          "SETUP_TRUST_INACTIVE",
+          "The protected-ref Runtime Authority matches but is inactive or outside its validity window.",
+        ),
+      ]);
     if (comparison === "trusted")
       return outcome(request, "succeeded", [
         diagnostic("SETUP_TRUST_CONFIRMED", "Protected-ref trust matches the adopted Runtime Authority."),

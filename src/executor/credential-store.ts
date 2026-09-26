@@ -16,6 +16,18 @@ import {
 import path from "node:path";
 import { ensureLocalComponentDirectory, localComponentPath } from "../local-control/config.js";
 
+/**
+ * One repository installation the current key generation was verified
+ * against (#1182). It is public, secret-free owner evidence: the Executor
+ * binds provider effects for this repository to exactly this installation.
+ */
+export interface StoredIssuerBinding {
+  readonly repositoryHost: string;
+  readonly repositoryId: string;
+  readonly nameWithOwner: string;
+  readonly installationId: string;
+}
+
 export interface StoredIssuerKey {
   readonly configId: string;
   readonly appId: string;
@@ -23,9 +35,13 @@ export interface StoredIssuerKey {
   readonly fingerprint: string;
   readonly providerVerified: boolean;
   readonly file: string;
+  /** Installations this key generation was verified against; reset by every new generation. */
+  readonly bindings?: readonly StoredIssuerBinding[];
 }
 
 const INDEX = "issuer-key.json";
+const MAX_INDEX_BYTES = 16 * 1024;
+const MAX_BINDINGS = 32;
 const MAX_KEY_BYTES = 64 * 1024;
 const FINGERPRINT = /^sha256:[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9_-]{16,64}$/u;
@@ -41,13 +57,39 @@ function failure(): ExecutorCredentialStoreError {
   return new ExecutorCredentialStoreError();
 }
 
+function validBinding(binding: unknown): binding is StoredIssuerBinding {
+  if (binding === null || typeof binding !== "object" || Array.isArray(binding)) return false;
+  const value = binding as Record<string, unknown>;
+  return (
+    Object.keys(value).every((key) =>
+      ["repositoryHost", "repositoryId", "nameWithOwner", "installationId"].includes(key),
+    ) &&
+    value.repositoryHost === "github.com" &&
+    typeof value.repositoryId === "string" &&
+    /^[1-9][0-9]{0,19}$/u.test(value.repositoryId) &&
+    typeof value.nameWithOwner === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(value.nameWithOwner) &&
+    typeof value.installationId === "string" &&
+    /^[1-9][0-9]{0,19}$/u.test(value.installationId)
+  );
+}
+
+function validBindings(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length > MAX_BINDINGS || !value.every(validBinding)) return false;
+  const ids = value.map((binding: StoredIssuerBinding) => binding.repositoryId);
+  return new Set(ids).size === ids.length;
+}
+
 function valid(record: unknown): record is StoredIssuerKey {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return false;
   const value = record as Record<string, unknown>;
   return (
     Object.keys(value).every((key) =>
-      ["configId", "appId", "generation", "fingerprint", "providerVerified", "file"].includes(key),
+      ["configId", "appId", "generation", "fingerprint", "providerVerified", "file", "bindings"].includes(key),
     ) &&
+    validBindings(value.bindings) &&
+    (value.bindings === undefined || value.providerVerified === true) &&
     typeof value.configId === "string" &&
     IDENTIFIER.test(value.configId) &&
     typeof value.appId === "string" &&
@@ -121,7 +163,7 @@ export class ExecutorCredentialStore {
     const index = path.join(directory, INDEX);
     let bytes: Buffer;
     try {
-      bytes = secureRead(index, 2048);
+      bytes = secureRead(index, MAX_INDEX_BYTES);
     } catch (error) {
       // Only an absent index means no credential. Unsafe files fail closed.
       try {
@@ -163,14 +205,38 @@ export class ExecutorCredentialStore {
     const current = this.current();
     if (current === undefined || current.generation !== generation) throw failure();
     if (current.providerVerified) return current;
+    return this.#publish(generation, { ...current, providerVerified: true });
+  }
+
+  /**
+   * Record that the current key generation acts for `binding` (#1182). Only
+   * the generation that was verified can be bound; a repository already bound
+   * to a different installation is never silently re-bound.
+   */
+  recordBinding(generation: string, binding: StoredIssuerBinding): StoredIssuerKey {
+    if (!validBinding(binding)) throw failure();
+    const current = this.current();
+    if (current === undefined || current.generation !== generation) throw failure();
+    const existing = current.bindings ?? [];
+    const same = existing.find((item) => item.repositoryId === binding.repositoryId);
+    if (same !== undefined) {
+      if (same.installationId !== binding.installationId || same.repositoryHost !== binding.repositoryHost)
+        throw failure();
+      if (same.nameWithOwner === binding.nameWithOwner && current.providerVerified) return current;
+    }
+    const bindings = [...existing.filter((item) => item.repositoryId !== binding.repositoryId), { ...binding }];
+    if (bindings.length > MAX_BINDINGS) throw failure();
+    return this.#publish(generation, { ...current, providerVerified: true, bindings });
+  }
+
+  #publish(generation: string, next: StoredIssuerKey): StoredIssuerKey {
     const directory = ensureLocalComponentDirectory("executor", this.#environment, "issuer");
-    const verified = { ...current, providerVerified: true };
     const temporary = path.join(directory, `issuer-key-${randomBytes(24).toString("base64url")}.tmp`);
     try {
-      privateWrite(temporary, Buffer.from(JSON.stringify(verified)));
+      privateWrite(temporary, Buffer.from(JSON.stringify(next)));
       if (this.current()?.generation !== generation) throw failure();
       renameSync(temporary, path.join(directory, INDEX));
-      return verified;
+      return next;
     } catch {
       try {
         unlinkSync(temporary);

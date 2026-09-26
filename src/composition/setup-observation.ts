@@ -22,9 +22,15 @@ import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import path from "node:path";
 import { delegatorPublicKeyFingerprint } from "../agent-authority/delegator-key.js";
-import { canonicalDelegatorJson, validateDelegator, type Delegator } from "../agent-authority/delegator.js";
+import {
+  canonicalDelegatorJson,
+  isDelegatorActive,
+  validateDelegator,
+  type Delegator,
+} from "../agent-authority/delegator.js";
 import { DelegatorTrustError, loadDelegatorTrust } from "../agent-authority/delegator-trust.js";
 import { executorIssuerCustody, type ExecutorIssuerCustodyStatus } from "../executor/enrollment/owner.js";
+import { issuerKeyReference, localExecutorAppId } from "../executor/issuer-input.js";
 import { GitHubAppDeviceFlowClient, type GitHubAppUserCredential } from "../github/app-user-credential.js";
 import {
   GitHubAppUserCredentialBroker,
@@ -38,6 +44,7 @@ import {
   readExistingLocalJson,
   validateLocalAdmissionConfig,
   validateLocalAuthorityConfig,
+  validateLocalCliConfig,
   validateLocalExecutorConfig,
 } from "../local-control/config.js";
 import { validateLocalRuntimeEndpoint } from "../local-control/runtime-discovery.js";
@@ -54,6 +61,7 @@ import {
 } from "../runtime-authority-publication.js";
 import {
   MAX_SETUP_DIAGNOSTICS,
+  MAX_SETUP_TEXT_LENGTH,
   SETUP_CONTRACT_VERSION,
   validateSetupObservation,
   type RuntimeComponent,
@@ -64,6 +72,7 @@ import {
   type SetupGeneration,
   type SetupObservation,
   type SetupObservationPort,
+  validateRuntimeFailure,
 } from "../runtime-contracts/index.js";
 import { SetupConfigStore, type SetupConfigRecord } from "./setup-config-store.js";
 
@@ -107,8 +116,14 @@ export interface SessionReadinessEvidence {
   readonly diagnostics: readonly SetupDiagnostic[];
 }
 
+/** The Admission and pinned Authority identity the observed configuration generation expects. */
+export interface SessionReadinessExpectation {
+  readonly admissionId: string;
+  readonly authority: { readonly id: string; readonly publicKeyFingerprint: string };
+}
+
 export interface SessionReadinessPort {
-  observe(generation: SetupGeneration, expectedAdmissionId: string): Promise<SessionReadinessEvidence>;
+  observe(generation: SetupGeneration, expected: SessionReadinessExpectation): Promise<SessionReadinessEvidence>;
 }
 
 /** Repository/App coordinates of one provider operation. */
@@ -275,17 +290,23 @@ export interface AdmissionSessionReadinessOptions {
 }
 
 /**
- * Admission-owned readiness: the announced local Admission instance of the
- * configured identity reports its own readiness. No announcement means the
- * Admission is not running (not ready); an unreachable or foreign instance
- * is unknown.
+ * Admission-owned, repository-bound readiness (#1182): the announced local
+ * Admission instance of the configured identity evaluates the repository of
+ * the observed generation with the same current Executor binding and
+ * protected-ref trust evidence Session registration requires, for the
+ * Authority this generation pins. Process health alone is never readiness. No
+ * announcement means not running (not ready); an unreachable, foreign or
+ * malformed report is unknown.
  */
 export function createAdmissionSessionReadiness(options: AdmissionSessionReadinessOptions = {}): SessionReadinessPort {
   const environment = options.environment ?? process.env;
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
   const now = options.now ?? (() => new Date());
   return Object.freeze({
-    async observe(_generation: SetupGeneration, expectedAdmissionId: string): Promise<SessionReadinessEvidence> {
+    async observe(
+      generation: SetupGeneration,
+      expected: SessionReadinessExpectation,
+    ): Promise<SessionReadinessEvidence> {
       const announcement = readExistingLocalJson(
         "runtime",
         "endpoints/admission.json",
@@ -298,18 +319,40 @@ export function createAdmissionSessionReadiness(options: AdmissionSessionReadine
           observedAt: now().toISOString(),
           diagnostics: [diagnostic("SETUP_ADMISSION_NOT_RUNNING", "The local Admission is not announced.")],
         };
-      if (announcement.component !== "admission" || announcement.id !== expectedAdmissionId)
+      if (announcement.component !== "admission" || announcement.id !== expected.admissionId)
         throw new Error("Announced Admission identity does not match setup.");
-      const url = new URL("/health", announcement.endpoint);
+      const url = new URL("/v1/readiness", announcement.endpoint);
       if (url.protocol !== "http:" || url.hostname !== "127.0.0.1") throw new Error("Admission is not loopback.");
-      const response = await fetcher(url, { signal: AbortSignal.timeout(options.timeoutMs ?? 2_000) });
+      const response = await fetcher(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          version: 1,
+          repository: { id: generation.repository.repositoryId, name: generation.repository.nameWithOwner },
+          authority: expected.authority,
+        }),
+        redirect: "error",
+        signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
+      });
       const body = (await response.json()) as Record<string, unknown>;
-      if (response.status !== 200 || body.component !== "admission" || body.admissionId !== expectedAdmissionId)
+      if (
+        response.status !== 200 ||
+        body.ok !== true ||
+        body.component !== "admission" ||
+        body.admissionId !== expected.admissionId ||
+        (body.readiness !== "ready" && body.readiness !== "not-ready")
+      )
         throw new Error("Admission readiness is unavailable.");
+      if (body.readiness === "ready") return { status: "ready", observedAt: now().toISOString(), diagnostics: [] };
+      const failure = validateRuntimeFailure(body.failure);
       return {
-        status: body.readiness === "ready" ? "ready" : "not-ready",
+        status: "not-ready",
         observedAt: now().toISOString(),
-        diagnostics: [],
+        diagnostics: [
+          failure === undefined
+            ? diagnostic("SETUP_SESSION_NOT_READY", "Admission reports the repository is not ready for Sessions.")
+            : diagnostic(failure.reason, `${failure.message} (stage: ${failure.stage})`),
+        ],
       };
     },
   });
@@ -330,6 +373,8 @@ export interface SetupConfigurationEvidence {
   readonly custody?: ExecutorIssuerCustodyStatus;
   readonly authorityDescriptorFingerprint?: string;
   readonly admission?: { readonly id: string; readonly executorId: string };
+  /** Admission instance the local CLI routes Session requests to. */
+  readonly cliAdmissionRouteId?: string;
   /** Adopted public Runtime Authority record pinned by Admission. */
   readonly pin?: Delegator;
   readonly profile?: LocalRuntimeProfile;
@@ -394,6 +439,7 @@ export async function readSetupConfigurationEvidence(
     readExistingLocalJson("admission", "config.json", validateLocalAdmissionConfig, environment),
   );
   const pin = read(() => readExistingLocalJson("admission", "runtime-authority.json", pinValidator, environment));
+  const cli = read(() => readExistingLocalJson("cli", "config.json", validateLocalCliConfig, environment));
   let profile: Read<LocalRuntimeProfile>;
   try {
     const value = await new LocalRuntimeProfileStore({ environment }).findForRepository({
@@ -417,6 +463,7 @@ export async function readSetupConfigurationEvidence(
       ["authority/config.json", descriptor],
       ["admission/config.json", admission],
       ["admission/runtime-authority.json", pin],
+      ["cli/config.json", cli],
       ["runtime-profile", profile],
     ] as const
   )
@@ -435,6 +482,7 @@ export async function readSetupConfigurationEvidence(
       ? {}
       : { admission: { id: value(admission)!.id, executorId: value(admission)!.executor.id } }),
     ...(value(pin) === undefined ? {} : { pin: value(pin) }),
+    ...(value(cli)?.admission === undefined ? {} : { cliAdmissionRouteId: value(cli)!.admission!.id }),
     ...(value(profile) === undefined ? {} : { profile: value(profile) }),
     unreadable,
   };
@@ -448,6 +496,7 @@ export async function readSetupConfigurationEvidence(
     config: evidence.config,
     authority: evidence.authorityDescriptorFingerprint,
     admission: evidence.admission,
+    cliAdmissionRouteId: evidence.cliAdmissionRouteId,
     pin: evidence.pin === undefined ? undefined : canonicalDelegatorJson(evidence.pin),
     profile: evidence.profile,
     unreadable,
@@ -512,6 +561,9 @@ export function missingConfiguration(
     missing.push("authority");
   if (evidence.admission === undefined || evidence.admission.executorId !== evidence.executorConfigId)
     missing.push("admission");
+  // The CLI must route Sessions to exactly this Admission, or setup is not usable.
+  if (evidence.admission === undefined || evidence.cliAdmissionRouteId !== evidence.admission.id)
+    missing.push("cli-route");
   if (
     pin === undefined ||
     authority === undefined ||
@@ -530,6 +582,27 @@ export function missingConfiguration(
   return missing;
 }
 
+/**
+ * #1178: an operator shell may still carry the legacy explicit Issuer
+ * reference. It is never adopted implicitly; the diagnostic names the explicit,
+ * non-destructive enrollment into managed Executor custody.
+ */
+function externalIssuerReferenceDiagnostics(environment: NodeJS.ProcessEnv): readonly SetupDiagnostic[] {
+  const reference = issuerKeyReference(environment);
+  const file = reference.INARI_GITHUB_APP_PRIVATE_KEY_FILE ?? reference.GITHUB_APP_PRIVATE_KEY_FILE;
+  if (file === undefined || file.trim().length === 0) return [];
+  const appId = localExecutorAppId(environment) ?? "<issuer-app-id>";
+  return [
+    diagnostic(
+      "SETUP_EXECUTOR_EXTERNAL_KEY_REFERENCE",
+      `This shell exports an Issuer key reference that is not in managed Executor custody. Enroll it explicitly: inari setup next --yes --input app-id=${appId} --enrollment-file issuer-key=${file.trim()}`.slice(
+        0,
+        MAX_SETUP_TEXT_LENGTH,
+      ),
+    ),
+  ];
+}
+
 function configurationStatus(
   evidence: SetupConfigurationEvidence,
   environment: NodeJS.ProcessEnv,
@@ -542,7 +615,7 @@ function configurationStatus(
       ],
     };
   if (evidence.config === undefined && evidence.custody === undefined)
-    return { status: "unconfigured", diagnostics: [] };
+    return { status: "unconfigured", diagnostics: externalIssuerReferenceDiagnostics(environment) };
   const missing = missingConfiguration(evidence, environment);
   if (missing.length === 0) return { status: "configured", diagnostics: [] };
   return {
@@ -557,8 +630,12 @@ function providerBindingStatus(evidence: SetupConfigurationEvidence): DimensionR
   const custody = evidence.custody;
   if (app === undefined || custody === undefined) return { status: "unbound", diagnostics: [] };
   const profile = evidence.profile;
+  // #1182: the Executor's own verified repository binding is the owner evidence execution uses.
+  const bound = custody.bindings.find((item) => item.repositoryId === evidence.repository.repositoryId);
   if (
     custody.appId !== app.appId ||
+    (bound !== undefined && app.installationId !== undefined && bound.installationId !== app.installationId) ||
+    (bound !== undefined && profile !== undefined && profile.app.installationId !== bound.installationId) ||
     (profile !== undefined &&
       (profile.app.appId !== app.appId ||
         (app.installationId !== undefined && profile.app.installationId !== app.installationId)))
@@ -567,42 +644,44 @@ function providerBindingStatus(evidence: SetupConfigurationEvidence): DimensionR
       status: "mismatched",
       diagnostics: [diagnostic("SETUP_PROVIDER_BINDING_MISMATCH", "Recorded App binding differs from owner state.")],
     };
-  if (app.installationId !== undefined && custody.providerVerified) return { status: "bound", diagnostics: [] };
+  if (app.installationId !== undefined && bound?.installationId === app.installationId)
+    return { status: "bound", diagnostics: [] };
   return {
     status: "unbound",
     diagnostics:
       app.installationId === undefined
         ? []
-        : [diagnostic("SETUP_ISSUER_KEY_UNVERIFIED", "The Issuer key is not verified for the App installation.")],
+        : [
+            diagnostic(
+              "SETUP_ISSUER_KEY_UNVERIFIED",
+              "The Executor has not verified its Issuer key for this repository's App installation.",
+            ),
+          ],
   };
 }
 
-function sameCeiling(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((item) => right.includes(item));
-}
+export type TrustComparison = "trusted" | "absent" | "conflict" | "inactive";
 
-/** Exact immutable trust: same ID, key, notBefore, TTL and capability ceiling, and active. */
-export function sameAdoptedTrust(canonical: Delegator, adopted: Delegator): boolean {
-  return (
-    canonical.id === adopted.id &&
-    canonical.status === "active" &&
-    delegatorPublicKeyFingerprint(canonical.key) === delegatorPublicKeyFingerprint(adopted.key) &&
-    canonical.notBefore === adopted.notBefore &&
-    canonical.maxSessionTtlSeconds === adopted.maxSessionTtlSeconds &&
-    sameCeiling(canonical.capabilityCeiling, adopted.capabilityCeiling)
-  );
-}
-
-export type TrustComparison = "trusted" | "absent" | "conflict";
-
-/** Compare protected-ref records with the adopted Authority without any implicit trust change. */
-export function compareCanonicalTrust(records: readonly Delegator[], adopted: Delegator): TrustComparison {
+/**
+ * Compare protected-ref records with the adopted Authority without any
+ * implicit trust change (#1182). Trusted means exactly one related record,
+ * byte-identical in the canonical Delegator serialization (ID, key,
+ * notBefore, notAfter, status, TTL and ceiling) and active at `now` under the
+ * canonical Delegator validity rule the Admission/Executor resolution uses.
+ */
+export function compareCanonicalTrust(
+  records: readonly Delegator[],
+  adopted: Delegator,
+  now: Date = new Date(),
+): TrustComparison {
   const fingerprint = delegatorPublicKeyFingerprint(adopted.key);
   const related = records.filter(
     (record) => record.id === adopted.id || delegatorPublicKeyFingerprint(record.key) === fingerprint,
   );
   if (related.length === 0) return "absent";
-  return related.length === 1 && sameAdoptedTrust(related[0]!, adopted) ? "trusted" : "conflict";
+  if (related.length !== 1 || canonicalDelegatorJson(related[0]!) !== canonicalDelegatorJson(adopted))
+    return "conflict";
+  return isDelegatorActive(related[0]!, now) ? "trusted" : "inactive";
 }
 
 /** Provider context of the recorded App; undefined until the App is configured. */
@@ -616,6 +695,7 @@ export function providerContext(evidence: SetupConfigurationEvidence): SetupProv
 async function repositoryTrustStatus(
   evidence: SetupConfigurationEvidence,
   provider: SetupProviderPort | undefined,
+  now: Date,
 ): Promise<DimensionResult<"repository-trust">> {
   const authority = evidence.config?.authority;
   const pin = evidence.pin;
@@ -649,8 +729,18 @@ async function repositoryTrustStatus(
       ],
     };
   }
-  const comparison = compareCanonicalTrust(records, pin);
+  const comparison = compareCanonicalTrust(records, pin, now);
   if (comparison === "trusted") return { status: "trusted", diagnostics: [] };
+  if (comparison === "inactive")
+    return {
+      status: "unknown",
+      diagnostics: [
+        diagnostic(
+          "SETUP_TRUST_INACTIVE",
+          "The protected-ref Runtime Authority matches but is inactive or outside its validity window.",
+        ),
+      ],
+    };
   if (comparison === "conflict")
     return {
       status: "unknown",
@@ -719,13 +809,17 @@ async function sessionReadinessStatus(
   generation: SetupGeneration,
 ): Promise<DimensionResult<"session-readiness">> {
   const admission = evidence.admission;
-  if (port === undefined || admission === undefined)
+  const pin = evidence.pin;
+  if (port === undefined || admission === undefined || pin === undefined)
     return {
       status: "unknown",
       diagnostics: [diagnostic("SETUP_SESSION_READINESS_UNAVAILABLE", "Admission readiness cannot be observed.")],
     };
   try {
-    const observed = await port.observe(generation, admission.id);
+    const observed = await port.observe(generation, {
+      admissionId: admission.id,
+      authority: { id: pin.id, publicKeyFingerprint: delegatorPublicKeyFingerprint(pin.key) },
+    });
     if (!["not-ready", "ready"].includes(observed.status) || !VALID_TIMESTAMP.test(observed.observedAt))
       throw new Error("invalid readiness");
     return { status: observed.status, observedAt: observed.observedAt, diagnostics: observed.diagnostics };
@@ -746,11 +840,28 @@ export async function observeSetup(
   const now = options.now ?? (() => new Date());
   const evidence = await readSetupConfigurationEvidence(repository, environment);
   const generation: SetupGeneration = { repository, configuration: evidence.generation };
-  const [trust, health, readiness] = await Promise.all([
-    repositoryTrustStatus(evidence, options.provider),
+  const [trust, health, observedReadiness] = await Promise.all([
+    repositoryTrustStatus(evidence, options.provider, now()),
     healthStatus(options.lifecycle, generation),
     sessionReadinessStatus(options.sessionReadiness, evidence, generation),
   ]);
+  // #1182: Admission readiness is evaluated against live owner state, so it binds to
+  // this generation only if the configuration is unchanged when observation ends. A
+  // readiness report that raced a setup change is never adopted as `ready` evidence
+  // for the generation observed at the start.
+  const readiness: DimensionResult<"session-readiness"> =
+    observedReadiness.status === "ready" &&
+    (await readSetupConfigurationEvidence(repository, environment)).generation !== evidence.generation
+      ? {
+          status: "unknown",
+          diagnostics: [
+            diagnostic(
+              "SETUP_SESSION_READINESS_STALE",
+              "Setup configuration changed while Admission readiness was observed; observe again.",
+            ),
+          ],
+        }
+      : observedReadiness;
   const observedAt = now().toISOString();
   const id = evidence.generation;
   return validateSetupObservation({

@@ -5,15 +5,20 @@ import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { ExecutorExecutionPort } from "../runtime-contracts/ports.js";
 import type { PeerCertificate } from "node:tls";
 import {
+  LOCAL_EXECUTOR_BRANCH_POLICY_PATH,
   LOCAL_EXECUTOR_EVIDENCE_PATH,
+  LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH,
   LOCAL_EXECUTOR_EXECUTIONS_PATH,
   LOCAL_EXECUTOR_HEALTH_PATH,
   LOCAL_EXECUTOR_PROTOCOL_VERSION,
   LOCAL_EXECUTOR_REPOSITORY_PATH,
   MAX_LOCAL_EXECUTOR_BODY_BYTES,
+  type LocalExecutorBranchPolicyRequest,
   type LocalExecutorEvidenceRequest,
+  type LocalExecutorGovernedContractRequest,
 } from "./executor-http.js";
 import { verifyLocalMtlsPeerIdentity, type LocalMtlsIdentity } from "./transport-security.js";
+import { validateRuntimeFailure, type RuntimeFailure } from "../runtime-contracts/runtime-failure.js";
 
 export interface LocalExecutorClientOptions {
   readonly id: string;
@@ -33,11 +38,14 @@ export interface LocalExecutorHealth {
 
 export class LocalExecutorClientError extends Error {
   readonly code: "EXECUTOR_UNAVAILABLE" | "EXECUTOR_IDENTITY_MISMATCH" | "EXECUTOR_PROTOCOL_INVALID";
+  /** Bounded Executor owner diagnostic, forwarded only when it validates against the catalog. */
+  readonly runtimeFailure?: RuntimeFailure;
 
-  constructor(code: LocalExecutorClientError["code"], message: string) {
+  constructor(code: LocalExecutorClientError["code"], message: string, runtimeFailure?: RuntimeFailure) {
     super(message);
     this.name = "LocalExecutorClientError";
     this.code = code;
+    if (runtimeFailure !== undefined) this.runtimeFailure = runtimeFailure;
   }
 }
 
@@ -140,6 +148,10 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
     if (response.url.length > 0 && new URL(response.url).origin !== this.endpoint.origin)
       throw new LocalExecutorClientError("EXECUTOR_IDENTITY_MISMATCH", "Executor response came from another endpoint.");
     const body = await readJson(response);
+    if (response.status !== 200 && record(body) && body.ok === false && record(body.error)) {
+      const failure = validateRuntimeFailure(body.error.failure);
+      throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Executor refused the request.", failure);
+    }
     return { response, body };
   }
 
@@ -268,6 +280,42 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
       throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Current Executor evidence is unavailable.");
     }
     return body.evidence;
+  }
+
+  async readGovernedContract(request: LocalExecutorGovernedContractRequest): Promise<unknown> {
+    const { response, body } = await this.request(LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    this.assertIdentity(body);
+    if (
+      response.status !== 200 ||
+      !exactKeys(body, ["ok", "component", "executorId", "protocol", "contract"]) ||
+      body.ok !== true ||
+      !record(body.contract)
+    ) {
+      throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Repository-governed contract is unavailable.");
+    }
+    return body.contract;
+  }
+
+  async readBranchPolicy(request: LocalExecutorBranchPolicyRequest): Promise<unknown> {
+    const { response, body } = await this.request(LOCAL_EXECUTOR_BRANCH_POLICY_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    this.assertIdentity(body);
+    if (
+      response.status !== 200 ||
+      !exactKeys(body, ["ok", "component", "executorId", "protocol", "branchPolicy"]) ||
+      body.ok !== true ||
+      !record(body.branchPolicy)
+    ) {
+      throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Current branch policy is unavailable.");
+    }
+    return body.branchPolicy;
   }
 
   async execute(execution: AuthorizedExecution): Promise<AuthorizedExecutionResult> {

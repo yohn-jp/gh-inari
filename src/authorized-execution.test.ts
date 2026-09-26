@@ -320,6 +320,34 @@ test("executes branch advancement and publication through their existing delegat
   assert.equal(publicationCalls, 1);
 });
 
+test("#1181 PR publication accepts the scoped change.implement claim Capability admission grants, and nothing wider", () => {
+  const request = publicationRequest();
+  const implement = authorized(
+    "pullRequest.publish",
+    request,
+    { kind: "change.implement", issue: ISSUE },
+    { kind: "pullRequest", issue: ISSUE, head: BRANCH, base: "main" },
+  );
+  assert.equal(implement.operation, "pullRequest.publish");
+  assert.equal(implement.capability.kind, "change.implement");
+  assert.throws(() =>
+    authorized(
+      "pullRequest.publish",
+      request,
+      { kind: "change.implement", issue: ISSUE + 1 },
+      { kind: "pullRequest", issue: ISSUE, head: BRANCH, base: "main" },
+    ),
+  );
+  assert.throws(() =>
+    authorized(
+      "pullRequest.publish",
+      request,
+      { kind: "change.ready", issue: ISSUE },
+      { kind: "pullRequest", issue: ISSUE, head: BRANCH, base: "main" },
+    ),
+  );
+});
+
 test("AuthorizedExecution passes the validated publication wire request to the canonical publisher", async () => {
   const request = publicationRequest();
   const input = authorized(

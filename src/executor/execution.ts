@@ -18,7 +18,7 @@ import {
   type ChangeMutationRequest,
   type ChangeReadRequest,
 } from "../change-execution-port.js";
-import { resolveDelegator } from "../agent-authority/delegator-trust.js";
+import { DelegatorTrustError, resolveDelegator } from "../agent-authority/delegator-trust.js";
 import { validateChangeProvenanceRecord, verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { TrustedChangeExecutor } from "../change-trusted-executor.js";
 import { GitHubAdapterCore as GitHubAdapter } from "../github/adapter-core.js";
@@ -39,9 +39,12 @@ import {
   readCurrentImplementationAdmissionEvidence,
 } from "../implementation-frontier-composition.js";
 import { publishPullRequest } from "../pr-publication.js";
+import { acquireRepositoryBranchPolicy, compileRepositoryGovernedContract } from "../governance.js";
+import { parseImplementationIssueBody } from "../implementation-contract.js";
 import { LocalRuntimeProfileStore } from "../local-runtime-profile.js";
 import { LocalRuntimeConfigError, readAppPrivateKey } from "../relay/local-runtime-config-credentials.js";
 import type { LocalExecutorEvidenceRequest } from "../local-control/executor-http.js";
+import { ExecutorCredentialStore, type StoredIssuerKey } from "./credential-store.js";
 import { LocalExecutorError } from "./errors.js";
 import { issuerKeyMissing, issuerKeyReference, requireLocalExecutorAppId } from "./issuer-input.js";
 
@@ -105,14 +108,24 @@ interface LocalExecutorIssuerBinding {
 function issuerBindingMismatch(): LocalExecutorError {
   return new LocalExecutorError(
     "EXECUTOR_ISSUER_BINDING_MISMATCH",
-    "The Inari Issuer App, installation, or repository does not match the Local Runtime profile for this repository.",
+    "The Inari Issuer App, installation, or repository does not match the setup binding for this repository.",
   );
 }
 
+function sameLocator(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
 /**
- * Bind the Issuer App installation credential to the canonical Local Runtime
- * profile written by repository setup. The profile supplies the repository id
- * and installation id; the App ID and private key are Executor-owned inputs.
+ * Bind the Issuer App installation credential for one repository (#1182).
+ *
+ * The Executor's own custody records the installation each verified key
+ * generation acts for; `inari setup next` (executor.bind-repository) writes it
+ * through the Executor owner. A legacy Local Runtime profile written by
+ * `inari setup --endpoint` remains a binding source. When both exist they must
+ * name the same App, installation and repository; a contradiction or a
+ * half-migrated state is a bounded failure, never a silent preference. The App
+ * ID and private key are Executor-owned inputs.
  */
 async function localExecutorIssuerBinding(
   repository: { readonly repositoryHost: string; readonly nameWithOwner: string; readonly repositoryId?: string },
@@ -120,8 +133,10 @@ async function localExecutorIssuerBinding(
 ): Promise<LocalExecutorIssuerBinding> {
   const configuredAppId = requireLocalExecutorAppId(environment);
   const privateKeyPem = issuerPrivateKey(environment);
+  let custody: StoredIssuerKey | undefined;
   let profile: Awaited<ReturnType<LocalRuntimeProfileStore["findForRepository"]>>;
   try {
+    custody = new ExecutorCredentialStore(environment).current();
     profile = await new LocalRuntimeProfileStore({ environment }).findForRepository({
       repositoryHost: repository.repositoryHost,
       repositoryNameWithOwner: repository.nameWithOwner,
@@ -129,27 +144,62 @@ async function localExecutorIssuerBinding(
   } catch {
     throw new LocalExecutorError(
       "EXECUTOR_REPOSITORY_BINDING_UNAVAILABLE",
-      "The Local Runtime profile for this repository could not be read.",
+      "The repository setup binding could not be read.",
     );
   }
-  if (profile === undefined) {
+  const bound = custody?.bindings?.find(
+    (item) =>
+      sameLocator(item.repositoryHost, repository.repositoryHost) &&
+      sameLocator(item.nameWithOwner, repository.nameWithOwner),
+  );
+  if (bound !== undefined && custody !== undefined) {
+    if (
+      profile !== undefined &&
+      (profile.app.appId !== custody.appId ||
+        profile.app.installationId !== bound.installationId ||
+        profile.repository.repositoryId !== bound.repositoryId)
+    )
+      throw new LocalExecutorError(
+        "EXECUTOR_REPOSITORY_BINDING_INCONSISTENT",
+        "The Executor repository binding and the Local Runtime profile name different App installations.",
+      );
+  }
+  const source =
+    bound !== undefined && custody !== undefined
+      ? {
+          appId: custody.appId,
+          installationId: bound.installationId,
+          repository: {
+            repositoryHost: bound.repositoryHost,
+            repositoryId: bound.repositoryId,
+            nameWithOwner: bound.nameWithOwner,
+          },
+        }
+      : profile === undefined
+        ? undefined
+        : {
+            appId: profile.app.appId,
+            installationId: profile.app.installationId,
+            repository: {
+              repositoryHost: profile.repository.repositoryHost,
+              repositoryId: profile.repository.repositoryId,
+              nameWithOwner: profile.repository.repositoryNameWithOwner,
+            },
+          };
+  if (source === undefined) {
     throw new LocalExecutorError(
       "EXECUTOR_REPOSITORY_BINDING_MISSING",
-      "No Local Runtime profile binds this repository to an Inari Issuer App installation. Run `inari setup --endpoint <endpoint-url>` in the repository first.",
+      "No setup binding connects this repository to an Inari Issuer App installation. Run `inari setup next` in the repository to bind it.",
     );
   }
   if (
-    profile.app.appId !== configuredAppId ||
-    (repository.repositoryId !== undefined && profile.repository.repositoryId !== repository.repositoryId)
+    source.appId !== configuredAppId ||
+    (repository.repositoryId !== undefined && source.repository.repositoryId !== repository.repositoryId)
   ) {
     throw issuerBindingMismatch();
   }
-  const identity: RepositoryIdentity = Object.freeze({
-    repositoryHost: profile.repository.repositoryHost,
-    repositoryId: profile.repository.repositoryId,
-    nameWithOwner: profile.repository.repositoryNameWithOwner,
-  });
-  const installationId = profile.app.installationId;
+  const identity: RepositoryIdentity = Object.freeze({ ...source.repository });
+  const installationId = source.installationId;
   return Object.freeze({
     repository: identity,
     appId: configuredAppId,
@@ -221,6 +271,34 @@ async function projectChange(
   );
 }
 
+/**
+ * The installation broker deliberately replaces every callback error with a
+ * generic credential-stage failure so a token can never escape. Owner
+ * failures raised by Executor code inside the callback (protected-ref trust
+ * resolution, Implementation contract checks) carry only a fixed code; they
+ * are kept here so the bounded Runtime diagnostic names the real owner stage
+ * instead of reporting a provider outage (#1180).
+ */
+async function withOwnerFailures<T>(
+  run: (keep: <R>(operation: () => Promise<R>) => Promise<R>) => Promise<T>,
+): Promise<T> {
+  let owner: DelegatorTrustError | LocalExecutorError | undefined;
+  const keep = async <R>(operation: () => Promise<R>): Promise<R> => {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      if (error instanceof DelegatorTrustError || error instanceof LocalExecutorError) owner = error;
+      throw error;
+    }
+  };
+  try {
+    return await run(keep);
+  } catch (error: unknown) {
+    if (owner !== undefined) throw owner;
+    throw error;
+  }
+}
+
 export async function resolveLocalExecutorRepository(
   repositoryNameWithOwner: string,
   environment: NodeJS.ProcessEnv,
@@ -231,11 +309,9 @@ export async function resolveLocalExecutorRepository(
     { repositoryHost: "github.com", nameWithOwner: repositoryNameWithOwner },
     environment,
   );
-  try {
-    return await verifyIssuerBinding(binding);
-  } catch {
-    throw new LocalExecutorError("EXECUTOR_REPOSITORY_UNAVAILABLE", "Repository identity could not be resolved.");
-  }
+  // The owner failure (binding mismatch or the Issuer credential stage) is kept
+  // so the bounded wire diagnostic can name it; no provider detail is exposed.
+  return verifyIssuerBinding(binding);
 }
 
 export async function readLocalExecutorEvidence(
@@ -251,13 +327,184 @@ export async function readLocalExecutorEvidence(
   const binding = await localExecutorIssuerBinding(identity, environment);
   await verifyIssuerBinding(binding);
   const broker = binding.broker();
-  return broker.withRepositoryReadCapability({}, async (capability) => {
+  return withOwnerFailures((keep) =>
+    broker.withRepositoryReadCapability({}, async (capability) => {
+      const adapter = new GitHubAdapter({
+        repository: identity.nameWithOwner,
+        hostname: identity.repositoryHost,
+        transport: {
+          request: async (providerRequest) => {
+            if (providerRequest.method !== "GET") throw new Error("Executor evidence reads cannot perform mutation.");
+            const response = await capability.transport.request({
+              hostname: providerRequest.hostname,
+              method: "GET",
+              path: providerRequest.path,
+            });
+            return { ...response, body: response.body ?? null };
+          },
+        },
+      });
+      const runtime = await keep(() => resolveDelegator(adapter, request.authorityId));
+      const authority = Object.freeze({
+        ref: `refs/heads/${runtime.provenance.ref}`,
+        sha: runtime.provenance.policySha,
+      });
+      if (request.issue === undefined || request.implementationIssue === undefined) {
+        return Object.freeze({
+          repository: identity,
+          authority,
+          runtimeAuthority: runtime.authority,
+        });
+      }
+      const frontierRepository = createGitHubImplementationFrontierRepository({
+        adapter,
+        cwd: process.cwd(),
+        changeReader: {
+          read: (changeRequest) => projectChange(broker, repository, identity, changeRequest),
+        },
+      });
+      const implementation = await readCurrentImplementationAdmissionEvidence(
+        frontierRepository,
+        request.implementationIssue,
+      );
+      const change = await projectChange(broker, repository, identity, changeReadRequest(request.issue));
+      const pullRequestNumber = change.change?.projection?.pullRequest;
+      const reviewEvidence =
+        typeof pullRequestNumber === "number"
+          ? await frontierRepository.observePullRequest(pullRequestNumber)
+          : undefined;
+      return Object.freeze({
+        repository: identity,
+        authority,
+        runtimeAuthority: runtime.authority,
+        change,
+        implementation,
+        ...(reviewEvidence === undefined ? {} : { reviewEvidence }),
+      });
+    }),
+  );
+}
+
+/** Request for the current repository branch policy of one governed Implementation (#1179). */
+export interface LocalExecutorBranchPolicyRequest {
+  readonly version: 1;
+  readonly repository: { readonly id: string; readonly name: string };
+  readonly implementation: number;
+}
+
+function branchPolicyDenied(code: string, message: string): LocalExecutorError {
+  return new LocalExecutorError(code, message);
+}
+
+/**
+ * Current repository branch-policy observation input for one governed
+ * Implementation (#1179): the policy acquired from the repository's
+ * provider-resolved default branch through the Issuer read capability, the
+ * Implementation's exact contract branch binding, and the generation observed
+ * for staleness. It is public data only; no credential leaves the Executor.
+ * A non-Implementation Issue (for example a Source bug Issue) or an
+ * unavailable/invalid policy is a bounded denial, never a fixed-grammar guess.
+ */
+export async function readLocalExecutorBranchPolicy(
+  request: LocalExecutorBranchPolicyRequest,
+  environment: NodeJS.ProcessEnv,
+): Promise<unknown> {
+  const identity: RepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: request.repository.id,
+    nameWithOwner: request.repository.name,
+  };
+  const binding = await localExecutorIssuerBinding(identity, environment);
+  await verifyIssuerBinding(binding);
+  return withOwnerFailures((keep) =>
+    binding.broker().withRepositoryReadCapability({}, (capability) =>
+      keep(async () => {
+        const adapter = new GitHubAdapter({
+          repository: identity.nameWithOwner,
+          hostname: identity.repositoryHost,
+          transport: {
+            request: async (providerRequest) => {
+              if (providerRequest.method !== "GET") throw new Error("Executor policy reads cannot perform mutation.");
+              const response = await capability.transport.request({
+                hostname: providerRequest.hostname,
+                method: "GET",
+                path: providerRequest.path,
+              });
+              return { ...response, body: response.body ?? null };
+            },
+          },
+        });
+        const issue = await adapter.getIssue(request.implementation);
+        const parsed = typeof issue.body === "string" ? parseImplementationIssueBody(issue.body) : undefined;
+        if (parsed === undefined || !parsed.valid || parsed.contract === undefined)
+          throw branchPolicyDenied(
+            "EXECUTOR_IMPLEMENTATION_CONTRACT_REQUIRED",
+            "The selected Issue is not a governed Implementation contract.",
+          );
+        const repository = { repositoryHost: identity.repositoryHost, repositoryId: identity.repositoryId };
+        if (
+          parsed.contract.repository.repositoryHost !== repository.repositoryHost ||
+          parsed.contract.repository.repositoryId !== repository.repositoryId
+        )
+          throw branchPolicyDenied(
+            "EXECUTOR_IMPLEMENTATION_REPOSITORY_MISMATCH",
+            "The Implementation contract names a different repository.",
+          );
+        const acquisition = await acquireRepositoryBranchPolicy(adapter);
+        if (acquisition.status !== "available")
+          throw branchPolicyDenied(
+            "EXECUTOR_BRANCH_POLICY_UNAVAILABLE",
+            "The repository branch policy is unavailable.",
+          );
+        const branch = parsed.contract.execution.branch;
+        return Object.freeze({
+          version: 1,
+          kind: "local-branch-policy-input",
+          policy: acquisition.policy,
+          target: { repository, implementation: request.implementation },
+          observedGeneration: {
+            ref: acquisition.policy.generation.ref,
+            treeSha: acquisition.policy.generation.treeSha,
+          },
+          ...(branch === undefined ? {} : { binding: { repository, implementation: request.implementation, branch } }),
+        });
+      }),
+    ),
+  );
+}
+
+/** Request for the repository-governed pull-request contract (#1181). */
+export interface LocalExecutorGovernedContractRequest {
+  readonly version: 1;
+  readonly repository: { readonly id: string; readonly name: string };
+  readonly domain: "pr";
+  readonly template: string;
+}
+
+/**
+ * Compile the repository-governed pull-request contract from the protected
+ * default branch through the Issuer read capability (#1181), so template
+ * discovery, materialization and validation need no CLI provider credential.
+ * The result is the public canonical contract only.
+ */
+export async function readLocalExecutorGovernedContract(
+  request: LocalExecutorGovernedContractRequest,
+  environment: NodeJS.ProcessEnv,
+): Promise<unknown> {
+  const identity: RepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: request.repository.id,
+    nameWithOwner: request.repository.name,
+  };
+  const binding = await localExecutorIssuerBinding(identity, environment);
+  await verifyIssuerBinding(binding);
+  return binding.broker().withRepositoryReadCapability({}, async (capability) => {
     const adapter = new GitHubAdapter({
       repository: identity.nameWithOwner,
       hostname: identity.repositoryHost,
       transport: {
         request: async (providerRequest) => {
-          if (providerRequest.method !== "GET") throw new Error("Executor evidence reads cannot perform mutation.");
+          if (providerRequest.method !== "GET") throw new Error("Executor contract reads cannot perform mutation.");
           const response = await capability.transport.request({
             hostname: providerRequest.hostname,
             method: "GET",
@@ -267,40 +514,7 @@ export async function readLocalExecutorEvidence(
         },
       },
     });
-    const runtime = await resolveDelegator(adapter, request.authorityId);
-    const authority = Object.freeze({ ref: `refs/heads/${runtime.provenance.ref}`, sha: runtime.provenance.policySha });
-    if (request.issue === undefined || request.implementationIssue === undefined) {
-      return Object.freeze({
-        repository: identity,
-        authority,
-        runtimeAuthority: runtime.authority,
-      });
-    }
-    const frontierRepository = createGitHubImplementationFrontierRepository({
-      adapter,
-      cwd: process.cwd(),
-      changeReader: {
-        read: (changeRequest) => projectChange(broker, repository, identity, changeRequest),
-      },
-    });
-    const implementation = await readCurrentImplementationAdmissionEvidence(
-      frontierRepository,
-      request.implementationIssue,
-    );
-    const change = await projectChange(broker, repository, identity, changeReadRequest(request.issue));
-    const pullRequestNumber = change.change?.projection?.pullRequest;
-    const reviewEvidence =
-      typeof pullRequestNumber === "number"
-        ? await frontierRepository.observePullRequest(pullRequestNumber)
-        : undefined;
-    return Object.freeze({
-      repository: identity,
-      authority,
-      runtimeAuthority: runtime.authority,
-      change,
-      implementation,
-      ...(reviewEvidence === undefined ? {} : { reviewEvidence }),
-    });
+    return compileRepositoryGovernedContract(adapter, request.domain, request.template);
   });
 }
 

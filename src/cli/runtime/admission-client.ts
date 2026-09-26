@@ -12,6 +12,11 @@ import { validateExecutionIntent, type ExecutionIntent } from "../../local-contr
 import { readLocalJson, validateLocalCliConfig, type LocalAdmissionRoute } from "../../local-control/config.js";
 import { requireLocalRuntimeEndpoint } from "../../local-control/runtime-discovery.js";
 import type { AdmissionRepositoryIdentity, AdmissionSessionPort } from "../../runtime-contracts/index.js";
+import {
+  validateRuntimeFailure,
+  type RuntimeFailure,
+  type RuntimeFailureCategory,
+} from "../../runtime-contracts/runtime-failure.js";
 
 /**
  * Client side of the existing local Admission wire. The CLI must not load the
@@ -23,22 +28,77 @@ export const LOCAL_ADMISSION_CLIENT_HEALTH_PATH = "/health" as const;
 export const LOCAL_ADMISSION_CLIENT_SESSIONS_PATH = "/v1/sessions" as const;
 export const LOCAL_ADMISSION_CLIENT_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH = "/v1/executions" as const;
+export const LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
+export const LOCAL_ADMISSION_CLIENT_PULL_REQUEST_CONTEXT_PATH = "/v1/pull-request-context" as const;
 export const LOCAL_ADMISSION_CLIENT_SESSION_ID_HEADER = "x-inari-session-id" as const;
 
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_SESSION_BINDING_BYTES = 16 * 1024;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 
+export interface LocalAdmissionFailureDetails {
+  readonly endpoint: "repository" | "branch-policy" | "pull-request-context" | "session" | "execution";
+  readonly status: number;
+  readonly stage?: RuntimeFailure["stage"];
+  readonly reason?: RuntimeFailure["reason"];
+  readonly category?: RuntimeFailureCategory;
+}
+
 export class LocalAdmissionClientError extends Error {
   readonly code: string;
   readonly status?: number;
+  readonly details?: LocalAdmissionFailureDetails;
 
-  constructor(code: string, message: string, status?: number) {
+  constructor(code: string, message: string, status?: number, details?: LocalAdmissionFailureDetails) {
     super(message);
     this.name = "LocalAdmissionClientError";
     this.code = code;
     this.status = status;
+    if (details !== undefined) this.details = details;
   }
+}
+
+/**
+ * CLI result for each bounded failure class (#1180). Only an actual
+ * authorization denial keeps `ADMISSION_REQUEST_DENIED`; missing setup, trust,
+ * Session state and owner availability each surface their own code.
+ */
+const FAILURE_CATEGORY_CODES: Readonly<Record<RuntimeFailureCategory, string>> = Object.freeze({
+  denied: "ADMISSION_REQUEST_DENIED",
+  session: "ADMISSION_SESSION_REJECTED",
+  trust: "ADMISSION_TRUST_UNVERIFIED",
+  configuration: "ADMISSION_RUNTIME_NOT_CONFIGURED",
+  "binding-mismatch": "ADMISSION_RUNTIME_BINDING_MISMATCH",
+  unavailable: "ADMISSION_OWNER_UNAVAILABLE",
+  internal: "ADMISSION_INTERNAL_FAILURE",
+});
+
+function endpointFor(path: string): LocalAdmissionFailureDetails["endpoint"] {
+  if (path === LOCAL_ADMISSION_CLIENT_REPOSITORY_PATH) return "repository";
+  if (path === LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH) return "branch-policy";
+  if (path === LOCAL_ADMISSION_CLIENT_PULL_REQUEST_CONTEXT_PATH) return "pull-request-context";
+  if (path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH) return "execution";
+  return "session";
+}
+
+function failureError(path: string, status: number, parsed: unknown): LocalAdmissionClientError {
+  const error = isRecord(parsed) && isRecord(parsed.error) ? parsed.error : undefined;
+  const failure = validateRuntimeFailure(error?.failure);
+  const endpoint = endpointFor(path);
+  if (failure === undefined) {
+    return new LocalAdmissionClientError(
+      "ADMISSION_REQUEST_DENIED",
+      `Configured Admission denied the ${endpoint} request.`,
+      status,
+      { endpoint, status },
+    );
+  }
+  return new LocalAdmissionClientError(
+    FAILURE_CATEGORY_CODES[failure.category],
+    `${failure.message} (endpoint: ${endpoint}; stage: ${failure.stage}; reason: ${failure.reason})`,
+    status,
+    { endpoint, status, stage: failure.stage, reason: failure.reason, category: failure.category },
+  );
 }
 
 export type LocalAdmissionRepositoryIdentity = AdmissionRepositoryIdentity;
@@ -146,13 +206,7 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
       throw new LocalAdmissionClientError("ADMISSION_TRANSPORT_FAILED", "Configured local Admission is unavailable.");
     }
     const parsed = await responseJson(response);
-    if (!response.ok) {
-      throw new LocalAdmissionClientError(
-        "ADMISSION_REQUEST_DENIED",
-        "Configured Admission denied the request.",
-        response.status,
-      );
-    }
+    if (!response.ok) throw failureError(path, response.status, parsed);
     return requireEnvelope(parsed, response.status);
   }
 
@@ -217,6 +271,47 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
         );
       }
       return { id: session.id, status: session.status };
+    },
+    async readBranchPolicy(repository: { readonly id: string; readonly name: string }, implementation: number) {
+      const envelope = await request(LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH, "POST", {
+        version: LOCAL_ADMISSION_CLIENT_PROTOCOL_VERSION,
+        repository: { id: repository.id, name: repository.name },
+        implementation,
+      });
+      if (!isRecord(envelope.branchPolicy)) {
+        throw new LocalAdmissionClientError(
+          "ADMISSION_RESPONSE_INVALID",
+          "Admission returned an invalid branch policy observation.",
+        );
+      }
+      return envelope.branchPolicy;
+    },
+    async readPullRequestContext(
+      repository: { readonly id: string; readonly name: string },
+      template: string,
+      sessionId: string,
+    ) {
+      if (!SESSION_ID_PATTERN.test(sessionId)) {
+        throw new LocalAdmissionClientError("ADMISSION_SESSION_SELECTOR_INVALID", "Session selector is invalid.");
+      }
+      const envelope = await request(
+        LOCAL_ADMISSION_CLIENT_PULL_REQUEST_CONTEXT_PATH,
+        "POST",
+        {
+          version: LOCAL_ADMISSION_CLIENT_PROTOCOL_VERSION,
+          repository: { id: repository.id, name: repository.name },
+          domain: "pr",
+          template,
+        },
+        sessionId,
+      );
+      if (!isRecord(envelope.contract) || !isRecord(envelope.change)) {
+        throw new LocalAdmissionClientError(
+          "ADMISSION_RESPONSE_INVALID",
+          "Admission returned an invalid pull request context.",
+        );
+      }
+      return { contract: envelope.contract, change: envelope.change };
     },
     async executeIntent(intent: ExecutionIntent, sessionId: string) {
       if (!SESSION_ID_PATTERN.test(sessionId)) {

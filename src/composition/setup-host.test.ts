@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { request as httpRequest } from "node:http";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +28,7 @@ import {
   createObservedRuntimeLifecycle,
   createOwnedRuntimeLifecycle,
   findLiveSetupHost,
+  resolveSetupHostReuse,
   resolveSetupRepository,
   startSetupHost,
 } from "./setup-host.js";
@@ -499,6 +500,58 @@ test("setup host starts before enrollment/trust/Runtime, serves assets and deliv
   assert.equal(await findLiveSetupHost(fixture.environment), undefined);
   await assert.rejects(fetch(`${host.origin}/`));
   fixture.cleanup();
+});
+
+test("setup host reuse is bound to the repository and never replaces a foreign live announcement", async () => {
+  const fixture = world();
+  const foreign = createHttpServer((_request, out) => {
+    out.setHeader("content-type", "application/json");
+    out.end(JSON.stringify({ ok: true, component: "setup", id: "stp_foreignforeignforeign", protocol: 1 }));
+  });
+  try {
+    const application = createLocalSetupApplication({
+      environment: fixture.environment,
+      root: fixture.root,
+      lifecycle: createObservedRuntimeLifecycle({ probe: async () => ({ status: "not-running" }) }),
+    });
+    const host = await startSetupHost({
+      application,
+      repository,
+      environment: fixture.environment,
+      assetDirectory: fixture.assets,
+    });
+    try {
+      assert.deepEqual(await resolveSetupHostReuse(repository, fixture.environment), host.announcement);
+      const other = { repositoryHost: "github.com", repositoryId: "4242", nameWithOwner: "example-other/project" };
+      assert.equal(await findLiveSetupHost(fixture.environment, undefined, other), undefined);
+      await assert.rejects(
+        resolveSetupHostReuse(other, fixture.environment),
+        (error: unknown) => error instanceof SetupHostError && error.code === "SETUP_HOST_REPOSITORY_CONFLICT",
+      );
+      assert.deepEqual(readLocalRuntimeEndpoint("setup", fixture.environment), host.announcement);
+    } finally {
+      await host.close();
+    }
+
+    // A live process without setup host repository evidence is foreign: reported, never replaced.
+    await new Promise<void>((resolve) => foreign.listen(0, "127.0.0.1", () => resolve()));
+    const address = foreign.address();
+    assert.ok(address !== null && typeof address === "object");
+    const announcement = publishLocalRuntimeEndpoint(
+      "setup",
+      "stp_foreignforeignforeign",
+      address.port,
+      fixture.environment,
+    );
+    await assert.rejects(
+      resolveSetupHostReuse(repository, fixture.environment),
+      (error: unknown) => error instanceof SetupHostError && error.code === "SETUP_HOST_ANNOUNCEMENT_FOREIGN",
+    );
+    assert.deepEqual(readLocalRuntimeEndpoint("setup", fixture.environment), announcement);
+  } finally {
+    await new Promise<void>((resolve) => foreign.close(() => resolve()));
+    fixture.cleanup();
+  }
 });
 
 test("setup host shutdown removes only its own announcement; stale announcements are not reused", async () => {

@@ -9,6 +9,7 @@ import { generateAndPersistDelegatorKeyPair, delegatorPublicKeyFingerprint } fro
 import { registerDelegator } from "../agent-authority/delegator-lifecycle.js";
 import type { Delegator } from "../agent-authority/delegator.js";
 import { setupLocalAdmission } from "../admission/setup.js";
+import { bindLocalCliAdmissionRoute, ensureLocalCliTopology } from "../local-control/config.js";
 import { createSetupApplication, setupOperationId, type SetupEnrollmentUpload } from "../application/setup/index.js";
 import { executorIssuerCustody } from "../executor/enrollment/owner.js";
 import { ensureLocalExecutorConfiguration } from "../executor/setup.js";
@@ -23,6 +24,7 @@ import {
 } from "../runtime-contracts/index.js";
 import { createExecutorSetupEnrollmentPort, createLocalSetupPorts, createSetupActionPort } from "./setup-adapters.js";
 import { SetupConfigStore, SetupConfigStoreError, setupStateFileKey } from "./setup-config-store.js";
+import { ExecutorCredentialStore } from "../executor/credential-store.js";
 import {
   SetupProviderError,
   readSetupConfigurationEvidence,
@@ -158,7 +160,10 @@ async function configure(w: World): Promise<Delegator> {
     maxSessionTtlSeconds: 3600,
     capabilityCeiling: ["change.implement"],
   });
-  setupLocalAdmission(record, w.environment);
+  const admission = setupLocalAdmission(record, w.environment);
+  // A configured CLI routes Sessions to this Admission (as `admission setup` binds it).
+  ensureLocalCliTopology(w.environment);
+  bindLocalCliAdmissionRoute({ id: admission.config.id }, w.environment);
   const store = new SetupConfigStore({ environment: w.environment });
   const current = store.read(repository)!;
   store.update(repository, current.revision, {
@@ -166,6 +171,36 @@ async function configure(w: World): Promise<Delegator> {
   });
   return record;
 }
+
+test("#1184 complete-configuration routes the local CLI to the configured Admission; an unrouted CLI is not configured", async () => {
+  const w = world();
+  try {
+    await configure(w);
+    const cliConfig = path.join(w.environment.INARI_CONFIG_HOME!, "cli", "config.json");
+    // A CLI initialized before Admission existed has no route: setup is not usable yet.
+    rmSync(cliConfig);
+    ensureLocalCliTopology(w.environment);
+    const app = createSetupApplication(ports(w));
+    const unrouted = await app.state(repository);
+    assert.equal(unrouted.dimensions.find((item) => item.dimension === "configuration")?.status, "partial");
+    const action = unrouted.actions.find((item) => item.kind === "composition.complete-configuration")!;
+    const result = await app.perform(repository, {
+      version: 1,
+      actionId: action.id,
+      generation: unrouted.generation,
+      confirmed: true,
+      inputs: {},
+    });
+    assert.equal(result.outcome, "succeeded", JSON.stringify(result.diagnostics));
+    const evidence = await readSetupConfigurationEvidence(repository, w.environment);
+    assert.equal(evidence.cliAdmissionRouteId, evidence.admission?.id);
+    const routed = await app.state(repository);
+    assert.equal(routed.dimensions.find((item) => item.dimension === "configuration")?.status, "configured");
+    assert.equal(JSON.parse(readFileSync(cliConfig, "utf8")).admission.id, evidence.admission?.id);
+  } finally {
+    w.cleanup();
+  }
+});
 
 test("executor.configure carries App ID + PEM to the real Executor custody and records only public references", async () => {
   const w = world();
@@ -487,6 +522,43 @@ test("bind-repository uses App-user bootstrap scope and Executor-owned key verif
     const after = await app.state(repository);
     assert.equal(after.dimensions.find((item) => item.dimension === "provider-binding")?.status, "bound");
     assert.equal(new SetupConfigStore({ environment: w.environment }).read(repository)?.app?.installationId, "77");
+    // #1182: the binding setup records is the Executor's own owner evidence, the input execution uses.
+    assert.deepEqual(executorIssuerCustody(w.environment)?.bindings, [
+      {
+        repositoryHost: repository.repositoryHost,
+        repositoryId: repository.repositoryId,
+        nameWithOwner: repository.nameWithOwner,
+        installationId: "77",
+      },
+    ]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("#1182 a recorded installation without the Executor's own verified binding is never reported bound", async () => {
+  const w = world();
+  try {
+    await configure(w);
+    const app = createSetupApplication(ports(w));
+    const state = await app.state(repository);
+    const record = new SetupConfigStore({ environment: w.environment }).read(repository)!;
+    // The shared record claims an installation and the custody is provider-verified,
+    // but the Executor never verified this repository installation.
+    new SetupConfigStore({ environment: w.environment }).update(repository, record.revision, {
+      app: { ...record.app!, installationId: "77" },
+    });
+    const custody = new ExecutorCredentialStore(w.environment);
+    custody.markProviderVerified(custody.current()!.generation);
+    const claimed = await app.state(repository);
+    assert.notEqual(claimed.generation.configuration, state.generation.configuration);
+    const binding = claimed.dimensions.find((item) => item.dimension === "provider-binding");
+    assert.equal(binding?.status, "unbound");
+    assert.equal(binding?.diagnostics[0]?.code, "SETUP_ISSUER_KEY_UNVERIFIED");
+    assert.equal(
+      claimed.actions.some((item) => item.kind === "executor.bind-repository"),
+      true,
+    );
   } finally {
     w.cleanup();
   }

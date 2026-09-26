@@ -13,7 +13,13 @@ import type { AuthorizedExecution } from "../authorized-execution.js";
 import { validateIssuerRepositoryIdentity, type RepositoryIdentity } from "../github/effect-authorizer.js";
 import type { LocalAdmissionConfig } from "../local-control/config.js";
 import { LocalExecutorClient } from "../local-control/executor-client.js";
-import type { LocalExecutorEvidenceRequest } from "../local-control/executor-http.js";
+import {
+  validateLocalExecutorBranchPolicyRequest,
+  validateLocalExecutorGovernedContractRequest,
+  type LocalExecutorBranchPolicyRequest,
+  type LocalExecutorEvidenceRequest,
+  type LocalExecutorGovernedContractRequest,
+} from "../local-control/executor-http.js";
 import { validateExecutionIntent } from "../local-control/execution-intent.js";
 import {
   clearLocalRuntimeEndpoint,
@@ -32,9 +38,21 @@ import {
   admitSession,
   authorizeExecutionIntent,
   closeSession,
+  currentBranchPolicyInput,
+  currentSessionChange,
+  observeRepositoryReadiness,
+  requireActiveSessionRepository,
   type AdmissionAuthorizationOptions,
 } from "./authorization.js";
 import { LOCAL_ADMISSION_DEFAULT_PORT, LocalAdmissionError, readLocalAdmissionConfiguration } from "./setup.js";
+import {
+  runtimeFailure,
+  runtimeFailureFromError,
+  runtimeFailureHttpStatus,
+  type RuntimeFailure,
+  type RuntimeFailureReason,
+  type RuntimeFailureStage,
+} from "../runtime-contracts/runtime-failure.js";
 
 export const LOCAL_ADMISSION_STATUS_PATH = "/status" as const;
 const LOCAL_ADMISSION_HISTORICAL_PORT = 8766;
@@ -43,6 +61,9 @@ export const LOCAL_ADMISSION_HEALTH_PATH = "/health" as const;
 export const LOCAL_ADMISSION_SESSIONS_PATH = "/v1/sessions" as const;
 export const LOCAL_ADMISSION_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_ADMISSION_EXECUTIONS_PATH = "/v1/executions" as const;
+export const LOCAL_ADMISSION_READINESS_PATH = "/v1/readiness" as const;
+export const LOCAL_ADMISSION_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
+export const LOCAL_ADMISSION_PULL_REQUEST_CONTEXT_PATH = "/v1/pull-request-context" as const;
 export const LOCAL_ADMISSION_SESSION_ID_HEADER = "x-inari-session-id" as const;
 export const MAX_LOCAL_ADMISSION_BODY_BYTES = 1_048_576;
 
@@ -55,6 +76,8 @@ export interface AdmissionExecutorClient {
   verifyReady(): Promise<unknown>;
   resolveRepository?(repositoryNameWithOwner: string): Promise<RepositoryIdentity>;
   readEvidence(request: LocalExecutorEvidenceRequest): Promise<unknown>;
+  readBranchPolicy?(request: LocalExecutorBranchPolicyRequest): Promise<unknown>;
+  readGovernedContract?(request: LocalExecutorGovernedContractRequest): Promise<unknown>;
   execute(execution: AuthorizedExecution): Promise<unknown>;
 }
 
@@ -71,6 +94,9 @@ function authorizationOptions(options: LocalAdmissionHttpHandlerOptions): Admiss
   return {
     runtimeAuthority: options.runtimeAuthority,
     readEvidence: (request) => options.executor.readEvidence(request),
+    ...(options.executor.readBranchPolicy === undefined
+      ? {}
+      : { readBranchPolicy: options.executor.readBranchPolicy.bind(options.executor) }),
     ...(options.environment === undefined ? {} : { environment: options.environment }),
     ...(options.now === undefined ? {} : { now: options.now }),
   };
@@ -89,6 +115,29 @@ function json(status: number, body: unknown): Response {
     status,
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
   });
+}
+
+/**
+ * Bounded denial envelope (#1180): the existing endpoint code and fixed
+ * message plus the catalog diagnostic naming the owner stage and reason.
+ */
+function denied(code: string, message: string, failure: RuntimeFailure): Response {
+  return json(runtimeFailureHttpStatus(failure), { ok: false, error: { code, message, failure } });
+}
+
+function deniedFrom(
+  error: unknown,
+  code: string,
+  message: string,
+  stage: RuntimeFailureStage,
+  fallback: RuntimeFailureReason,
+): Response {
+  return denied(code, message, runtimeFailureFromError(error, stage, fallback));
+}
+
+/** Executor surface missing in this composition: a bounded owner-unavailable failure. */
+class LocalExecutorUnavailable extends Error {
+  readonly code = "EXECUTOR_UNAVAILABLE";
 }
 
 function jsonContentType(value: string | null): boolean {
@@ -204,7 +253,11 @@ function createLocalAdmissionHttpHandler(
           validation.value.nameWithOwner.toLocaleLowerCase("en-US") !==
             parsed.value.repositoryNameWithOwner.toLocaleLowerCase("en-US")
         ) {
-          throw new Error();
+          return denied(
+            "REPOSITORY_UNAVAILABLE",
+            "Repository identity could not be resolved.",
+            runtimeFailure("repository-resolution", "ADMISSION_REPOSITORY_MISMATCH"),
+          );
         }
         return json(200, {
           ok: true,
@@ -214,10 +267,116 @@ function createLocalAdmissionHttpHandler(
             repositoryNameWithOwner: validation.value.nameWithOwner,
           },
         });
-      } catch {
-        return json(503, {
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "REPOSITORY_UNAVAILABLE",
+          "Repository identity could not be resolved.",
+          "repository-resolution",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
+      }
+    }
+    if (url.pathname === LOCAL_ADMISSION_PULL_REQUEST_CONTEXT_PATH) {
+      if (request.method !== "POST")
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      const parsed = await bodyJson(request);
+      if (parsed.response !== undefined) return parsed.response;
+      const contractRequest = validateLocalExecutorGovernedContractRequest(parsed.value);
+      const sessionId = request.headers.get(LOCAL_ADMISSION_SESSION_ID_HEADER);
+      if (contractRequest === undefined || sessionId === null || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId))
+        return json(400, {
           ok: false,
-          error: { code: "REPOSITORY_UNAVAILABLE", message: "Repository identity could not be resolved." },
+          error: { code: "INVALID_PULL_REQUEST_CONTEXT_REQUEST", message: "Pull request context request is invalid." },
+        });
+      try {
+        const authorization = authorizationOptions(options);
+        const binding = requireActiveSessionRepository(sessionId, contractRequest.repository, authorization);
+        if (options.executor.readGovernedContract === undefined) throw new LocalExecutorUnavailable();
+        const contract = await options.executor.readGovernedContract(contractRequest);
+        const change = await currentSessionChange(binding, authorization);
+        return json(200, { ok: true, contract, change });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "PULL_REQUEST_CONTEXT_UNAVAILABLE",
+          "The Session pull request context is unavailable.",
+          "implementation-admission",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
+      }
+    }
+    if (url.pathname === LOCAL_ADMISSION_BRANCH_POLICY_PATH) {
+      if (request.method !== "POST")
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      const parsed = await bodyJson(request);
+      if (parsed.response !== undefined) return parsed.response;
+      const policyRequest = validateLocalExecutorBranchPolicyRequest(parsed.value);
+      if (policyRequest === undefined)
+        return json(400, {
+          ok: false,
+          error: { code: "INVALID_BRANCH_POLICY_REQUEST", message: "Branch policy request is invalid." },
+        });
+      try {
+        const input = await currentBranchPolicyInput(
+          policyRequest.repository,
+          policyRequest.implementation,
+          authorizationOptions(options),
+          "session-registration",
+        );
+        return json(200, { ok: true, branchPolicy: { version: 1, kind: "local-branch-policy-input", ...input } });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "BRANCH_POLICY_UNAVAILABLE",
+          "Current branch policy is unavailable.",
+          "session-registration",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
+      }
+    }
+    if (url.pathname === LOCAL_ADMISSION_READINESS_PATH) {
+      if (request.method !== "POST")
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      const parsed = await bodyJson(request);
+      if (parsed.response !== undefined) return parsed.response;
+      const value = parsed.value;
+      const repository = isRecord(value) && isRecord(value.repository) ? value.repository : undefined;
+      const authority = isRecord(value) && isRecord(value.authority) ? value.authority : undefined;
+      if (
+        !isRecord(value) ||
+        !exactKeys(value, ["version", "repository", "authority"]) ||
+        value.version !== LOCAL_ADMISSION_PROTOCOL_VERSION ||
+        repository === undefined ||
+        !exactKeys(repository, ["id", "name"]) ||
+        typeof repository.id !== "string" ||
+        !/^[1-9][0-9]{0,19}$/u.test(repository.id) ||
+        typeof repository.name !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(repository.name) ||
+        authority === undefined ||
+        !exactKeys(authority, ["id", "publicKeyFingerprint"]) ||
+        typeof authority.id !== "string" ||
+        typeof authority.publicKeyFingerprint !== "string" ||
+        !/^sha256:[0-9a-f]{64}$/u.test(authority.publicKeyFingerprint)
+      )
+        return json(400, {
+          ok: false,
+          error: { code: "INVALID_READINESS_REQUEST", message: "Readiness request is invalid." },
+        });
+      try {
+        await observeRepositoryReadiness(
+          { id: repository.id, name: repository.name },
+          { id: authority.id, publicKeyFingerprint: authority.publicKeyFingerprint },
+          authorizationOptions(options),
+        );
+        return json(200, { ok: true, component: "admission", admissionId: options.admissionId, readiness: "ready" });
+      } catch (error: unknown) {
+        return json(200, {
+          ok: true,
+          component: "admission",
+          admissionId: options.admissionId,
+          readiness: "not-ready",
+          failure: runtimeFailureFromError(error, "trust-evidence", "RUNTIME_INTERNAL_FAILURE"),
         });
       }
     }
@@ -233,12 +392,22 @@ function createLocalAdmissionHttpHandler(
         });
       const validation = validateLocalSessionBinding(parsed.value.binding);
       if (!validation.valid || validation.value === undefined)
-        return json(403, { ok: false, error: { code: "SESSION_DENIED", message: "Session binding was denied." } });
+        return denied(
+          "SESSION_DENIED",
+          "Session binding was denied.",
+          runtimeFailure("session-registration", "ADMISSION_SESSION_BINDING_INVALID"),
+        );
       try {
         const session = await admitSession(validation.value, authorizationOptions(options));
         return json(201, { ok: true, session: { id: session.id, status: session.status, exp: session.exp } });
-      } catch {
-        return json(403, { ok: false, error: { code: "SESSION_DENIED", message: "Session binding was denied." } });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "SESSION_DENIED",
+          "Session binding was denied.",
+          "session-registration",
+          "RUNTIME_INTERNAL_FAILURE",
+        );
       }
     }
     if (url.pathname.startsWith(`${LOCAL_ADMISSION_SESSIONS_PATH}/`)) {
@@ -256,12 +425,22 @@ function createLocalAdmissionHttpHandler(
         });
       const validation = validateLocalSessionBinding(parsed.value.binding);
       if (!validation.valid || validation.value === undefined || validation.value.sessionId !== sessionId)
-        return json(403, { ok: false, error: { code: "SESSION_DENIED", message: "Session close was denied." } });
+        return denied(
+          "SESSION_DENIED",
+          "Session close was denied.",
+          runtimeFailure("session-registration", "ADMISSION_SESSION_BINDING_INVALID"),
+        );
       try {
         const session = await closeSession(validation.value, authorizationOptions(options));
         return json(200, { ok: true, session: { id: session.id, status: session.status } });
-      } catch {
-        return json(403, { ok: false, error: { code: "SESSION_DENIED", message: "Session close was denied." } });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "SESSION_DENIED",
+          "Session close was denied.",
+          "session-registration",
+          "RUNTIME_INTERNAL_FAILURE",
+        );
       }
     }
     if (url.pathname === LOCAL_ADMISSION_EXECUTIONS_PATH) {
@@ -281,12 +460,29 @@ function createLocalAdmissionHttpHandler(
           ok: false,
           error: { code: "INVALID_SESSION_SELECTOR", message: "A bounded Session selector header is required." },
         });
+      let execution: AuthorizedExecution;
       try {
-        const execution = await authorizeExecutionIntent(validation.intent, sessionId, authorizationOptions(options));
+        execution = await authorizeExecutionIntent(validation.intent, sessionId, authorizationOptions(options));
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "ADMISSION_DENIED",
+          "Execution was denied.",
+          "implementation-admission",
+          "RUNTIME_INTERNAL_FAILURE",
+        );
+      }
+      try {
         const result = await options.executor.execute(execution);
         return json(200, { ok: true, result });
-      } catch {
-        return json(403, { ok: false, error: { code: "ADMISSION_DENIED", message: "Execution was denied." } });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "EXECUTION_FAILED",
+          "Authorized execution failed.",
+          "provider-execution",
+          "EXECUTOR_EXECUTION_FAILED",
+        );
       }
     }
     return json(404, { ok: false, error: { code: "NOT_FOUND", message: "The requested path is not implemented." } });
@@ -434,6 +630,8 @@ export async function startConfiguredLocalAdmission(
     verifyReady: () => discoveredExecutor().verifyReady(),
     resolveRepository: (repositoryNameWithOwner) => discoveredExecutor().resolveRepository(repositoryNameWithOwner),
     readEvidence: (request) => discoveredExecutor().readEvidence(request),
+    readBranchPolicy: (request) => discoveredExecutor().readBranchPolicy(request),
+    readGovernedContract: (request) => discoveredExecutor().readGovernedContract(request),
     execute: (execution) => discoveredExecutor().execute(execution),
   };
   try {

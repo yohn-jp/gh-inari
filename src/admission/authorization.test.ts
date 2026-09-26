@@ -48,7 +48,11 @@ test("policy-bound Session admission requires matching current generation and br
       target: { repository: { repositoryHost: "github.com", repositoryId: REPOSITORY_ID }, implementation: ISSUE },
       observedGeneration: generation,
       observedBranch: "work/375-session",
-      naming: { slug: "session" },
+      binding: {
+        repository: { repositoryHost: "github.com", repositoryId: REPOSITORY_ID },
+        implementation: ISSUE,
+        branch: "work/375-session",
+      },
     };
     const branchObservation = observeLocalBranch(branchInput);
     const session = createLocalSessionBinding({
@@ -63,19 +67,37 @@ test("policy-bound Session admission requires matching current generation and br
       branchObservation,
     });
     const base = options(environment, fixture.authority, () => trustEvidence(fixture.authority));
+    // #1179: Admission reads the current policy from the owner; a caller-supplied observation is never accepted.
+    const reader = (input: Omit<typeof branchInput, "observedBranch">) => ({
+      readBranchPolicy: async () => ({ version: 1, kind: "local-branch-policy-input", ...input }),
+    });
+    const { observedBranch: _observed, ...current } = branchInput;
     await assert.rejects(admitSession(session, base), /observation is missing/u);
     await assert.rejects(
       admitSession(session, {
         ...base,
-        branchObservation: { ...branchInput, observedGeneration: { ref: "trunk", treeSha: "b".repeat(40) } },
+        ...reader({ ...current, observedGeneration: { ref: "trunk", treeSha: "b".repeat(40) } }),
       }),
       /invalid or stale/u,
     );
+    const moved = createRepositoryBranchPolicy({
+      generation: { ...acquired.policy.generation, treeSha: "c".repeat(40) },
+      rule: acquired.policy.rule,
+    });
+    assert.equal(moved.status, "available");
+    if (moved.status !== "available") return;
     await assert.rejects(
-      admitSession(session, { ...base, branchObservation: { ...branchInput, observedBranch: "work/376-session" } }),
+      admitSession(session, {
+        ...base,
+        ...reader({ ...current, policy: moved.policy, observedGeneration: { ref: "trunk", treeSha: "c".repeat(40) } }),
+      }),
+      /contradicts Session binding/u,
+    );
+    await assert.rejects(
+      admitSession(session, { ...base, readBranchPolicy: async () => ({ version: 1, kind: "forged" }) }),
       /invalid or stale/u,
     );
-    assert.equal((await admitSession(session, { ...base, branchObservation: branchInput })).status, "active");
+    assert.equal((await admitSession(session, { ...base, ...reader(current) })).status, "active");
   });
 });
 

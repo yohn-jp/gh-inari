@@ -242,7 +242,7 @@
     "setup-console:build": "node scripts/build-setup-console.mjs",
     "test:setup-browser": "pnpm run build && node scripts/run-setup-browser-tests.mjs",
     "start": "node dist/index.js",
-    "test": "node --test --import tsx --test-skip-pattern='packed installed CLI certifies|packed shared setup publishes|#1122 certifies the packed installed CLI|packed setup console certifies real Chromium controls|packed browser recovers' \"src/*.test.ts\" \"src/**/*.test.ts\" \"apps/setup-console/*.test.ts\" \"test/**/*.test.mjs\"",
+    "test": "node --test --import tsx --test-skip-pattern='packed installed CLI certifies|packed shared setup publishes|#1122 certifies the packed installed CLI|packed setup console certifies real Chromium controls|packed browser recovers|#1184 clean: init|#1184 legacy-resume' \"src/*.test.ts\" \"src/**/*.test.ts\" \"apps/setup-console/*.test.ts\" \"test/**/*.test.mjs\"",
     "certify:setup": "wireit",
     "typecheck": "tsc --noEmit",
     "lint": "eslint 'src/**/*.ts' 'scripts/**/*.mjs' 'test/**/*.mjs' 'eslint.config.mjs'",
@@ -359,7 +359,7 @@
       ]
     },
     "certify:setup": {
-      "command": "node --test --import tsx test/setup-application-certification.test.mjs test/local-execution-plane-certification.test.mjs test/setup-browser-certification.test.mjs",
+      "command": "node --test --import tsx test/setup-application-certification.test.mjs test/local-execution-plane-certification.test.mjs test/setup-browser-certification.test.mjs test/local-runtime-golden-path-certification.test.mjs",
       "dependencies": [
         "verify:package"
       ]

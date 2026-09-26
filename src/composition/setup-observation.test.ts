@@ -8,6 +8,7 @@ import { createDelegatorRecord } from "../agent-authority/delegator-operations.j
 import { generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
 import type { Delegator } from "../agent-authority/delegator.js";
 import { projectSetupState } from "../application/setup/index.js";
+import { validateLocalAdmissionConfig, writeLocalJson } from "../local-control/config.js";
 import { publishLocalRuntimeEndpoint } from "../local-control/runtime-discovery.js";
 import { findSetupSecretMaterial, type SetupGeneration } from "../runtime-contracts/index.js";
 import { SetupConfigStore } from "./setup-config-store.js";
@@ -142,30 +143,113 @@ test("canonical trust must match the adopted Authority exactly", () => {
   assert.equal(compareCanonicalTrust([{ ...adopted, notBefore: "2026-02-01T00:00:00.000Z" }], adopted), "conflict");
   assert.equal(compareCanonicalTrust([{ ...adopted, id: "runtime-other" }], adopted), "conflict");
   assert.equal(compareCanonicalTrust([adopted, adopted], adopted), "conflict");
+  // #1182: notAfter, lifecycle status and the validity window use the canonical Delegator rules.
+  assert.equal(compareCanonicalTrust([{ ...adopted, notAfter: "2027-01-01T00:00:00.000Z" }], adopted), "conflict");
+  assert.equal(compareCanonicalTrust([{ ...adopted, status: "disabled" }], adopted), "conflict");
+  const bounded = { ...adopted, notAfter: "2026-06-01T00:00:00.000Z" };
+  assert.equal(compareCanonicalTrust([bounded], bounded, new Date("2026-05-01T00:00:00.000Z")), "trusted");
+  assert.equal(compareCanonicalTrust([bounded], bounded, new Date("2026-07-01T00:00:00.000Z")), "inactive");
+  assert.equal(compareCanonicalTrust([adopted], adopted, new Date("2025-12-01T00:00:00.000Z")), "inactive");
 });
 
-test("Admission readiness comes from the announced Admission of the configured identity", async () => {
+test("Admission readiness is repository-bound owner evidence, never process health", async () => {
   const { root, environment } = home();
   const admissionId = "adm_abcdefghijklmnopqrstuvwx";
-  let readiness = "ready";
-  const server = createServer((_request, response) => {
-    response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ ok: true, component: "admission", admissionId, readiness }));
+  const authority = { id: "runtime-test", publicKeyFingerprint: `sha256:${"a".repeat(64)}` };
+  let readiness: Record<string, unknown> = { readiness: "ready" };
+  const requests: { path: string; body: unknown }[] = [];
+  const server = createServer((request, response) => {
+    let text = "";
+    request.setEncoding("utf8").on("data", (chunk) => (text += chunk));
+    request.on("end", () => {
+      requests.push({ path: request.url ?? "", body: text.length === 0 ? undefined : JSON.parse(text) });
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/health") {
+        response.end(JSON.stringify({ ok: true, component: "admission", admissionId, readiness: "ready" }));
+        return;
+      }
+      response.end(JSON.stringify({ ok: true, component: "admission", admissionId, ...readiness }));
+    });
   });
   try {
     const port = createAdmissionSessionReadiness({ environment });
     const generation = { repository, configuration: "cfg-1" };
-    assert.equal((await port.observe(generation, admissionId)).status, "not-ready");
+    const expected = { admissionId, authority };
+    assert.equal((await port.observe(generation, expected)).status, "not-ready");
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     assert.ok(address !== null && typeof address === "object");
     publishLocalRuntimeEndpoint("admission", admissionId, address.port, environment);
-    assert.equal((await port.observe(generation, admissionId)).status, "ready");
-    readiness = "starting";
-    assert.equal((await port.observe(generation, admissionId)).status, "not-ready");
-    await assert.rejects(port.observe(generation, "adm_zyxwvutsrqponmlkjihgfedc"));
+    assert.equal((await port.observe(generation, expected)).status, "ready");
+    assert.deepEqual(requests.at(-1), {
+      path: "/v1/readiness",
+      body: { version: 1, repository: { id: repository.repositoryId, name: repository.nameWithOwner }, authority },
+    });
+    // /health stays ready, but the repository evidence is not: readiness follows the owner evidence.
+    readiness = {
+      readiness: "not-ready",
+      failure: {
+        stage: "trust-evidence",
+        reason: "RUNTIME_AUTHORITY_NOT_FOUND",
+        category: "trust",
+        message: "The Runtime Authority is not registered on the repository protected ref.",
+      },
+    };
+    const notReady = await port.observe(generation, expected);
+    assert.equal(notReady.status, "not-ready");
+    assert.equal(notReady.diagnostics[0]?.code, "RUNTIME_AUTHORITY_NOT_FOUND");
+    readiness = { readiness: "starting" };
+    await assert.rejects(port.observe(generation, expected));
+    await assert.rejects(port.observe(generation, { admissionId: "adm_zyxwvutsrqponmlkjihgfedc", authority }));
+    assert.equal(
+      requests.some((item) => item.path === "/health"),
+      false,
+    );
   } finally {
     server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#1182 readiness that raced a setup configuration change is never adopted for the old generation", async () => {
+  const { root, environment } = home();
+  try {
+    const admissionId = "adm_abcdefghijklmnopqrstuvwx";
+    writeLocalJson(
+      "admission",
+      "config.json",
+      {
+        version: 1,
+        id: admissionId,
+        listen: { host: "127.0.0.1", port: 0 },
+        executor: { id: "exec_abcdefghijklmnopqrstuvwx" },
+      },
+      validateLocalAdmissionConfig,
+      environment,
+    );
+    writeLocalJson("admission", "runtime-authority.json", record(), (value) => value as Delegator, environment);
+    let raceConfiguration = false;
+    const sessionReadiness = {
+      observe: async () => {
+        if (raceConfiguration) new SetupConfigStore({ environment }).update(repository, 0, { app: { appId: "4242" } });
+        return { status: "ready" as const, observedAt: new Date().toISOString(), diagnostics: [] };
+      },
+    };
+    const steady = await observeSetup(repository, { environment, provider, sessionReadiness });
+    assert.equal(steady.sessionReadiness.status, "ready");
+
+    raceConfiguration = true;
+    const raced = await observeSetup(repository, { environment, provider, sessionReadiness });
+    assert.equal(raced.sessionReadiness.status, "unknown");
+    assert.equal(raced.sessionReadiness.diagnostics[0]?.code, "SETUP_SESSION_READINESS_STALE");
+    // The generation reported is the one observed at the start, and it is now stale.
+    const current = await observeSetup(repository, {
+      environment,
+      provider,
+      sessionReadiness: { observe: sessionReadiness.observe },
+    });
+    assert.notEqual(current.generation.configuration, raced.generation.configuration);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

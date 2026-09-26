@@ -540,17 +540,22 @@ test(
         NODE_OPTIONS: `--import=${preloadFile}`,
       };
 
-      const initialState = jsonOutput(command(["init", "--json"], { cwd: workspace, env: baseEnv }), "init");
-      assert.equal(initialState.applicationState.status, "incomplete");
-      assert.equal(initialState.applicationState.nextAction.stepId, "app-user-authorization");
-      assert.deepEqual(initialState.applicationState.nextAction.commands, ["inari setup --endpoint <endpoint-url>"]);
-      assert.equal(initialState.applicationState.provider.credentialConfigured, false);
-      assert.match(initialState.applicationState.provider.credentialPath, /app-user-credential\.json$/u);
-      assert.ok(initialState.applicationState.steps.some((step) => step.syntax.includes("authority bootstrap")));
-      assert.ok(initialState.applicationState.steps.some((step) => step.syntax.includes("admission setup --from")));
+      const initialState = jsonOutput(
+        command(["init", "--json", "--repository-id", repositoryId], { cwd: workspace, env: baseEnv }),
+        "init",
+      );
+      // #1065: init renders the one canonical Setup Application state; the legacy
+      // local application-state projector is not an operator surface anymore.
+      assert.equal("applicationState" in initialState, false);
+      assert.equal(initialState.setup.stage, "clean");
+      assert.equal(initialState.setup.nextAction.kind, "perform");
       assert.equal(
-        initialState.applicationState.sessionStartCommand,
-        "inari session start --issue <number> -- <command...>",
+        initialState.setup.actions.find((action) => action.id === initialState.setup.nextAction.actionId)?.kind,
+        "executor.configure",
+      );
+      assert.equal(
+        initialState.sessionStart.command,
+        "inari session start --issue <implementation-number> -- <command...>",
       );
       const authority = jsonOutput(
         command(["authority", "setup", "--json"], { cwd: workspace, env: baseEnv }),
@@ -619,13 +624,18 @@ test(
         );
         assert.equal(referenceOnlySetup.stdout.includes(invalidKeySentinel), false);
         const referenceOnlyState = jsonOutput(
-          command(["init", "--json"], {
+          command(["init", "--json", "--repository-id", repositoryId], {
             cwd: workspace,
             env: { ...operatorEnv, INARI_GITHUB_APP_PRIVATE_KEY_FILE: keyFile },
           }),
           `init with ${label} Issuer key reference`,
         );
-        assert.equal(referenceOnlyState.applicationState.provider.issuerKey, "configured");
+        // An exported key reference is never managed custody; init guides explicit enrollment.
+        assert.ok(
+          referenceOnlyState.setup.dimensions
+            .find((item) => item.dimension === "configuration")
+            .diagnostics.some((item) => item.code === "SETUP_EXECUTOR_EXTERNAL_KEY_REFERENCE"),
+        );
         assert.equal(JSON.stringify(referenceOnlyState).includes(invalidKeySentinel), false);
       }
       const executorSetup = jsonOutput(
@@ -641,65 +651,35 @@ test(
         "admission setup",
       );
       const configuredState = jsonOutput(
-        command(["init", "--json"], { cwd: workspace, env: operatorEnv }),
+        command(["init", "--json", "--repository-id", repositoryId], { cwd: workspace, env: operatorEnv }),
         "configured init",
       );
-      assert.equal(configuredState.applicationState.provider.issuerKey, "configured");
-      assert.equal(configuredState.applicationState.status, "configured");
-      assert.equal(configuredState.applicationState.setupComplete, true);
-      assert.ok(configuredState.applicationState.steps.every((step) => step.status === "ready"));
+      // #1065/#1178: separately configured component files and an exported Issuer key
+      // reference never read as a ready setup. Trust and Session readiness come only
+      // from their owners, and the external key reference is guided to enrollment.
+      const dimensionOf = (state, name) => state.setup.dimensions.find((item) => item.dimension === name);
+      assert.notEqual(configuredState.setup.stage, "ready");
+      assert.notEqual(dimensionOf(configuredState, "repository-trust").status, "trusted");
+      assert.notEqual(dimensionOf(configuredState, "session-readiness").status, "ready");
+      assert.ok(
+        dimensionOf(configuredState, "configuration").diagnostics.some(
+          (item) => item.code === "SETUP_EXECUTOR_EXTERNAL_KEY_REFERENCE",
+        ),
+      );
 
-      // #1065: the completed local setup path points at the canonical
-      // `inari runtime supervise` Supervisor, not separate `executor serve` /
-      // `admission serve` commands, and it does not project Session start as
-      // executable independent of Issue/Change branch selection.
-      assert.deepEqual(configuredState.applicationState.runtime.commands, ["inari runtime supervise"]);
-      assert.equal(configuredState.applicationState.changeBranch.status, "ready");
-      assert.equal(configuredState.applicationState.changeBranch.issue, issue);
-      assert.equal(configuredState.applicationState.changeBranch.branch, branch);
-      assert.deepEqual(configuredState.applicationState.nextAction, {
-        stepId: "start-runtime",
-        commands: ["inari runtime supervise"],
-        detail: `Run the local Runtime Supervisor in a separate foreground terminal, then launch the governed child for Issue #${issue} on ${branch} with the Session command below.`,
-      });
-
-      // The same real setup, read from a workspace with no Issue-bound Change
-      // branch checked out, must represent that explicitly rather than
-      // projecting Session start as the next action.
+      // Session start is never projected as executable from a branch name alone:
+      // it needs a governed Implementation on its exact contract branch.
       const unselectedWorkspace = path.join(directory, "workspace-unselected");
       await mkdir(unselectedWorkspace);
       git(unselectedWorkspace, "init", "-q");
       git(unselectedWorkspace, "remote", "add", "origin", "https://github.com/cert-owner/renamed-project.git");
-      git(unselectedWorkspace, "checkout", "-q", "-b", "main");
-      const unselectedState = jsonOutput(
-        command(["init", "--json"], { cwd: unselectedWorkspace, env: operatorEnv }),
-        "init with no Issue selected",
-      );
-      assert.equal(unselectedState.applicationState.changeBranch.status, "issue-not-selected");
-      assert.equal("command" in unselectedState.applicationState.changeBranch, false);
-      assert.equal(unselectedState.applicationState.nextAction.stepId, "change-branch");
-      assert.ok(
-        !unselectedState.applicationState.nextAction.commands.some((entry) => entry.includes("session start")),
-        "Session start was projected as executable before an Issue/Change branch was selected",
-      );
-      // #1065 review: the branch-naming placeholder pattern contains `<`, `|`,
-      // and `>` -- shell operators -- so it must never appear as its own
-      // executable entry in `nextAction.commands`, only as descriptive prose.
-      for (const entry of unselectedState.applicationState.nextAction.commands) {
-        assert.doesNotMatch(entry, /[<>|]/u, `nextAction.commands entry is not a literal shell command: ${entry}`);
-      }
-
-      // A real local checkout on a branch that is not the canonical
-      // Issue-bound Change branch must surface as a mismatch next-action
-      // state rather than only failing once `session start` is attempted.
       git(unselectedWorkspace, "checkout", "-q", "-b", "leftover-notes");
       const mismatchState = jsonOutput(
-        command(["init", "--json"], { cwd: unselectedWorkspace, env: operatorEnv }),
+        command(["init", "--json", "--repository-id", repositoryId], { cwd: unselectedWorkspace, env: operatorEnv }),
         "init on a non-canonical branch",
       );
-      assert.equal(mismatchState.applicationState.changeBranch.status, "branch-mismatch");
-      assert.equal(mismatchState.applicationState.changeBranch.branch, "leftover-notes");
-      assert.equal(mismatchState.applicationState.nextAction.stepId, "change-branch");
+      assert.equal(JSON.stringify(mismatchState.setup).includes("session start"), false);
+      assert.match(mismatchState.sessionStart.requirement, /exact contract branch/u);
 
       const issueFixture = await createIssueFixture(directory);
       const blobs = {};

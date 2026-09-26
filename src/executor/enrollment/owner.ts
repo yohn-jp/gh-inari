@@ -10,7 +10,7 @@ import {
 import { GitHubAppInstallationCredentialBroker } from "../../github/app-installation-credential-broker.js";
 import type { RepositoryIdentity } from "../../github/effect-authorizer.js";
 import { LocalRuntimeProfileStore } from "../../local-runtime-profile.js";
-import { ExecutorCredentialStore, type StoredIssuerKey } from "../credential-store.js";
+import { ExecutorCredentialStore, type StoredIssuerBinding, type StoredIssuerKey } from "../credential-store.js";
 
 export interface ExecutorEnrollmentCapability {
   readonly token: string;
@@ -51,7 +51,10 @@ export interface ExecutorEnrollmentOwnerOptions {
 export type ExecutorIssuerCustodyStatus = Pick<
   StoredIssuerKey,
   "configId" | "appId" | "generation" | "fingerprint" | "providerVerified"
->;
+> & {
+  /** Repository installations the current key generation was verified against (#1182). */
+  readonly bindings: readonly StoredIssuerBinding[];
+};
 
 /** Reads the current custody record without exposing key bytes or the key path. */
 export function executorIssuerCustody(environment?: NodeJS.ProcessEnv): ExecutorIssuerCustodyStatus | undefined {
@@ -64,6 +67,7 @@ export function executorIssuerCustody(environment?: NodeJS.ProcessEnv): Executor
         generation: record.generation,
         fingerprint: record.fingerprint,
         providerVerified: record.providerVerified,
+        bindings: Object.freeze((record.bindings ?? []).map((binding) => Object.freeze({ ...binding }))),
       });
 }
 
@@ -200,15 +204,21 @@ export class ExecutorEnrollmentOwner {
         grant.replacementConfirmed || latest === undefined ? grant.current : undefined,
       );
       let providerVerified = false;
+      let binding: StoredIssuerBinding | undefined;
       try {
-        providerVerified = await (this.#options.verifyProvider?.(pem.toString("utf8"), request) ??
-          this.#verifyWithBroker(pem.toString("utf8"), request));
+        if (this.#options.verifyProvider !== undefined)
+          providerVerified = await this.#options.verifyProvider(pem.toString("utf8"), request);
+        else {
+          binding = await this.#verifyWithBroker(pem.toString("utf8"), request);
+          providerVerified = binding !== undefined;
+        }
       } catch {
         /* a committed key remains stored but unverified */
       }
       if (providerVerified) {
         try {
-          this.#store.markProviderVerified(record.generation);
+          if (binding === undefined) this.#store.markProviderVerified(record.generation);
+          else this.#store.recordBinding(record.generation, binding);
         } catch {
           providerVerified = false;
         }
@@ -269,7 +279,15 @@ export class ExecutorEnrollmentOwner {
       const current = this.#store.current();
       if (current === undefined || current.configId !== this.#options.configId || current.appId !== this.#options.appId)
         throw denied();
-      if (current.providerVerified) return true;
+      const binding: StoredIssuerBinding = {
+        repositoryHost: repository.repositoryHost,
+        repositoryId: repository.repositoryId,
+        nameWithOwner: repository.nameWithOwner,
+        installationId,
+      };
+      const recorded = current.bindings?.find((item) => item.repositoryId === repository.repositoryId);
+      if (recorded !== undefined && recorded.installationId !== installationId) throw denied();
+      if (recorded !== undefined && recorded.nameWithOwner === repository.nameWithOwner) return true;
       const pem = this.#store.readKey(current).toString("utf8");
       let verified = false;
       try {
@@ -278,14 +296,15 @@ export class ExecutorEnrollmentOwner {
       } catch {
         verified = false;
       }
-      if (verified) this.#store.markProviderVerified(current.generation);
+      // The verified installation becomes the Executor's own repository binding (#1182).
+      if (verified) this.#store.recordBinding(current.generation, binding);
       return verified;
     });
     this.#pending = commit.catch(() => undefined);
     return commit;
   }
 
-  async #verifyWithBroker(pem: string, request: SecretEnrollmentRequest): Promise<boolean> {
+  async #verifyWithBroker(pem: string, request: SecretEnrollmentRequest): Promise<StoredIssuerBinding | undefined> {
     const profile = await new LocalRuntimeProfileStore({ environment: this.#options.environment }).findForRepository({
       repositoryHost: request.repository.repositoryHost,
       repositoryNameWithOwner: request.repository.nameWithOwner,
@@ -295,8 +314,15 @@ export class ExecutorEnrollmentOwner {
       profile.app.appId !== this.#options.appId ||
       profile.repository.repositoryId !== request.repository.repositoryId
     )
-      return false;
-    return this.#installationCheck(pem, request.repository, profile.app.installationId);
+      return undefined;
+    return (await this.#installationCheck(pem, request.repository, profile.app.installationId))
+      ? {
+          repositoryHost: request.repository.repositoryHost,
+          repositoryId: request.repository.repositoryId,
+          nameWithOwner: request.repository.nameWithOwner,
+          installationId: profile.app.installationId,
+        }
+      : undefined;
   }
 
   async #installationCheck(pem: string, repository: RepositoryIdentity, installationId: string): Promise<boolean> {

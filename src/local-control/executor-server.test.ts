@@ -23,6 +23,11 @@ import { assertTrustedExecution, type RepositoryIdentity } from "../github/effec
 import type { PrPublicationRequest } from "../pr-publication.js";
 import { parsePullRequestTemplate } from "../pull-request-template.js";
 import { saveLocalRuntimeProfile } from "../local-runtime-profile.js";
+import { ExecutorCredentialStore } from "../executor/credential-store.js";
+import { issuerExecutionEnvironment } from "../executor/enrollment/issuer-reference.js";
+import { readLocalExecutorBranchPolicy, readLocalExecutorEvidence } from "../executor/execution.js";
+import { observeLocalBranch, validateLocalBranchPolicyInput } from "../cli/runtime/branch-observation.js";
+import { renderImplementationIssueBody } from "../implementation-contract.js";
 import {
   executeLocalAuthorizedExecution,
   LocalExecutorError,
@@ -362,6 +367,9 @@ function providerFetch(
         title: CHANGE_TITLE,
         state: "open",
         body: options.issueBody ?? "A bounded Change fixture body.",
+        html_url: `https://github.com/acme/inari/issues/${ISSUE}`,
+        labels: [],
+        assignees: [],
       });
     }
     if (
@@ -610,6 +618,34 @@ test("Executor setup provisions stable secret-free identity from Issuer App prer
     assert.equal(persisted.includes(ISSUER_PRIVATE_KEY_PEM.split("\n")[1] as string), false);
     assert.equal(persisted.includes("PRIVATE KEY"), false);
     assert.equal(persisted.includes("app-user-credential"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1178 Executor setup converges on managed custody without App ID or key exports in a fresh shell", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const legacy = { ...environment };
+    await configureIssuer(root, legacy);
+    legacy.INARI_GITHUB_APP_ID = APP.appId;
+    const external = await setupLocalExecutor(legacy);
+    assert.equal(external.issuerCustody, "external-reference");
+    // Explicit, non-destructive enrollment into the existing Executor custody owner.
+    const store = new ExecutorCredentialStore(environment);
+    const { record } = store.save(external.config.id, APP.appId, Buffer.from(ISSUER_PRIVATE_KEY_PEM));
+    store.markProviderVerified(record.generation);
+    const fresh = { INARI_CONFIG_HOME: environment.INARI_CONFIG_HOME };
+    const managed = await setupLocalExecutor(fresh);
+    assert.equal(managed.issuerCustody, "managed");
+    assert.equal(managed.config.id, external.config.id);
+    const input = issuerExecutionEnvironment(managed.config.id, fresh);
+    assert.equal(input.INARI_GITHUB_APP_ID, APP.appId);
+    assert.equal(input.INARI_GITHUB_APP_PRIVATE_KEY_FILE, store.keyPath(record));
+    await assert.rejects(
+      setupLocalExecutor({ ...fresh, INARI_GITHUB_APP_ID: "999" }),
+      (error: unknown) => (error as { code?: unknown }).code === "EXECUTOR_ISSUER_BINDING_CONFLICT",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -956,6 +992,157 @@ test("Local Executor production composition executes branch.advance through cano
       afterOid: NEW_HEAD,
       force: false,
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1182 the Executor executes from its own verified repository binding without a legacy Runtime profile", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  const provider = providerFetch({ change: "absent" });
+  try {
+    const store = new ExecutorCredentialStore(environment);
+    const { record } = store.save("exec_1234567890123456", APP.appId, Buffer.from(ISSUER_PRIVATE_KEY_PEM));
+    store.recordBinding(record.generation, {
+      repositoryHost: REPOSITORY.repositoryHost,
+      repositoryId: REPOSITORY.repositoryId,
+      nameWithOwner: REPOSITORY.nameWithOwner,
+      installationId: APP.installationId,
+    });
+    // The fresh Executor input comes only from managed custody: no App ID or key export.
+    const executionEnvironment = issuerExecutionEnvironment("exec_1234567890123456", environment);
+    const result = await withProviderFetch(provider.fetch, () =>
+      executeLocalAuthorizedExecution(changeExecution("show"), executionEnvironment),
+    );
+    assert.equal(result.status, "succeeded", JSON.stringify(result));
+    assert.ok(
+      provider.calls.some((call) => call.url.pathname === `/app/installations/${APP.installationId}/access_tokens`),
+    );
+
+    // A legacy profile naming another installation is a half-migrated state, never a silent preference.
+    await saveLocalRuntimeProfile(
+      {
+        version: 1,
+        state: "ready",
+        endpoint: "https://endpoint.example.test",
+        relayUrl: "wss://endpoint.example.test/relay",
+        repository: {
+          repositoryHost: REPOSITORY.repositoryHost,
+          repositoryId: REPOSITORY.repositoryId,
+          repositoryNameWithOwner: REPOSITORY.nameWithOwner,
+        },
+        app: { appId: APP.appId, installationId: "999" },
+        authority: {
+          authorityId: "executor-production-test",
+          publicKeyFingerprint: `sha256:${"0".repeat(64)}`,
+          privateKeyPath: path.join(root, "authority.pem"),
+        },
+      },
+      { environment },
+    );
+    const inconsistent = providerFetch();
+    await assert.rejects(
+      withProviderFetch(inconsistent.fetch, () =>
+        executeLocalAuthorizedExecution(branchExecution(), executionEnvironment),
+      ),
+      (error: unknown) => (error as { code?: unknown }).code === "EXECUTOR_REPOSITORY_BINDING_INCONSISTENT",
+    );
+    assert.deepEqual(inconsistent.calls, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1179 the Executor reads the repository branch policy and exact Implementation branch as public input", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  const branch = "story/1026-alternative-policy";
+  const policy = `version: 1\nsections: []\nbranch:\n  pattern: "^story/[0-9]+-[a-z0-9-]+$"\n`;
+  const policyArtifact = { path: ".github/inari/pr-policy.yml", sha: "3".repeat(40), content: policy };
+  const repository = { repositoryHost: REPOSITORY.repositoryHost, repositoryId: REPOSITORY.repositoryId };
+  const implementationBody = renderImplementationIssueBody({
+    version: 1,
+    kind: "implementation",
+    repository: { ...repository, repository: REPOSITORY.nameWithOwner },
+    sources: [{ ...repository, repository: REPOSITORY.nameWithOwner, number: ISSUE }],
+    objective: "Read the repository branch policy through the Executor.",
+    nonGoals: ["Fixed grammar."],
+    architecture: {
+      decision: "Owner-read policy.",
+      affectedComponents: ["Executor"],
+      invariants: ["No fixed grammar."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/**"], create: ["src/**"], delete: [], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+    verification: {
+      acceptanceCriteria: ["Policy is read."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: {
+      baseBranch: "main",
+      baseRevision: "a".repeat(40),
+      baseFreshness: "a".repeat(40),
+      branch,
+      dependencies: [],
+    },
+  });
+  try {
+    await configureIssuer(root, environment);
+    environment.INARI_GITHUB_APP_ID = APP.appId;
+    const request = {
+      version: 1 as const,
+      repository: { id: REPOSITORY.repositoryId, name: REPOSITORY.nameWithOwner },
+      implementation: ISSUE,
+    };
+    const provider = providerFetch({ issueBody: implementationBody, repositoryArtifacts: [policyArtifact] });
+    const value = await withProviderFetch(provider.fetch, () => readLocalExecutorBranchPolicy(request, environment));
+    assert.equal(JSON.stringify(value).includes(INSTALLATION_TOKEN), false);
+    const input = validateLocalBranchPolicyInput(value);
+    assert.ok(input, JSON.stringify(value));
+    assert.equal(input.policy.rule?.pattern, "^story/[0-9]+-[a-z0-9-]+$");
+    assert.equal(input.binding?.branch, branch);
+    assert.equal(observeLocalBranch({ ...input, observedBranch: branch }).expectedBranch, branch);
+    assert.throws(() => observeLocalBranch({ ...input, observedBranch: "feat/1026-alternative-policy" }));
+    assert.deepEqual(providerMutations(provider.calls), []);
+
+    // A Source Issue body is not an Implementation contract: bounded denial, no fixed-grammar guess.
+    const source = providerFetch({ issueBody: "A bounded Source bug report.", repositoryArtifacts: [policyArtifact] });
+    await assert.rejects(
+      withProviderFetch(source.fetch, () => readLocalExecutorBranchPolicy(request, environment)),
+      (error: unknown) => (error as { code?: unknown }).code === "EXECUTOR_IMPLEMENTATION_CONTRACT_REQUIRED",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1180 an unregistered Runtime Authority surfaces as the trust owner failure, not a provider outage", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    await configureIssuer(root, environment);
+    environment.INARI_GITHUB_APP_ID = APP.appId;
+    // The protected ref carries no Authority record for the ID a local bootstrap invented.
+    const provider = providerFetch({
+      repositoryArtifacts: [
+        { path: ".github/inari/pr-policy.yml", sha: "3".repeat(40), content: "version: 1\nsections: []\n" },
+      ],
+    });
+    await assert.rejects(
+      withProviderFetch(provider.fetch, () =>
+        readLocalExecutorEvidence(
+          {
+            version: 1,
+            repository: { id: REPOSITORY.repositoryId, name: REPOSITORY.nameWithOwner },
+            authorityId: "runtime-07b11b78ccbb94dec4573009c59a36bfc4e18defd7670781b52dced671b30e0d",
+          },
+          environment,
+        ),
+      ),
+      (error: unknown) => (error as { code?: unknown }).code === "RUNTIME_AUTHORITY_NOT_FOUND",
+    );
+    assert.deepEqual(providerMutations(provider.calls), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

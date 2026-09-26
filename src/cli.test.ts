@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
+import { mkdtempSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -339,6 +340,16 @@ function remoteSemanticArtifactResponses(
     command(JSON.stringify(artifact)),
   ];
 }
+
+/**
+ * #1183: the Change CLI invocations in this file own its Local Runtime config home.
+ * An empty, file-owned `INARI_CONFIG_HOME` keeps the operator's `inari init`
+ * state (for example a local Admission topology) out of these direct/fake
+ * executor tests; Local Admission routes are certified by explicit fixtures in
+ * `cli-core.test.ts`.
+ */
+const isolatedConfigHome = mkdtempSync(path.join(os.tmpdir(), "inari-cli-config-"));
+const isolatedEnvironment = { INARI_CONFIG_HOME: isolatedConfigHome };
 
 async function captureHelp(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
   const originalLog = console.log;
@@ -915,6 +926,7 @@ test("Change output exposes canonical Golden Path recovery for DRAFT, REVIEW, an
   try {
     for (const state of ["DRAFT", "REVIEW"] as const) {
       const exitCode = await runCli(["change", "show", "741", "--json"], {
+        environment: isolatedEnvironment,
         changeExecutor: { read: async () => projectionFor(state), execute: async () => execute(state) },
       });
       assert.equal(exitCode, 0);
@@ -923,6 +935,7 @@ test("Change output exposes canonical Golden Path recovery for DRAFT, REVIEW, an
       assert.equal(output?.recovery, null);
     }
     const recoveryExitCode = await runCli(["change", "ready", "741", "--json"], {
+      environment: isolatedEnvironment,
       changeExecutor: {
         read: async () => projectionFor("RECOVERY_REQUIRED"),
         execute: async () => execute("RECOVERY_REQUIRED"),
@@ -969,6 +982,7 @@ test("change handoff binds the owner/name locator to the repository context iden
   console.log = (line: string) => lines.push(JSON.parse(line));
   try {
     const exitCode = await runCli(["change", "handoff", "741", "--json"], {
+      environment: isolatedEnvironment,
       changeExecutor: { read: async () => projection, execute: async () => projection },
       createAdapter: () => ({ getRepositoryContext: async () => context }) as unknown as GitHubAdapter,
     });
@@ -977,6 +991,7 @@ test("change handoff binds the owner/name locator to the repository context iden
 
     lines.length = 0;
     const conflictingExitCode = await runCli(["change", "handoff", "741", "--json"], {
+      environment: isolatedEnvironment,
       changeExecutor: { read: async () => projection, execute: async () => projection },
       createAdapter: () =>
         ({ getRepositoryContext: async () => ({ ...context, repositoryId: "999" }) }) as unknown as GitHubAdapter,

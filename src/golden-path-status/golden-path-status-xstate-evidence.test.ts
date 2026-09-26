@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { projectGoldenPathRecovery } from "../golden-path-recovery.js";
 import {
@@ -63,6 +66,10 @@ function goldenPathStatus(
   );
 }
 
+// #1183: CLI invocations own an empty Local Runtime config home so the
+// operator's `inari init` state cannot route them through local Admission.
+const isolatedConfigHome = mkdtempSync(path.join(os.tmpdir(), "inari-golden-path-xstate-config-"));
+
 async function captureCliJson(
   argv: readonly string[],
   dependencies: Parameters<typeof runCli>[1],
@@ -71,7 +78,10 @@ async function captureCliJson(
   const originalLog = console.log;
   console.log = (line: string) => lines.push(line);
   try {
-    const exitCode = await runCli([...argv], dependencies);
+    const exitCode = await runCli([...argv], {
+      ...dependencies,
+      environment: { INARI_CONFIG_HOME: isolatedConfigHome, ...dependencies?.environment },
+    });
     const line = lines.at(-1);
     assert.ok(line, "CLI must emit one JSON result");
     return { exitCode, output: JSON.parse(line) as Record<string, unknown> };

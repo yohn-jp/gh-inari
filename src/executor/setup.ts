@@ -13,7 +13,7 @@ import {
   type LocalExecutorConfig,
 } from "../local-control/config.js";
 import { LocalExecutorError } from "./errors.js";
-import { requireIssuerReference } from "./issuer-input.js";
+import { localExecutorAppId, managedIssuerCustodyReference, requireIssuerReference } from "./issuer-input.js";
 
 export { LocalExecutorError } from "./errors.js";
 export { localExecutorAppId, localExecutorIssuerKeyStatus, type LocalExecutorIssuerKeyStatus } from "./issuer-input.js";
@@ -25,6 +25,12 @@ const EXECUTOR_CONFIG_PATH = "config.json";
 export interface LocalExecutorSetupResult {
   readonly config: LocalExecutorConfig;
   readonly configPath: string;
+  /**
+   * Which Issuer input the Executor will start with (#1178): managed custody,
+   * or an explicit operator reference that must be exported in every shell
+   * until it is enrolled.
+   */
+  readonly issuerCustody?: "managed" | "external-reference";
 }
 
 function requireSupportedCredentialProfile(config: LocalExecutorConfig): LocalExecutorConfig {
@@ -40,8 +46,20 @@ function requireSupportedCredentialProfile(config: LocalExecutorConfig): LocalEx
 export async function setupLocalExecutor(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LocalExecutorSetupResult> {
-  requireIssuerReference(environment);
-  return ensureLocalExecutorConfiguration(environment);
+  // #1178: managed custody satisfies the Issuer prerequisite without shell exports.
+  const managed = managedIssuerCustodyReference(environment);
+  if (managed === undefined) requireIssuerReference(environment);
+  const result = await ensureLocalExecutorConfiguration(environment);
+  if (managed !== undefined) {
+    const explicitAppId = localExecutorAppId(environment);
+    if (managed.configId !== result.config.id || (explicitAppId !== undefined && explicitAppId !== managed.appId))
+      throw new LocalExecutorError(
+        "EXECUTOR_ISSUER_BINDING_CONFLICT",
+        "The managed Executor Issuer custody is bound to another Executor configuration or App ID.",
+      );
+    return { ...result, issuerCustody: "managed" };
+  }
+  return { ...result, issuerCustody: "external-reference" };
 }
 
 /**

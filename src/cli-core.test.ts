@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createRepositoryBranchPolicy } from "./repository-branch-policy.js";
+import { compileRepositoryGovernedContract } from "./governance.js";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
@@ -96,30 +98,36 @@ async function capture(
   }
 }
 
-test("inari init declares only the local CLI topology and is idempotent", async () => {
+const INIT_REPOSITORY = ["--repository", "acme/inari", "--repository-id", "4242000"];
+
+interface InitOutput {
+  readonly ok: boolean;
+  readonly operation: string;
+  readonly configPath: string;
+  readonly config: Record<string, unknown>;
+  readonly repository?: { readonly repositoryId: string; readonly nameWithOwner: string };
+  readonly setup?: {
+    readonly stage: string;
+    readonly generation: unknown;
+    readonly nextAction: { readonly kind: string; readonly actionId?: string; readonly step?: string };
+    readonly actions: readonly { readonly id: string; readonly kind: string }[];
+    readonly dimensions: readonly {
+      readonly dimension: string;
+      readonly status: string;
+      readonly diagnostics: readonly { readonly code: string; readonly message: string }[];
+    }[];
+  };
+  readonly diagnostics?: readonly { readonly code: string }[];
+  readonly sessionStart: { readonly command: string; readonly requirement: string };
+}
+
+test("inari init declares the local CLI topology and renders the canonical Setup Application state", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {
-    const first = await capture(["init", "--json"], environment, { repositoryRoot: root });
+    const first = await capture(["init", "--json", ...INIT_REPOSITORY], environment, { repositoryRoot: root });
     assert.equal(first.exitCode, 0);
     assert.equal(first.stderr, "");
-    const firstOutput = JSON.parse(first.stdout) as {
-      readonly ok: boolean;
-      readonly operation: string;
-      readonly configPath: string;
-      readonly config: Record<string, unknown>;
-      readonly applicationState: {
-        readonly version: number;
-        readonly status: string;
-        readonly setupComplete: boolean;
-        readonly provider: { readonly credentialConfigured: boolean; readonly credentialPath: string };
-        readonly steps: readonly { readonly id: string; readonly status: string; readonly syntax: string }[];
-        readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
-        readonly runtime: { readonly status: string; readonly commands: readonly string[] };
-        readonly changeBranch: { readonly status: string; readonly detail: string };
-        readonly sessionStartCommand: string;
-      };
-      readonly runtimeStatus: { readonly executor: string; readonly admission: string; readonly overall: string };
-    };
+    const firstOutput = JSON.parse(first.stdout) as InitOutput;
     assert.equal(firstOutput.ok, true);
     assert.equal(firstOutput.operation, "init");
     assert.equal(firstOutput.configPath, path.join(environment.INARI_CONFIG_HOME as string, "cli", "config.json"));
@@ -127,80 +135,65 @@ test("inari init declares only the local CLI topology and is idempotent", async 
       version: 1,
       topology: { admission: "local", executor: "local" },
     });
-    assert.equal("endpoint" in firstOutput.config, false);
-    assert.equal("admission" in firstOutput.config, false);
-    assert.equal(firstOutput.applicationState.version, 1);
-    assert.equal(firstOutput.applicationState.status, "incomplete");
-    assert.equal(firstOutput.applicationState.setupComplete, false);
-    assert.equal(firstOutput.applicationState.provider.credentialConfigured, false);
+    // #1065: the same canonical Setup Application state `setup status` and the browser console render.
+    assert.equal(firstOutput.setup?.stage, "clean");
+    assert.equal(firstOutput.setup?.nextAction.kind, "perform");
     assert.equal(
-      firstOutput.applicationState.provider.credentialPath,
-      path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
+      firstOutput.setup?.actions.find((action) => action.id === firstOutput.setup?.nextAction.actionId)?.kind,
+      "executor.configure",
     );
-    assert.equal(firstOutput.applicationState.nextAction.stepId, "app-user-authorization");
-    assert.deepEqual(firstOutput.applicationState.nextAction.commands, ["inari setup --endpoint <endpoint-url>"]);
-    assert.deepEqual(
-      firstOutput.applicationState.steps.map((step) => step.id),
-      [
-        "cli-topology",
-        "app-user-authorization",
-        "executor-app-id",
-        "executor-issuer-key",
-        "executor",
-        "runtime-authority-key",
-        "runtime-authority-record",
-        "admission",
-      ],
-    );
-    assert.ok(firstOutput.applicationState.steps.some((step) => step.syntax.includes("authority bootstrap")));
-    assert.ok(firstOutput.applicationState.steps.some((step) => step.syntax.includes("admission setup --from")));
-    assert.deepEqual(firstOutput.applicationState.runtime.commands, ["inari runtime supervise"]);
-    assert.equal(firstOutput.applicationState.runtime.status, "not-checked");
-    assert.equal(firstOutput.applicationState.changeBranch.status, "issue-not-selected");
-    assert.equal(
-      firstOutput.applicationState.sessionStartCommand,
-      "inari session start --issue <number> -- <command...>",
-    );
-    assert.equal(firstOutput.runtimeStatus.executor, "not-running");
-    assert.equal(firstOutput.runtimeStatus.admission, "not-running");
-    assert.equal(firstOutput.runtimeStatus.overall, "not-ready");
+    // Configuration, provider binding, repository trust, health and Session readiness stay separate.
+    assert.deepEqual(firstOutput.setup?.dimensions.map((item) => item.dimension).sort(), [
+      "configuration",
+      "health",
+      "provider-binding",
+      "repository-trust",
+      "session-readiness",
+    ]);
+    const status = await capture(["setup", "status", "--json", ...INIT_REPOSITORY], environment, {
+      repositoryRoot: root,
+    });
+    assert.deepEqual(JSON.parse(status.stdout).state.generation, firstOutput.setup?.generation);
+    assert.match(firstOutput.sessionStart.requirement, /governed Implementation/u);
     assert.equal(first.stdout.includes("BEGIN PRIVATE KEY"), false);
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "admission")));
     await assert.rejects(lstat(path.join(environment.INARI_CONFIG_HOME as string, "executor")));
 
-    const human = await capture(["init"], environment, { repositoryRoot: root });
+    const human = await capture(["init", ...INIT_REPOSITORY], environment, { repositoryRoot: root });
     assert.equal(human.exitCode, 0);
-    assert.ok(human.stdout.includes("Ordered setup path:"));
-    assert.ok(human.stdout.includes("inari setup --endpoint <endpoint-url>"));
-    assert.ok(human.stdout.includes("INARI_GITHUB_APP_ID"));
-    assert.ok(human.stdout.includes("INARI_GITHUB_APP_PRIVATE_KEY_FILE"));
-    assert.ok(human.stdout.includes("inari authority bootstrap"));
-    assert.ok(human.stdout.includes("inari admission setup --from"));
-    assert.ok(human.stdout.includes("Issue/Change branch: issue-not-selected"));
-    assert.ok(!human.stdout.includes("Then launch the governed child with:"));
-    // #1065 review: the branch-naming placeholder pattern (which contains `|`
-    // and `<>`, shell pipeline/redirection operators) must appear only as
-    // descriptive prose, never as its own "Run: ..." line.
-    assert.ok(!human.stdout.split("\n").some((line) => line.startsWith("Run: git checkout")));
-    assert.ok(human.stdout.includes("Runtime readiness: executor=not-running admission=not-running overall=not-ready"));
-    assert.ok(human.stdout.includes("inari runtime console"));
+    assert.ok(human.stdout.includes("Setup: clean"));
+    assert.ok(human.stdout.includes("Configure the Executor Issuer App"));
+    assert.ok(human.stdout.includes("inari setup next"));
+    // #1179: no fixed branch grammar is projected as the repository's authority.
+    assert.ok(!human.stdout.includes("<feat|fix|docs|refactor|test|chore>"));
 
-    const second = await capture(["init", "--json"], environment, { repositoryRoot: root });
-    assert.equal(second.exitCode, 0);
-    assert.deepEqual(JSON.parse(second.stdout), firstOutput);
+    const second = await capture(["init", "--json", ...INIT_REPOSITORY], environment, { repositoryRoot: root });
+    const secondOutput = JSON.parse(second.stdout) as InitOutput;
+    assert.deepEqual(secondOutput.config, firstOutput.config);
+    assert.deepEqual(secondOutput.setup?.generation, firstOutput.setup?.generation);
     assert.deepEqual(JSON.parse(await readFile(firstOutput.configPath, "utf8")), firstOutput.config);
+
+    // Without a resolvable repository identity init still declares topology and says so.
+    const unresolved = await capture(["init", "--json"], environment, {
+      repositoryRoot: root,
+      setupFetch: (async () => new Response("", { status: 404 })) as typeof fetch,
+    });
+    assert.equal(unresolved.exitCode, 0);
+    const unresolvedOutput = JSON.parse(unresolved.stdout) as InitOutput;
+    assert.equal(unresolvedOutput.setup, undefined);
+    assert.equal(unresolvedOutput.diagnostics?.[0]?.code, "SETUP_REPOSITORY_UNRESOLVED");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("local application state reaches configured through supported CLI commands without JSON editing", async () => {
+test("#1065 local Authority record/pin and shell exports alone never report trust or Session readiness", async () => {
   const { root, environment } = await temporaryEnvironment();
   environment.INARI_GITHUB_APP_ID = "123456";
   const publicAuthorityPath = localComponentPath("authority", "runtime-authority.json", environment);
   const deps = { repositoryRoot: root };
   try {
-    assert.equal((await capture(["init", "--json"], environment, deps)).exitCode, 0);
+    assert.equal((await capture(["init", "--json", ...INIT_REPOSITORY], environment, deps)).exitCode, 0);
     const issuerPem = await configureIssuerKey(root, environment);
     await new FileAppUserCredentialStore({
       path: path.join(environment.INARI_CONFIG_HOME as string, "app-user-credential.json"),
@@ -218,6 +211,7 @@ test("local application state reaches configured through supported CLI commands 
       readonly privateKeyPath: string;
       readonly publicKeyFingerprint: string;
     };
+    // The locally invented Authority ID the old projector guided (the reported real-device state).
     const authorityId = `runtime-${authority.publicKeyFingerprint.slice("sha256:".length)}`;
     const bootstrap = await capture(
       [
@@ -242,79 +236,24 @@ test("local application state reaches configured through supported CLI commands 
     const admission = await capture(["admission", "setup", "--from", publicAuthorityPath, "--json"], environment, deps);
     assert.equal(admission.exitCode, 0, admission.stderr);
 
-    const initialized = await capture(["init", "--json"], environment, deps);
+    const initialized = await capture(["init", "--json", ...INIT_REPOSITORY], environment, deps);
     assert.equal(initialized.exitCode, 0);
-    const state = JSON.parse(initialized.stdout).applicationState as {
-      readonly status: string;
-      readonly setupComplete: boolean;
-      readonly steps: readonly { readonly id: string; readonly status: string }[];
-      readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
-      readonly changeBranch: { readonly status: string; readonly issue?: number; readonly branch?: string };
-    };
-    assert.equal(state.status, "configured", JSON.stringify(state.steps));
-    assert.equal(state.setupComplete, true);
-    assert.ok(
-      state.steps.every((step) => step.status === "ready"),
-      JSON.stringify(state.steps),
+    const state = (JSON.parse(initialized.stdout) as InitOutput).setup!;
+    const status = (dimension: string) => state.dimensions.find((item) => item.dimension === dimension);
+    assert.notEqual(status("repository-trust")?.status, "trusted");
+    assert.notEqual(status("session-readiness")?.status, "ready");
+    assert.notEqual(state.stage, "task-ready");
+    // #1178: the exported key reference is legacy input; the explicit enrollment into custody is named.
+    assert.equal(status("configuration")?.status, "unconfigured");
+    const external = status("configuration")?.diagnostics.find(
+      (item) => item.code === "SETUP_EXECUTOR_EXTERNAL_KEY_REFERENCE",
     );
-    // #1065: once setup completes the canonical next action is the Runtime
-    // Supervisor plus, since no canonical Issue-bound Change branch is
-    // checked out yet, guidance to select one -- not a bare Session-start
-    // command projected as immediately executable. The branch-naming
-    // placeholder pattern is prose (inside `detail`), never a literal
-    // "Run: ..." entry in `nextAction.commands` -- `<`, `|`, and `>` are
-    // shell operators, and copying it verbatim must not invoke a shell
-    // redirection/pipeline instead of creating a branch.
-    assert.equal(state.changeBranch.status, "issue-not-selected");
-    assert.equal("command" in state.changeBranch, false);
-    assert.deepEqual(state.nextAction, {
-      stepId: "change-branch",
-      commands: ["inari runtime supervise"],
-      detail:
-        "Run the local Runtime Supervisor in a separate foreground terminal. No Issue is selected. Check out a canonical Issue-bound Change branch (git checkout -b, naming: <feat|fix|docs|refactor|test|chore>/<issue-number>-<slug>) before Session start.",
-    });
-    for (const command of state.nextAction.commands) assert.doesNotMatch(command, /[<>|]/u);
+    assert.ok(external);
+    assert.match(external.message, /inari setup next --yes --input app-id=123456 --enrollment-file issuer-key=/u);
     assert.equal(initialized.stdout.includes("state-access-secret"), false);
     assert.equal(initialized.stdout.includes("state-refresh-secret"), false);
     assert.equal(initialized.stdout.includes("BEGIN PRIVATE KEY"), false);
     assert.equal(initialized.stdout.includes(issuerPem.split("\n")[1] as string), false);
-
-    // Checking out the canonical Issue-bound Change branch flips readiness to
-    // "ready" and the projected next action becomes the Runtime Supervisor
-    // followed directly by the exact Session-start command for that Issue.
-    execFileSync("git", ["init", "--quiet"], { cwd: root });
-    execFileSync("git", ["checkout", "-q", "-b", "feat/4242-local-state-branch-readiness"], { cwd: root });
-    const onCanonicalBranch = await capture(["init", "--json"], environment, deps);
-    assert.equal(onCanonicalBranch.exitCode, 0);
-    const readyState = JSON.parse(onCanonicalBranch.stdout).applicationState as {
-      readonly changeBranch: { readonly status: string; readonly issue?: number; readonly branch?: string };
-      readonly nextAction: { readonly stepId: string; readonly commands: readonly string[] };
-    };
-    assert.deepEqual(readyState.changeBranch, {
-      status: "ready",
-      detail: "Local branch feat/4242-local-state-branch-readiness is the canonical Change branch for Issue #4242.",
-      issue: 4242,
-      branch: "feat/4242-local-state-branch-readiness",
-    });
-    assert.deepEqual(readyState.nextAction, {
-      stepId: "start-runtime",
-      commands: ["inari runtime supervise"],
-      detail:
-        "Run the local Runtime Supervisor in a separate foreground terminal, then launch the governed child for Issue #4242 on feat/4242-local-state-branch-readiness with the Session command below.",
-    });
-
-    // A branch that is neither the default branch nor a canonical Change
-    // branch is a mismatch state, not a silent pass-through to Session start.
-    execFileSync("git", ["checkout", "-q", "-b", "scratch-notes"], { cwd: root });
-    const onMismatchedBranch = await capture(["init", "--json"], environment, deps);
-    assert.equal(onMismatchedBranch.exitCode, 0);
-    const mismatchState = JSON.parse(onMismatchedBranch.stdout).applicationState as {
-      readonly changeBranch: { readonly status: string; readonly branch?: string };
-      readonly nextAction: { readonly stepId: string };
-    };
-    assert.equal(mismatchState.changeBranch.status, "branch-mismatch");
-    assert.equal(mismatchState.changeBranch.branch, "scratch-notes");
-    assert.equal(mismatchState.nextAction.stepId, "change-branch");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -398,13 +337,9 @@ test("executor setup and serve use the Executor command contract and Executor-ow
       INARI_GITHUB_APP_PRIVATE_KEY_FILE: path.join(root, "absent-issuer-app.private-key.pem"),
     });
     assert.equal(absentKey.exitCode, 0);
-    const absentState = await capture(
-      ["init", "--json"],
-      { ...environment, INARI_GITHUB_APP_PRIVATE_KEY_FILE: path.join(root, "absent-issuer-app.private-key.pem") },
-      { repositoryRoot: root },
-    );
-    assert.equal(absentState.exitCode, 0);
-    assert.equal(JSON.parse(absentState.stdout).applicationState.provider.issuerKey, "configured");
+    // #1178: an exported reference is reported as legacy external input with its explicit enrollment.
+    assert.equal(JSON.parse(absentKey.stdout).issuerCustody, "external-reference");
+    assert.match(JSON.parse(absentKey.stdout).enrollment, /^inari setup next --yes --input app-id=/u);
 
     const issuerPem = await configureIssuerKey(root, environment);
     const setup = await capture(["executor", "setup", "--json"], environment);
@@ -762,6 +697,35 @@ async function gitRepository(root: string): Promise<{ readonly baseHead: string;
   return { baseHead, head };
 }
 
+/** #1179: owner-read branch-policy input for a repository without a declared rule (exact contract branch). */
+function localBranchPolicy(branch: string, implementation: number) {
+  const acquired = createRepositoryBranchPolicy({
+    generation: {
+      authority: "repository-default-branch",
+      repository: {
+        host: "github.com",
+        repositoryId: "123456789",
+        owner: "acme",
+        name: "inari",
+        nameWithOwner: "acme/inari",
+      },
+      ref: "main",
+      treeSha: "9".repeat(40),
+    },
+  });
+  assert.equal(acquired.status, "available");
+  if (acquired.status !== "available") throw new Error("unreachable");
+  const repository = { repositoryHost: "github.com", repositoryId: "123456789" };
+  return {
+    version: 1,
+    kind: "local-branch-policy-input",
+    policy: acquired.policy,
+    target: { repository, implementation },
+    observedGeneration: { ref: "main", treeSha: "9".repeat(40) },
+    binding: { repository, implementation, branch },
+  };
+}
+
 test("session start registers a production-verifiable binding and bounded provenance without exposing its private key", async () => {
   const { root, environment } = await temporaryEnvironment();
   execFileSync("git", ["init", "--quiet"], { cwd: root });
@@ -786,6 +750,9 @@ test("session start registers a production-verifiable binding and bounded proven
       },
       async readEvidence() {
         return localTrustEvidence(local.authority);
+      },
+      async readBranchPolicy() {
+        return localBranchPolicy("feat/1029-local-cli-admission-path", 1029);
       },
       async execute() {
         throw new Error("session start must not execute Change mutations");
@@ -1126,6 +1093,394 @@ test("local Change commands use the production Admission authority and its exact
   }
 });
 
+/** A repository-governed PR contract compiled from provider-shaped default-branch evidence (trusted provenance). */
+function governedPullRequestAdapter(role: "implementation" | "integration") {
+  // The ordinary Implementation contract carries the linked-Issue section policy;
+  // an integration-style contract does not.
+  const template =
+    role === "implementation"
+      ? "## Summary\n\nSummarize the change.\n\n## Linked issue\n\nCloses #\n"
+      : "## Summary\n\nSummarize the change.\n";
+  const policy =
+    "version: 1\ntemplates:\n  - template: default\n    sections:\n      - section: linked_issue\n        linkedIssue: true\n";
+  const context = {
+    hostname: "github.com",
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    url: "https://github.com/acme/inari",
+    repositoryId: "123456789",
+  };
+  return {
+    resolveRepositoryContext: async () => context,
+    getRepositoryContext: async () => context,
+    getRepositoryDefaultBranch: async () => "main",
+    findBranch: async (name: string) => ({ name, ref: `refs/heads/${name}`, sha: "7".repeat(40) }),
+    getRepositoryTree: async () => ({
+      sha: "8".repeat(40),
+      entries: [
+        { path: ".github/PULL_REQUEST_TEMPLATE.md", type: "blob" as const, sha: "6".repeat(40) },
+        ...(role === "implementation"
+          ? [{ path: ".github/inari/pr-policy.yml", type: "blob" as const, sha: "5".repeat(40) }]
+          : []),
+      ],
+    }),
+    getRepositoryBlob: async (sha: string) => (sha === "5".repeat(40) ? policy : template),
+  };
+}
+
+async function governedPullRequestContract(
+  role: "implementation" | "integration" = "implementation",
+): Promise<unknown> {
+  return compileRepositoryGovernedContract(governedPullRequestAdapter(role) as never, "pr", "default");
+}
+
+test("#1181 local pr publish and pr create go through the selected Admission Session, never a user credential", async () => {
+  const { root: configRoot, environment } = await temporaryEnvironment();
+  const repositoryRoot = path.join(configRoot, "repository");
+  await mkdir(repositoryRoot);
+  const { baseHead, head } = await gitRepository(repositoryRoot);
+  const issue = 1029;
+  const branch = "feat/1029-local-cli-admission-path";
+  const sessionId = "sess_cli-pr-1029";
+  const local = localAuthority(environment);
+  const implementationContract = await governedPullRequestContract("implementation");
+  let contract = implementationContract;
+  const executions: { readonly operation: string; readonly request: unknown }[] = [];
+  const contractReads: unknown[] = [];
+  const projection = projectChangeFromGitHubEvidence({
+    change: { repositoryHost: "github.com", repositoryId: "123456789", rootIssue: issue },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "feat", slug: "local-cli-admission-path" },
+    baseBranch: "main",
+    evidence: {
+      issue: { status: "available", value: { number: issue, state: "open" } },
+      branches: { status: "available", value: [{ name: branch, sha: head, rootIssue: issue }] },
+      pullRequests: { status: "absent" },
+    },
+  });
+  // A published Implementation branch without a pull request: the canonical branch-only partial state.
+  assert.equal(projection.status, "partial");
+  const executorServer = createLocalExecutorHttpServer({
+    config: {
+      version: 1,
+      id: "exec_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 8765 },
+      provider: { kind: "github", credentialProfile: "default" },
+    },
+    listenPort: 0,
+    version: "0.17.0-test",
+    executorId: "exec_0123456789abcdef",
+    readEvidence: async (request) => {
+      const trust = localTrustEvidence(local.authority);
+      if (request.issue === undefined) return trust;
+      return {
+        ...trust,
+        change: projection,
+        implementation: localImplementationEvidence(issue, "123456789", branch, baseHead, projection),
+      };
+    },
+    readGovernedContract: async (request) => {
+      contractReads.push(request);
+      return contract;
+    },
+    execute: async (execution): Promise<AuthorizedExecutionResult> => {
+      executions.push({ operation: execution.operation, request: execution.request });
+      if (execution.operation === "change.show")
+        return { version: 1, operation: "change.show", status: "succeeded", projection };
+      assert.equal(execution.operation, "pullRequest.publish");
+      const request = execution.request as { readonly title: string; readonly body: string };
+      return {
+        version: 1,
+        operation: "pullRequest.publish",
+        status: "succeeded",
+        publication: {
+          version: 1,
+          kind: "pr-publication",
+          ok: true,
+          classification: "created",
+          outcome: "created",
+          pullRequest: {
+            number: 2029,
+            url: "https://github.com/acme/inari/pull/2029",
+            title: request.title,
+            body: request.body,
+            head: branch,
+            base: "main",
+          },
+          diagnostics: [],
+          effects: [{ kind: "CREATE_PULL_REQUEST", status: "succeeded" }],
+        },
+      } as unknown as AuthorizedExecutionResult;
+    },
+  });
+  await once(executorServer, "listening");
+  const executorEndpoint = `http://127.0.0.1:${(executorServer.address() as AddressInfo).port}`;
+  const admissionServer = createLocalAdmissionHttpServer(
+    {
+      version: 1,
+      id: "adm_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 0 },
+      executor: { id: "exec_0123456789abcdef", endpoint: executorEndpoint },
+    },
+    "0.17.0-test",
+    local.authority,
+    new LocalExecutorClient({ id: "exec_0123456789abcdef", endpoint: executorEndpoint }),
+    { environment },
+  );
+  await once(admissionServer, "listening");
+  const admissionEndpoint = `http://127.0.0.1:${(admissionServer.address() as AddressInfo).port}`;
+  try {
+    writeAdmissionRoute(environment, admissionEndpoint);
+    const binding = localSessionBinding(sessionId, issue, "123456789", "acme/inari", {
+      authority: local.authority,
+      keyPair: local.keyPair,
+      branch,
+    });
+    storeLocalSessionBinding(binding, environment);
+    await createLocalAdmissionClient({ endpoint: admissionEndpoint }).registerSession(binding);
+    let userCredentialUsed = false;
+    const dependencies = {
+      repositoryRoot,
+      createAdapter: (() => {
+        userCredentialUsed = true;
+        throw new Error("the local Session PR route must not construct a user-credential adapter");
+      }) as never,
+    };
+    const implementation = {
+      repositoryHost: "github.com",
+      repositoryId: "123456789",
+      repository: "acme/inari",
+      number: issue,
+    };
+    const requestPath = path.join(configRoot, "publication.json");
+    await writeFile(
+      requestPath,
+      JSON.stringify({
+        version: 1,
+        kind: "pr-publication",
+        repository: { repositoryHost: "github.com", repositoryId: "123456789", repository: "acme/inari" },
+        workIdentity: { implementation },
+        routing: {
+          version: 1,
+          kind: "integration-routing",
+          mode: "standalone",
+          role: "implementation",
+          implementation,
+          branches: { default: "main", implementation: branch },
+        },
+        expectedHead: branch,
+        expectedBase: "main",
+        headRevision: head,
+        title: "feat: local admission PR",
+        body: `Closes #${issue}`,
+        draft: true,
+      }),
+    );
+
+    // No Session selector: bounded denial before any Admission execution or provider adapter.
+    const noSelector = { ...environment };
+    delete noSelector.INARI_SESSION_ID;
+    const denied = await capture(["pr", "publish", "--from", requestPath, "--json"], noSelector, dependencies);
+    assert.notEqual(denied.exitCode, 0);
+    assert.equal(JSON.parse(denied.stdout).error.code, "ADMISSION_SESSION_SELECTOR_REQUIRED");
+    assert.equal(executions.length, 0);
+
+    const selected = { ...environment, INARI_SESSION_ID: sessionId };
+    const published = await capture(["pr", "publish", "--from", requestPath, "--json"], selected, dependencies);
+    assert.equal(published.exitCode, 0, published.stdout);
+    const publishedOutput = JSON.parse(published.stdout) as Record<string, unknown>;
+    assert.equal(publishedOutput.route, "local-admission");
+    assert.equal(publishedOutput.classification, "created");
+    assert.equal(publishedOutput.mutation, true);
+    assert.equal(executions.at(-1)?.operation, "pullRequest.publish");
+
+    // Compatibility work identities the canonical validator accepts (`workIdentity.issue`,
+    // a bare IssueReference) are ordinary Implementation publications and route locally too.
+    const original = JSON.parse(await readFile(requestPath, "utf8")) as Record<string, unknown>;
+    for (const workIdentity of [{ issue: implementation }, implementation]) {
+      const compatPath = path.join(configRoot, "publication-compat.json");
+      await writeFile(compatPath, JSON.stringify({ ...original, workIdentity }));
+      executions.length = 0;
+      const compatDenied = await capture(["pr", "publish", "--from", compatPath, "--json"], noSelector, dependencies);
+      assert.equal(JSON.parse(compatDenied.stdout).error.code, "ADMISSION_SESSION_SELECTOR_REQUIRED");
+      const compat = await capture(["pr", "publish", "--from", compatPath, "--json"], selected, dependencies);
+      assert.equal(JSON.parse(compat.stdout).route, "local-admission", compat.stdout);
+      assert.equal(executions.at(-1)?.operation, "pullRequest.publish");
+    }
+
+    executions.length = 0;
+    const created = await capture(
+      [
+        "pr",
+        "create",
+        "--field",
+        "summary=Implement the local admission route.",
+        "--field",
+        `linked_issue=Closes #${issue}`,
+        "--title",
+        "feat: local admission PR",
+        "--head",
+        branch,
+        "--base",
+        "main",
+        "--json",
+      ],
+      selected,
+      dependencies,
+    );
+    assert.equal(created.exitCode, 0, created.stdout);
+    assert.equal(JSON.parse(created.stdout).route, "local-admission");
+    assert.deepEqual(contractReads.at(-1), {
+      version: 1,
+      repository: { id: "123456789", name: "acme/inari" },
+      domain: "pr",
+      template: "default",
+    });
+    const publication = executions.find((entry) => entry.operation === "pullRequest.publish")?.request as {
+      readonly expectedHead: string;
+      readonly expectedBase: string;
+      readonly headRevision: string;
+      readonly body: string;
+    };
+    assert.equal(publication.expectedHead, branch);
+    assert.equal(publication.expectedBase, "main");
+    assert.equal(publication.headRevision, head);
+    assert.match(publication.body, /Implement the local admission route\./u);
+    // Unspecified PR metadata stays unspecified on the Local Admission path.
+    assert.equal(Object.hasOwn(publication, "draft"), false);
+    assert.equal(Object.hasOwn(publication, "maintainerCanModify"), false);
+
+    executions.length = 0;
+    const metadata = await capture(
+      [
+        "pr",
+        "create",
+        "--field",
+        "summary=Implement the local admission route.",
+        "--field",
+        `linked_issue=Closes #${issue}`,
+        "--title",
+        "feat: local admission PR",
+        "--head",
+        branch,
+        "--base",
+        "main",
+        "--draft",
+        "--maintainer-can-modify",
+        "--json",
+      ],
+      selected,
+      dependencies,
+    );
+    assert.equal(metadata.exitCode, 0, metadata.stdout);
+    const withMetadata = executions.find((entry) => entry.operation === "pullRequest.publish")?.request as Record<
+      string,
+      unknown
+    >;
+    assert.equal(withMetadata.draft, true);
+    assert.equal(withMetadata.maintainerCanModify, true);
+
+    // A head other than the governed Implementation branch is refused before any publication.
+    executions.length = 0;
+    const wrongHead = await capture(
+      ["pr", "create", "--field", "summary=x", "--title", "t", "--head", "feat/1029-other", "--base", "main", "--json"],
+      selected,
+      dependencies,
+    );
+    assert.notEqual(wrongHead.exitCode, 0);
+    assert.equal(
+      executions.some((entry) => entry.operation === "pullRequest.publish"),
+      false,
+    );
+    assert.equal(userCredentialUsed, false);
+
+    // Without a Session, an Implementation contract is refused, never published through the user path.
+    let userPublication = false;
+    const implementationAdapter = {
+      ...governedPullRequestAdapter("implementation"),
+      createPullRequest: async () => {
+        userPublication = true;
+        throw new Error("must not publish through the user path");
+      },
+    };
+    const sessionless = await capture(
+      [
+        "pr",
+        "create",
+        "--field",
+        "summary=x",
+        "--field",
+        `linked_issue=Closes #${issue}`,
+        "--title",
+        "t",
+        "--head",
+        branch,
+        "--base",
+        "main",
+        "--json",
+      ],
+      noSelector,
+      { repositoryRoot, createAdapter: (() => implementationAdapter) as never },
+    );
+    assert.equal(JSON.parse(sessionless.stdout).error.code, "ADMISSION_SESSION_SELECTOR_REQUIRED");
+    assert.equal(userPublication, false);
+
+    // A non-Implementation governed contract keeps its existing direct route even on the local Runtime.
+    contract = await governedPullRequestContract("integration");
+    executions.length = 0;
+    let directRoute = false;
+    const integration = await capture(
+      ["pr", "create", "--field", "summary=x", "--title", "t", "--head", "issue/1029-x", "--base", "main", "--json"],
+      selected,
+      {
+        repositoryRoot,
+        createAdapter: (() => {
+          directRoute = true;
+          throw new Error("direct route selected");
+        }) as never,
+      },
+    );
+    assert.notEqual(integration.exitCode, 0);
+    assert.equal(directRoute, true);
+    assert.equal(
+      executions.some((entry) => entry.operation === "pullRequest.publish"),
+      false,
+    );
+
+    // A stale inherited Session selector must not make a non-Implementation
+    // contract depend on Local Admission. The direct route remains selectable
+    // and no Session-owned publication is attempted.
+    const staleSelected = { ...selected, INARI_SESSION_ID: "sess_stale-nonimplementation" };
+    directRoute = false;
+    const staleIntegration = await capture(
+      ["pr", "create", "--field", "summary=x", "--title", "t", "--head", "issue/1029-x", "--base", "main", "--json"],
+      staleSelected,
+      {
+        repositoryRoot,
+        createAdapter: (() => {
+          directRoute = true;
+          throw new Error("direct route selected");
+        }) as never,
+      },
+    );
+    assert.notEqual(staleIntegration.exitCode, 0);
+    assert.equal(directRoute, true);
+    // The direct route could not resolve the contract either: the Session failure is the minimal cause.
+    assert.equal(JSON.parse(staleIntegration.stdout).error.code, "ADMISSION_SESSION_BINDING_NOT_FOUND");
+    assert.equal(
+      executions.some((entry) => entry.operation === "pullRequest.publish"),
+      false,
+    );
+    contract = implementationContract;
+  } finally {
+    for (const server of [admissionServer, executorServer])
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    await rm(configRoot, { recursive: true, force: true });
+  }
+});
+
 test("session close selects only inherited INARI_SESSION_ID through the production Admission server", async () => {
   const { root, environment } = await temporaryEnvironment();
   const local = localAuthority(environment);
@@ -1328,6 +1683,34 @@ test("setup console starts one owned host, reuses it on repeated start and agree
     assert.equal(repeated.exitCode, 0);
     assert.equal(JSON.parse(repeated.stdout).reused, true);
     assert.equal(JSON.parse(repeated.stdout).endpoint, output.endpoint);
+
+    // #1185: a different repository in the same config home is never reported
+    // as reused; the live host, its announcement and its binding stay intact.
+    const announcementPath = path.join(environment.INARI_CONFIG_HOME as string, "runtime", "endpoints", "setup.json");
+    const announcementBefore = await readFile(announcementPath, "utf8");
+    const conflicting = await capture(
+      ["setup", "console", "--json", "--repository", "example-other/project", "--repository-id", "4242"],
+      environment,
+      {
+        repositoryRoot: root,
+        setupAssetDirectory,
+        onSetupHostStarted: () => assert.fail("a host for another repository must not start"),
+      },
+    );
+    assert.equal(conflicting.exitCode, 2);
+    const conflict = JSON.parse(conflicting.stdout) as { readonly ok: boolean; readonly error: Record<string, string> };
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.error.code, "SETUP_HOST_REPOSITORY_CONFLICT");
+    assert.match(conflict.error.message, /yohn-jp\/gh-inari/u);
+    assert.equal(await readFile(announcementPath, "utf8"), announcementBefore);
+    const hostIdentity = (await (await fetch(`${output.endpoint}/api/setup/host`)).json()) as {
+      readonly repository: Record<string, string>;
+    };
+    assert.deepEqual(hostIdentity.repository, {
+      repositoryHost: "github.com",
+      repositoryId: "1330755860",
+      nameWithOwner: "yohn-jp/gh-inari",
+    });
 
     // A fresh CLI process and the browser API observe the same persisted setup generation.
     const bootstrap = (await (

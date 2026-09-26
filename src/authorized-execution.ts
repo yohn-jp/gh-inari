@@ -301,6 +301,22 @@ function issueAndCapability(value: Record<string, unknown>): { issue: number; ki
   }
 }
 
+/**
+ * The capability kind an authorized operation may carry. Capability admission
+ * is the authority: it admits PR creation from an exact `pullRequest.create`
+ * claim or, for the same Issue, from the scoped `change.implement` claim
+ * (#1181). No other substitution is accepted.
+ */
+function capabilityMatchesOperation(
+  operation: AuthorizedExecutionOperation,
+  capability: CapabilityClaim,
+  kind: string,
+  issue: number,
+): boolean {
+  if (capability.kind === kind) return true;
+  return operation === "pullRequest.publish" && capability.kind === "change.implement" && capability.issue === issue;
+}
+
 function expectedSubjectMatches(
   operation: AuthorizedExecutionOperation,
   request: unknown,
@@ -448,7 +464,7 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
     !sameRepository(repository, provenance.repository) ||
     provenance.capability === undefined ||
     !sameCapability(capability, provenance.capability) ||
-    capability.kind !== kind ||
+    !capabilityMatchesOperation(operation, capability, kind, issue) ||
     !expectedSubjectMatches(operation, input.request, input.subject, provenance)
   )
     throw new TypeError("Authorized execution context is invalid.");
@@ -499,9 +515,9 @@ function normalizeAuthorizedExecution(input: unknown): NormalizedAuthorizedExecu
       subject.kind !== "pullRequest" ||
       subject.head !== validated.request.expectedHead ||
       subject.base !== validated.request.expectedBase ||
-      capability.kind !== "pullRequest.create" ||
-      capability.head !== validated.request.expectedHead ||
-      capability.base !== validated.request.expectedBase ||
+      (capability.kind === "pullRequest.create"
+        ? capability.head !== validated.request.expectedHead || capability.base !== validated.request.expectedBase
+        : capability.kind !== "change.implement" || capability.issue !== subject.issue) ||
       validated.request.repository.repositoryHost !== repository.repositoryHost ||
       validated.request.repository.repositoryId !== repository.repositoryId ||
       (validated.request.repository.repository !== undefined &&

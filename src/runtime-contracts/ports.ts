@@ -47,6 +47,25 @@ export interface AdmissionSessionPort {
   registerSession(binding: LocalSessionBinding): Promise<{ readonly id: string; readonly status: string }>;
   closeSession(binding: LocalSessionBinding): Promise<{ readonly id: string; readonly status: string }>;
   executeIntent(intent: ExecutionIntent, sessionId: string): Promise<unknown>;
+  /**
+   * Current repository branch-policy observation input for one governed
+   * Implementation (#1179), acquired by the owner from the repository's
+   * default branch. Public data only; validated by the consumer.
+   */
+  readBranchPolicy(
+    repository: { readonly id: string; readonly name: string },
+    implementation: number,
+  ): Promise<unknown>;
+  /**
+   * Pull-request context read on behalf of the active Session (#1181): the
+   * repository-governed PR contract the owner compiles from the protected
+   * default branch and the Session Implementation's current Change projection.
+   */
+  readPullRequestContext(
+    repository: { readonly id: string; readonly name: string },
+    template: string,
+    sessionId: string,
+  ): Promise<{ readonly contract: unknown; readonly change: unknown }>;
 }
 
 /**

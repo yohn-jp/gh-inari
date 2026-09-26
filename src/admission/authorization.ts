@@ -39,7 +39,35 @@ import {
   type RepositoryIdentity,
 } from "../github/effect-authorizer.js";
 import type { PrPublicationRequest } from "../pr-publication.js";
-import { observeLocalBranch, type ObserveLocalBranchInput } from "../cli/runtime/branch-observation.js";
+import {
+  observeLocalBranch,
+  validateLocalBranchPolicyInput,
+  type LocalBranchPolicyInput,
+} from "../cli/runtime/branch-observation.js";
+import type { LocalExecutorBranchPolicyRequest } from "../local-control/executor-http.js";
+import {
+  runtimeFailure,
+  type RuntimeFailure,
+  type RuntimeFailureReason,
+  type RuntimeFailureStage,
+} from "../runtime-contracts/runtime-failure.js";
+
+/** Bounded Admission denial carrying the owner stage and catalog reason (#1180). */
+export class AdmissionAuthorizationError extends Error {
+  readonly code: RuntimeFailureReason;
+  readonly runtimeFailure: RuntimeFailure;
+
+  constructor(stage: RuntimeFailureStage, code: RuntimeFailureReason, message: string) {
+    super(message);
+    this.name = "AdmissionAuthorizationError";
+    this.code = code;
+    this.runtimeFailure = runtimeFailure(stage, code);
+  }
+}
+
+function deny(stage: RuntimeFailureStage, code: RuntimeFailureReason, message: string): never {
+  throw new AdmissionAuthorizationError(stage, code, message);
+}
 
 /** Reads current Executor evidence through the neutral Executor client protocol. */
 export type AdmissionEvidenceReader = (request: LocalExecutorEvidenceRequest) => Promise<unknown>;
@@ -49,24 +77,53 @@ export interface AdmissionAuthorizationOptions {
   readonly readEvidence: AdmissionEvidenceReader;
   readonly environment?: NodeJS.ProcessEnv;
   readonly now?: () => Date;
-  /** Public owner-port observation supplied by the caller, without provider credentials. */
-  readonly branchObservation?: ObserveLocalBranchInput;
+  /**
+   * Reads the current repository branch-policy input from the Executor owner
+   * (#1179). Admission verifies every observed Session binding against this
+   * current evidence; it never accepts a caller-supplied observation.
+   */
+  readonly readBranchPolicy?: (request: LocalExecutorBranchPolicyRequest) => Promise<unknown>;
 }
 
-function requireCurrentBranchObservation(binding: LocalSessionBinding, options: AdmissionAuthorizationOptions): void {
+/** Current, owner-acquired branch-policy input for one governed Implementation. */
+export async function currentBranchPolicyInput(
+  repository: SessionCertificateRepository,
+  implementation: number,
+  options: AdmissionAuthorizationOptions,
+  stage: RuntimeFailureStage,
+): Promise<LocalBranchPolicyInput> {
+  if (options.readBranchPolicy === undefined)
+    deny(stage, "ADMISSION_BRANCH_OBSERVATION_MISSING", "Current repository branch observation is missing.");
+  const input = validateLocalBranchPolicyInput(
+    await options.readBranchPolicy({ version: 1, repository: evidenceRepository(repository), implementation }),
+  );
+  if (input === undefined)
+    deny(stage, "ADMISSION_BRANCH_OBSERVATION_STALE", "Current repository branch observation is invalid or stale.");
+  return input;
+}
+
+async function requireCurrentBranchObservation(
+  binding: LocalSessionBinding,
+  options: AdmissionAuthorizationOptions,
+  stage: RuntimeFailureStage,
+): Promise<void> {
   if (binding.branchObservation === undefined) return;
-  if (options.branchObservation === undefined) throw new Error("Current repository branch observation is missing.");
+  const input = await currentBranchPolicyInput(binding.repository, binding.task.number, options, stage);
   let current;
   try {
-    current = observeLocalBranch(options.branchObservation);
+    current = observeLocalBranch({ ...input, observedBranch: binding.branchObservation.observedBranch });
   } catch {
-    throw new Error("Current repository branch observation is invalid or stale.");
+    deny(stage, "ADMISSION_BRANCH_OBSERVATION_STALE", "Current repository branch observation is invalid or stale.");
   }
   if (
     canonicalJsonString(current as unknown as CanonicalJsonValue) !==
     canonicalJsonString(binding.branchObservation as unknown as CanonicalJsonValue)
   )
-    throw new Error("Current repository branch observation contradicts Session binding.");
+    deny(
+      stage,
+      "ADMISSION_BRANCH_OBSERVATION_CONTRADICTED",
+      "Current repository branch observation contradicts Session binding.",
+    );
 }
 
 export interface AdmittedSession {
@@ -83,10 +140,43 @@ function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): 
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
-function pinnedRuntimeAuthority(value: unknown): Delegator {
+function pinnedRuntimeAuthority(value: unknown, stage: RuntimeFailureStage): Delegator {
   const result = validateDelegator(value);
-  if (!result.valid || result.value === undefined) throw new Error("Public Runtime Authority trust is invalid.");
+  if (!result.valid || result.value === undefined)
+    deny(stage, "ADMISSION_EVIDENCE_MALFORMED", "Public Runtime Authority trust is invalid.");
   return result.value;
+}
+
+function requirePinnedAuthorityMatch(
+  current: Delegator,
+  binding: Pick<LocalSessionBinding, "authority">,
+  pinnedAuthority: Delegator,
+  stage: RuntimeFailureStage,
+): void {
+  if (
+    current.id !== binding.authority.id ||
+    delegatorPublicKeyFingerprint(current.key) !== binding.authority.publicKeyFingerprint ||
+    canonicalJsonString(current as unknown as CanonicalJsonValue) !==
+      canonicalJsonString(pinnedAuthority as unknown as CanonicalJsonValue)
+  )
+    deny(
+      stage,
+      "ADMISSION_RUNTIME_AUTHORITY_MISMATCH",
+      "Current Runtime Authority trust does not match Admission configuration.",
+    );
+}
+
+function requireAuthorityRef(authority: unknown, stage: RuntimeFailureStage): { ref: string; sha: string } {
+  if (
+    !isRecord(authority) ||
+    !exactKeys(authority, ["ref", "sha"]) ||
+    typeof authority.ref !== "string" ||
+    !/^refs\/heads\/[A-Za-z0-9._/-]+$/u.test(authority.ref) ||
+    typeof authority.sha !== "string" ||
+    !/^[a-f0-9]{40}$/u.test(authority.sha)
+  )
+    deny(stage, "ADMISSION_EVIDENCE_MALFORMED", "Executor Authority evidence is malformed.");
+  return { ref: authority.ref, sha: authority.sha };
 }
 
 function sameRepository(left: unknown, right: SessionCertificateRepository): boolean {
@@ -180,39 +270,25 @@ function validateEvidence(
   readonly implementation: Record<string, unknown>;
   readonly reviewEvidence?: unknown;
 } {
+  const stage = "implementation-admission";
   if (
     !isRecord(value) ||
     !exactKeys(value, ["repository", "authority", "runtimeAuthority", "change", "implementation", "reviewEvidence"])
   )
-    throw new Error("Executor evidence response is malformed.");
+    deny(stage, "ADMISSION_EVIDENCE_MALFORMED", "Executor evidence response is malformed.");
   const repositoryResult = validateIssuerRepositoryIdentity(value.repository);
   if (
     !repositoryResult.valid ||
     repositoryResult.value === undefined ||
     !sameRepository(repositoryResult.value, binding.repository)
   )
-    throw new Error("Executor repository evidence does not match Session.");
-  const authority = value.authority;
-  if (
-    !isRecord(authority) ||
-    !exactKeys(authority, ["ref", "sha"]) ||
-    typeof authority.ref !== "string" ||
-    !/^refs\/heads\/[A-Za-z0-9._/-]+$/u.test(authority.ref) ||
-    typeof authority.sha !== "string" ||
-    !/^[a-f0-9]{40}$/u.test(authority.sha)
-  )
-    throw new Error("Executor Authority evidence is malformed.");
-  const runtime = pinnedRuntimeAuthority(value.runtimeAuthority);
-  if (
-    runtime.id !== binding.authority.id ||
-    delegatorPublicKeyFingerprint(runtime.key) !== binding.authority.publicKeyFingerprint ||
-    canonicalJsonString(runtime as unknown as CanonicalJsonValue) !==
-      canonicalJsonString(pinnedAuthority as unknown as CanonicalJsonValue)
-  )
-    throw new Error("Current Runtime Authority trust does not match Admission configuration.");
+    deny(stage, "ADMISSION_REPOSITORY_MISMATCH", "Executor repository evidence does not match Session.");
+  const authority = requireAuthorityRef(value.authority, stage);
+  const runtime = pinnedRuntimeAuthority(value.runtimeAuthority, stage);
+  requirePinnedAuthorityMatch(runtime, binding, pinnedAuthority, stage);
   const projection = validateChangeProjectionResult(value.change);
   if (!projection.valid || projection.projection === undefined)
-    throw new Error("Current Change evidence is malformed.");
+    deny(stage, "ADMISSION_EVIDENCE_MALFORMED", "Current Change evidence is malformed.");
   if (
     !isRecord(value.implementation) ||
     !exactKeys(value.implementation, [
@@ -225,39 +301,29 @@ function validateEvidence(
       "pullRequest",
     ])
   )
-    throw new Error("Current Implementation evidence is malformed.");
+    deny(stage, "ADMISSION_EVIDENCE_MALFORMED", "Current Implementation evidence is malformed.");
   return {
     repository: repositoryResult.value,
-    authority: { ref: authority.ref, sha: authority.sha },
+    authority,
     change: projection.projection,
     implementation: value.implementation,
     ...(value.reviewEvidence === undefined ? {} : { reviewEvidence: value.reviewEvidence }),
   };
 }
 
-function validateTrustEvidence(value: unknown, binding: LocalSessionBinding, pinnedAuthority: Delegator): Delegator {
+function validateTrustEvidence(
+  value: unknown,
+  subject: Pick<LocalSessionBinding, "repository" | "authority">,
+  pinnedAuthority: Delegator,
+): Delegator {
+  const stage = "trust-evidence";
   if (!isRecord(value) || !exactKeys(value, ["repository", "authority", "runtimeAuthority"]))
-    throw new Error("Executor Runtime Authority evidence is malformed.");
-  if (!sameRepository(value.repository, binding.repository))
-    throw new Error("Executor repository evidence does not match Session.");
-  const authority = value.authority;
-  if (
-    !isRecord(authority) ||
-    !exactKeys(authority, ["ref", "sha"]) ||
-    typeof authority.ref !== "string" ||
-    !/^refs\/heads\/[A-Za-z0-9._/-]+$/u.test(authority.ref) ||
-    typeof authority.sha !== "string" ||
-    !/^[a-f0-9]{40}$/u.test(authority.sha)
-  )
-    throw new Error("Executor Authority evidence is malformed.");
-  const current = pinnedRuntimeAuthority(value.runtimeAuthority);
-  if (
-    current.id !== binding.authority.id ||
-    delegatorPublicKeyFingerprint(current.key) !== binding.authority.publicKeyFingerprint ||
-    canonicalJsonString(current as unknown as CanonicalJsonValue) !==
-      canonicalJsonString(pinnedAuthority as unknown as CanonicalJsonValue)
-  )
-    throw new Error("Current Runtime Authority trust does not match Admission configuration.");
+    deny(stage, "ADMISSION_EVIDENCE_MALFORMED", "Executor Runtime Authority evidence is malformed.");
+  if (!sameRepository(value.repository, subject.repository))
+    deny(stage, "ADMISSION_REPOSITORY_MISMATCH", "Executor repository evidence does not match Session.");
+  requireAuthorityRef(value.authority, stage);
+  const current = pinnedRuntimeAuthority(value.runtimeAuthority, stage);
+  requirePinnedAuthorityMatch(current, subject, pinnedAuthority, stage);
   return current;
 }
 
@@ -275,14 +341,23 @@ function currentImplementationAuthorization(
   };
   const authorization = tryAuthorizeImplementation(authorizationInput);
   if (!authorization.valid || authorization.status !== "authorized" || authorization.authorization === undefined)
-    throw new Error("Current Implementation is not authorized.");
+    deny(
+      "implementation-admission",
+      "ADMISSION_IMPLEMENTATION_UNAUTHORIZED",
+      "Current Implementation is not authorized.",
+    );
   const currentInput = { ...authorizationInput, authorization: authorization.authorization };
   const bindingProjection = projectImplementationSessionAuthorizationBinding({
     ...currentInput,
     task: binding.task,
   });
   const scope = tryProjectImplementationScope(currentInput);
-  if (!scope.valid || scope.projection === undefined) throw new Error("Current Implementation scope is unavailable.");
+  if (!scope.valid || scope.projection === undefined)
+    deny(
+      "implementation-admission",
+      "ADMISSION_IMPLEMENTATION_SCOPE_UNAVAILABLE",
+      "Current Implementation scope is unavailable.",
+    );
   return { binding: bindingProjection, scope: scope.projection };
 }
 
@@ -295,12 +370,94 @@ async function currentTrust(binding: LocalSessionBinding, options: AdmissionAuth
   return validateTrustEvidence(evidence, binding, options.runtimeAuthority);
 }
 
+/**
+ * Repository-bound Session readiness (#1182): the same current Executor
+ * repository binding and protected-ref trust evidence Session registration
+ * requires, for the Authority the caller expects Admission to have pinned. It
+ * admits nothing and stores nothing; every failure throws a bounded denial.
+ */
+export async function observeRepositoryReadiness(
+  repository: SessionCertificateRepository,
+  expectedAuthority: { readonly id: string; readonly publicKeyFingerprint: string },
+  options: AdmissionAuthorizationOptions,
+): Promise<void> {
+  const pinned = options.runtimeAuthority;
+  if (
+    pinned.id !== expectedAuthority.id ||
+    delegatorPublicKeyFingerprint(pinned.key) !== expectedAuthority.publicKeyFingerprint
+  )
+    deny(
+      "trust-evidence",
+      "ADMISSION_RUNTIME_AUTHORITY_MISMATCH",
+      "The Authority Admission pins differs from the configured setup Authority.",
+    );
+  const subject = {
+    repository,
+    authority: { id: pinned.id, publicKeyFingerprint: expectedAuthority.publicKeyFingerprint },
+  } as Pick<LocalSessionBinding, "repository" | "authority">;
+  const evidence = await options.readEvidence({
+    version: 1,
+    repository: evidenceRepository(repository),
+    authorityId: pinned.id,
+  });
+  validateTrustEvidence(evidence, subject, pinned);
+}
+
+/**
+ * A read on behalf of an active Session (#1181): the Session exists, is active
+ * and is bound to exactly the requested repository. It authorizes no effect.
+ */
+export function requireActiveSessionRepository(
+  sessionId: string,
+  repository: SessionCertificateRepository,
+  options: AdmissionAuthorizationOptions,
+): LocalSessionBinding {
+  const stored = readAdmissionSession(sessionId, options.runtimeAuthority, {
+    environment: options.environment,
+    now: options.now?.(),
+  });
+  if (stored === undefined || stored.status !== "active")
+    deny("implementation-admission", "ADMISSION_SESSION_UNAVAILABLE", "Session is unavailable.");
+  const binding = stored.record.binding;
+  if (
+    binding.repository.id !== repository.id ||
+    binding.repository.name.toLocaleLowerCase("en-US") !== repository.name.toLocaleLowerCase("en-US")
+  )
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "The read repository does not match the Session.");
+  return binding;
+}
+
+/**
+ * The current Change projection of the Session's Implementation (#1181), from
+ * the same Executor evidence and Authority/repository checks every execution
+ * uses. Read-only; it authorizes nothing.
+ */
+export async function currentSessionChange(
+  binding: LocalSessionBinding,
+  options: AdmissionAuthorizationOptions,
+): Promise<ChangeProjectionResult> {
+  if (binding.task.kind !== "issue")
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "The Session has no Implementation task.");
+  const evidence = validateEvidence(
+    await options.readEvidence({
+      version: 1,
+      repository: evidenceRepository(binding.repository),
+      authorityId: binding.authority.id,
+      issue: binding.task.number,
+      implementationIssue: binding.task.number,
+    }),
+    binding,
+    options.runtimeAuthority,
+  );
+  return evidence.change;
+}
+
 /** Admits a validated Session binding against current Executor trust evidence. */
 export async function admitSession(
   binding: LocalSessionBinding,
   options: AdmissionAuthorizationOptions,
 ): Promise<AdmittedSession> {
-  requireCurrentBranchObservation(binding, options);
+  await requireCurrentBranchObservation(binding, options, "session-registration");
   const current = await currentTrust(binding, options);
   const snapshot = createAdmissionSession(binding, current, {
     environment: options.environment,
@@ -336,20 +493,25 @@ export async function authorizeExecutionIntent(
     environment: options.environment,
     now: options.now?.(),
   });
-  if (stored === undefined || stored.status !== "active") throw new Error("Session is unavailable.");
+  if (stored === undefined || stored.status !== "active")
+    deny("implementation-admission", "ADMISSION_SESSION_UNAVAILABLE", "Session is unavailable.");
   const binding = stored.record.binding;
-  requireCurrentBranchObservation(binding, options);
+  await requireCurrentBranchObservation(binding, options, "implementation-admission");
   if (
     binding.branchObservation !== undefined &&
     intent.operation === "branch.advance" &&
     (intent.request as BranchAdvanceSemanticRequest).branch !== binding.branchObservation.expectedBranch
   )
-    throw new Error("Branch advance does not match the Session policy branch.");
+    deny(
+      "implementation-admission",
+      "ADMISSION_BRANCH_SCOPE_DENIED",
+      "Branch advance does not match the Session policy branch.",
+    );
   if (!intentRepositoryMatchesBinding(intent.repository, binding.repository))
-    throw new Error("Execution repository does not match Session.");
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Execution repository does not match Session.");
   const issue = executionIntentIssue(intent);
   if (issue === undefined || binding.task.kind !== "issue" || binding.task.number !== issue)
-    throw new Error("Execution task does not match Session.");
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Execution task does not match Session.");
   const evidenceValue = await options.readEvidence({
     version: 1,
     repository: evidenceRepository(binding.repository),
@@ -366,18 +528,40 @@ export async function authorizeExecutionIntent(
     implementationBinding: current.binding,
     implementationScope: current.scope,
   } as SessionAdmissionAuthorizationContext;
-  const admission = admitAuthenticatedSessionCapability({
-    context,
-    operation,
-    subject: intentSubject(intent),
-    projection: evidence.change,
-    ...(readTreeDelta(intent) === undefined ? {} : { treeDelta: readTreeDelta(intent) }),
-    ...(evidence.reviewEvidence === undefined ? {} : { reviewEvidence: evidence.reviewEvidence }),
-  });
+  let admission: ReturnType<typeof admitAuthenticatedSessionCapability>;
+  try {
+    admission = admitAuthenticatedSessionCapability({
+      context,
+      operation,
+      subject: intentSubject(intent),
+      projection: evidence.change,
+      ...(readTreeDelta(intent) === undefined ? {} : { treeDelta: readTreeDelta(intent) }),
+      ...(evidence.reviewEvidence === undefined ? {} : { reviewEvidence: evidence.reviewEvidence }),
+    });
+  } catch (error: unknown) {
+    // Keep the capability owner's own denial (name/reason) and attach the bounded wire diagnostic.
+    if (error instanceof Error) {
+      Object.defineProperty(error, "runtimeFailure", {
+        value: runtimeFailure("implementation-admission", "ADMISSION_CAPABILITY_DENIED"),
+        enumerable: false,
+      });
+      throw error;
+    }
+    deny(
+      "implementation-admission",
+      "ADMISSION_CAPABILITY_DENIED",
+      "The Session capability does not authorize this operation.",
+    );
+  }
   let branchAuthorization: unknown;
   if (intent.operation === "branch.advance") {
     const authorized = authorizeBranchAdvance({ context, admission, request: intent.request });
-    if (!authorized.valid) throw new Error("Branch advance is outside the current authorized scope.");
+    if (!authorized.valid)
+      deny(
+        "implementation-admission",
+        "ADMISSION_BRANCH_SCOPE_DENIED",
+        "Branch advance is outside the current authorized scope.",
+      );
     branchAuthorization = authorized.authorization;
   }
   const provenanceRequest = {

@@ -237,7 +237,16 @@ export interface CommandDefinition {
 }
 
 const ROOT_OPTIONS = ["help", "json"] as const;
-const SETUP_OPTIONS = ["help", "json", "repository", "endpoint", "configHome", "authorityId", "privateKey"] as const;
+const SETUP_OPTIONS = [
+  "help",
+  "json",
+  "repository",
+  "endpoint",
+  "configHome",
+  "authorityId",
+  "privateKey",
+  "capability",
+] as const;
 const SETUP_APPLICATION_OPTIONS = ["help", "json", "repository", "repositoryId"] as const;
 const ARTIFACT_OPTIONS = ["help", "json", "template", "repository"] as const;
 const LOCAL_ARTIFACT_INPUT_OPTIONS = [...ARTIFACT_OPTIONS, "from", "field", "policy"] as const;
@@ -867,8 +876,8 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "root",
     "init",
     ["init"],
-    "Initialize local topology and report ordered execution setup state.",
-    [...ROOT_OPTIONS],
+    "Initialize local topology and report the canonical local setup state and next action.",
+    [...SETUP_APPLICATION_OPTIONS],
   ),
   command(
     "setup.status",
@@ -1675,8 +1684,8 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "runtime",
     "console",
     ["runtime", "console"],
-    "Serve the canonical local setup/runtime state as a loopback-only, secret-free browser console.",
-    [...ROOT_OPTIONS],
+    "Start, or report the already running, canonical loopback setup/control host (same as setup console).",
+    [...SETUP_APPLICATION_OPTIONS],
   ),
   command(
     "executor.setup",

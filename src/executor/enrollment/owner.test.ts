@@ -175,11 +175,23 @@ test("a stored key is verified against an explicit installation only by the Exec
     assert.equal(status?.providerVerified, true);
     assert.deepEqual(Object.keys(status ?? {}).sort(), [
       "appId",
+      "bindings",
       "configId",
       "fingerprint",
       "generation",
       "providerVerified",
     ]);
+    // #1182: the verified installation is the Executor's own repository binding.
+    assert.deepEqual(status?.bindings, [
+      {
+        repositoryHost: repository.repositoryHost,
+        repositoryId: repository.repositoryId,
+        nameWithOwner: repository.nameWithOwner,
+        installationId: "77",
+      },
+    ]);
+    assert.equal(await owner.verifyStoredProvider(repository, "77"), true);
+    await assert.rejects(owner.verifyStoredProvider(repository, "78"), /rejected/u);
     assert.deepEqual(seen, ["123:77", "123:77"]);
     const other = new ExecutorEnrollmentOwner({ configId: "exec_1234567890123456", appId: "456", environment });
     await assert.rejects(other.verifyStoredProvider(repository, "77"), /rejected/u);
