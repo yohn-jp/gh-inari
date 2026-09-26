@@ -32,6 +32,7 @@ import { canonicalJsonString, type CanonicalJsonValue } from "../agent-authority
 import type { Ed25519PublicJwk } from "../agent-authority/ed25519-jwk.js";
 import { validateLocalBranchObservation, type LocalBranchObservation } from "../cli/runtime/branch-observation.js";
 import { validateBranchName } from "../branch-naming.js";
+import type { ImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
 
 export const LOCAL_SESSION_BINDING_VERSION = 1 as const;
 export const MAX_LOCAL_SESSION_BINDING_BYTES = 16 * 1024;
@@ -55,6 +56,7 @@ const BINDING_KEYS = new Set([
   "exp",
   "signature",
   "branchObservation",
+  "implementationBinding",
 ]);
 const AUTHORITY_KEYS = new Set(["id", "publicKeyFingerprint"]);
 
@@ -80,6 +82,11 @@ export interface LocalSessionBinding {
   readonly signature: string;
   /** Additive signed repository-policy observation; absent on legacy Sessions. */
   readonly branchObservation?: LocalBranchObservation;
+  /**
+   * Additive signed projection of the current authorized Implementation and its
+   * canonical Source set (#1213); absent on legacy Sessions.
+   */
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
 }
 
 export interface CreateLocalSessionBindingOptions {
@@ -94,6 +101,7 @@ export interface CreateLocalSessionBindingOptions {
   readonly runtimeKey: KeyObject | DelegatorKeyPair;
   readonly now?: Date;
   readonly branchObservation?: LocalBranchObservation;
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
 }
 
 export type LocalSessionBindingDiagnosticCode =
@@ -172,6 +180,7 @@ function payloadOf(binding: LocalSessionBinding): Omit<LocalSessionBinding, "sig
     nbf: binding.nbf,
     exp: binding.exp,
     ...(binding.branchObservation === undefined ? {} : { branchObservation: binding.branchObservation }),
+    ...(binding.implementationBinding === undefined ? {} : { implementationBinding: binding.implementationBinding }),
   };
 }
 
@@ -188,6 +197,7 @@ function schemaPayload(input: Record<string, unknown>, authorityId: string): unk
     repository: input.repository,
     sessionKey: SCHEMA_ONLY_PUBLIC_KEY,
     ...(input.task === undefined ? {} : { task: input.task }),
+    ...(input.implementationBinding === undefined ? {} : { implementationBinding: input.implementationBinding }),
     capabilities: input.capabilities,
     iat: input.iat,
     nbf: input.nbf,
@@ -263,6 +273,9 @@ export function validateLocalSessionBinding(input: unknown): LocalSessionBinding
     exp: claims.value.exp,
     signature: input.signature,
     ...(branchObservation === undefined ? {} : { branchObservation }),
+    ...(claims.value.implementationBinding === undefined
+      ? {}
+      : { implementationBinding: claims.value.implementationBinding }),
   });
   const serialized = canonicalJsonString(value as unknown as CanonicalJsonValue);
   if (Buffer.byteLength(serialized, "utf8") > MAX_LOCAL_SESSION_BINDING_BYTES) return invalidResult();
@@ -334,6 +347,7 @@ export function createLocalSessionBinding(options: CreateLocalSessionBindingOpti
     exp,
     signature: "",
     ...(options.branchObservation === undefined ? {} : { branchObservation: options.branchObservation }),
+    ...(options.implementationBinding === undefined ? {} : { implementationBinding: options.implementationBinding }),
   };
   const unsignedValidation = validateLocalSessionBinding({ ...candidate, signature: "A".repeat(86) });
   if (!unsignedValidation.valid || unsignedValidation.value === undefined) {
@@ -352,6 +366,9 @@ export function createLocalSessionBinding(options: CreateLocalSessionBindingOpti
     ...(unsignedValidation.value.branchObservation === undefined
       ? {}
       : { branchObservation: unsignedValidation.value.branchObservation }),
+    ...(unsignedValidation.value.implementationBinding === undefined
+      ? {}
+      : { implementationBinding: unsignedValidation.value.implementationBinding }),
   } as Omit<LocalSessionBinding, "signature">;
   for (const claim of unsignedValidation.value.capabilities) {
     if (!capabilityClaimWithinCeiling(claim, authority.capabilityCeiling)) {

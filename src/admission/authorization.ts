@@ -31,7 +31,12 @@ import { createAuthorizedExecution, type AuthorizedExecution } from "../authoriz
 import { changeReadRequest } from "../change-execution-port.js";
 import { validateChangeProjectionResult, type ChangeProjectionResult } from "../change.js";
 import { tryAuthorizeImplementation, type ImplementationAuthorizationInput } from "../implementation-authorization.js";
-import { projectImplementationSessionAuthorizationBinding } from "../implementation-session-binding.js";
+import {
+  projectImplementationSessionAuthorizationBinding,
+  type ImplementationSessionAuthorizationBinding,
+} from "../implementation-session-binding.js";
+import type { SessionCertificateTask } from "../agent-authority/session-certificate.js";
+import type { IssueReference } from "../contract/issue-reference.js";
 import { tryProjectImplementationScope } from "../implementation-scope-projection.js";
 import {
   assertTrustedExecution,
@@ -85,8 +90,8 @@ export interface AdmissionAuthorizationOptions {
   readonly readBranchPolicy?: (request: LocalExecutorBranchPolicyRequest) => Promise<unknown>;
 }
 
-/** Current, owner-acquired branch-policy input for one governed Implementation. */
-export async function currentBranchPolicyInput(
+/** Current owner-read branch-policy input; the owner never supplies an Implementation binding. */
+async function readCurrentBranchPolicyInput(
   repository: SessionCertificateRepository,
   implementation: number,
   options: AdmissionAuthorizationOptions,
@@ -97,9 +102,53 @@ export async function currentBranchPolicyInput(
   const input = validateLocalBranchPolicyInput(
     await options.readBranchPolicy({ version: 1, repository: evidenceRepository(repository), implementation }),
   );
-  if (input === undefined)
+  if (input === undefined || input.implementationBinding !== undefined)
     deny(stage, "ADMISSION_BRANCH_OBSERVATION_STALE", "Current repository branch observation is invalid or stale.");
   return input;
+}
+
+/**
+ * Current, owner-acquired branch-policy input for one governed Implementation.
+ *
+ * #1213: when the owner projects the Implementation's canonical Source set,
+ * Admission attaches the certificate-safe projection of the current authorized
+ * Implementation carrying that set. The Session launcher signs it as the upper
+ * bound of Source-rooted change.* capabilities; the Session task stays the
+ * Implementation. The projected set must equal the owner's parsed set.
+ */
+export async function currentBranchPolicyInput(
+  repository: SessionCertificateRepository,
+  implementation: number,
+  options: AdmissionAuthorizationOptions,
+  stage: RuntimeFailureStage,
+): Promise<LocalBranchPolicyInput> {
+  const input = await readCurrentBranchPolicyInput(repository, implementation, options, stage);
+  if (input.sources === undefined) return input;
+  const pinned = options.runtimeAuthority;
+  const subject = {
+    repository,
+    authority: { id: pinned.id, publicKeyFingerprint: delegatorPublicKeyFingerprint(pinned.key) },
+  };
+  const evidence = validateEvidence(
+    await options.readEvidence({
+      version: 1,
+      repository: evidenceRepository(repository),
+      authorityId: pinned.id,
+      issue: implementation,
+      implementationIssue: implementation,
+    }),
+    subject,
+    pinned,
+    stage,
+  );
+  const current = currentImplementationAuthorization(evidence, { kind: "issue", number: implementation }, true, stage);
+  if (
+    current.binding.sources === undefined ||
+    canonicalJsonString(current.binding.sources as unknown as CanonicalJsonValue) !==
+      canonicalJsonString(input.sources as unknown as CanonicalJsonValue)
+  )
+    deny(stage, "ADMISSION_BRANCH_OBSERVATION_STALE", "Current Implementation Source evidence is inconsistent.");
+  return Object.freeze({ ...input, implementationBinding: current.binding });
 }
 
 async function requireCurrentBranchObservation(
@@ -108,7 +157,7 @@ async function requireCurrentBranchObservation(
   stage: RuntimeFailureStage,
 ): Promise<void> {
   if (binding.branchObservation === undefined) return;
-  const input = await currentBranchPolicyInput(binding.repository, binding.task.number, options, stage);
+  const input = await readCurrentBranchPolicyInput(binding.repository, binding.task.number, options, stage);
   let current;
   try {
     current = observeLocalBranch({ ...input, observedBranch: binding.branchObservation.observedBranch });
@@ -261,8 +310,9 @@ function readTreeDelta(intent: ExecutionIntent) {
 
 function validateEvidence(
   value: unknown,
-  binding: LocalSessionBinding,
+  binding: Pick<LocalSessionBinding, "repository" | "authority">,
   pinnedAuthority: Delegator,
+  stage: RuntimeFailureStage = "implementation-admission",
 ): {
   readonly repository: RepositoryIdentity;
   readonly authority: { readonly ref: string; readonly sha: string };
@@ -270,7 +320,6 @@ function validateEvidence(
   readonly implementation: Record<string, unknown>;
   readonly reviewEvidence?: unknown;
 } {
-  const stage = "implementation-admission";
   if (
     !isRecord(value) ||
     !exactKeys(value, ["repository", "authority", "runtimeAuthority", "change", "implementation", "reviewEvidence"])
@@ -329,8 +378,14 @@ function validateTrustEvidence(
 
 function currentImplementationAuthorization(
   evidence: ReturnType<typeof validateEvidence>,
-  binding: LocalSessionBinding,
-) {
+  task: SessionCertificateTask,
+  includeSources: boolean,
+  stage: RuntimeFailureStage = "implementation-admission",
+): {
+  readonly binding: ImplementationSessionAuthorizationBinding;
+  readonly scope: NonNullable<ReturnType<typeof tryProjectImplementationScope>["projection"]>;
+  readonly sources: readonly IssueReference[];
+} {
   const implementationEvidence = evidence.implementation;
   const authorizationInput: ImplementationAuthorizationInput = {
     implementation: implementationEvidence.implementation as ImplementationAuthorizationInput["implementation"],
@@ -340,25 +395,73 @@ function currentImplementationAuthorization(
     readiness: implementationEvidence.readiness,
   };
   const authorization = tryAuthorizeImplementation(authorizationInput);
-  if (!authorization.valid || authorization.status !== "authorized" || authorization.authorization === undefined)
-    deny(
-      "implementation-admission",
-      "ADMISSION_IMPLEMENTATION_UNAUTHORIZED",
-      "Current Implementation is not authorized.",
-    );
+  if (
+    !authorization.valid ||
+    authorization.status !== "authorized" ||
+    authorization.authorization === undefined ||
+    authorization.contract === undefined
+  )
+    deny(stage, "ADMISSION_IMPLEMENTATION_UNAUTHORIZED", "Current Implementation is not authorized.");
   const currentInput = { ...authorizationInput, authorization: authorization.authorization };
-  const bindingProjection = projectImplementationSessionAuthorizationBinding({
-    ...currentInput,
-    task: binding.task,
-  });
+  let bindingProjection: ImplementationSessionAuthorizationBinding;
+  try {
+    bindingProjection = projectImplementationSessionAuthorizationBinding({
+      ...currentInput,
+      task,
+      ...(includeSources ? { includeSources: true } : {}),
+    });
+  } catch {
+    deny(stage, "ADMISSION_IMPLEMENTATION_UNAUTHORIZED", "Current Implementation is not authorized.");
+  }
   const scope = tryProjectImplementationScope(currentInput);
   if (!scope.valid || scope.projection === undefined)
-    deny(
-      "implementation-admission",
-      "ADMISSION_IMPLEMENTATION_SCOPE_UNAVAILABLE",
-      "Current Implementation scope is unavailable.",
-    );
-  return { binding: bindingProjection, scope: scope.projection };
+    deny(stage, "ADMISSION_IMPLEMENTATION_SCOPE_UNAVAILABLE", "Current Implementation scope is unavailable.");
+  return { binding: bindingProjection, scope: scope.projection, sources: authorization.contract.sources };
+}
+
+const CHANGE_OPERATIONS: ReadonlySet<ExecutionIntent["operation"]> = new Set([
+  "change.show",
+  "change.issue",
+  "change.ready",
+  "change.abort",
+  "change.merge",
+]);
+
+function sameRepositorySource(
+  source: IssueReference,
+  repository: SessionCertificateRepository,
+  issue: number,
+): boolean {
+  return (
+    source.repositoryHost.toLowerCase() === "github.com" &&
+    source.repositoryId === repository.id &&
+    source.number === issue
+  );
+}
+
+/**
+ * #1213: a Change operation's root must be an exact same-repository member of
+ * the signed Session Source set. There is no primary Source. The task-bound
+ * compatibility claim of a Source-bound Session is never a Change root. A
+ * legacy Session without a signed Source set keeps its task-rooted identity.
+ */
+function requireSignedChangeRoot(binding: LocalSessionBinding, issue: number): void {
+  const signed = binding.implementationBinding?.sources;
+  if (signed === undefined) {
+    if (binding.task.number !== issue)
+      deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Execution task does not match Session.");
+  } else if (!signed.some((source) => sameRepositorySource(source, binding.repository, issue)))
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Change root is not a Session Source.");
+}
+
+/** The Change root must also still be a same-repository Source of the current Implementation contract. */
+function requireCurrentChangeRoot(
+  binding: LocalSessionBinding,
+  issue: number,
+  currentSources: readonly IssueReference[],
+): void {
+  if (!currentSources.some((source) => sameRepositorySource(source, binding.repository, issue)))
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Change root is not a current Implementation Source.");
 }
 
 async function currentTrust(binding: LocalSessionBinding, options: AdmissionAuthorizationOptions): Promise<Delegator> {
@@ -510,8 +613,12 @@ export async function authorizeExecutionIntent(
   if (!intentRepositoryMatchesBinding(intent.repository, binding.repository))
     deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Execution repository does not match Session.");
   const issue = executionIntentIssue(intent);
-  if (issue === undefined || binding.task.kind !== "issue" || binding.task.number !== issue)
+  const changeOperation = CHANGE_OPERATIONS.has(intent.operation);
+  // The Implementation task is the Session identity; a Change operation's root
+  // is validated below against current and signed Source evidence instead.
+  if (issue === undefined || binding.task.kind !== "issue" || (!changeOperation && binding.task.number !== issue))
     deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Execution task does not match Session.");
+  if (changeOperation) requireSignedChangeRoot(binding, issue);
   const evidenceValue = await options.readEvidence({
     version: 1,
     repository: evidenceRepository(binding.repository),
@@ -520,7 +627,18 @@ export async function authorizeExecutionIntent(
     implementationIssue: binding.task.number,
   });
   const evidence = validateEvidence(evidenceValue, binding, options.runtimeAuthority);
-  const current = currentImplementationAuthorization(evidence, binding);
+  const sourceBound = binding.implementationBinding?.sources !== undefined;
+  const current = currentImplementationAuthorization(evidence, binding.task, sourceBound);
+  if (
+    sourceBound &&
+    (binding.implementationBinding === undefined ||
+      binding.implementationBinding.task.number !== binding.task.number ||
+      binding.implementationBinding.authorization.implementation.number !==
+        current.binding.authorization.implementation.number ||
+      binding.implementationBinding.repository.repositoryId !== current.binding.repository.repositoryId)
+  )
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Signed Implementation binding does not match.");
+  if (changeOperation) requireCurrentChangeRoot(binding, issue, current.sources);
   const operation = capabilityOperation(intent);
   const nowSeconds = Math.floor((options.now?.() ?? new Date()).getTime() / 1000);
   const context = {
@@ -593,7 +711,10 @@ export async function authorizeExecutionIntent(
     version: 1,
     operation: intent.operation,
     repository: evidence.repository,
-    task: binding.task,
+    // The closed AuthorizedExecution task names the execution's own root Issue.
+    // A Source-rooted Change (#1213) is identified by its Source subject; the
+    // Implementation task is not restated as that root.
+    ...(binding.task.number === issue ? { task: binding.task } : {}),
     subject: admission.subject,
     capability: admission.capability,
     provenance,

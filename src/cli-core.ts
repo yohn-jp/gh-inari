@@ -131,7 +131,7 @@ import {
   type ChangeMutation,
 } from "./change-execution-port.js";
 import { tryProjectImplementationHandoff, type ImplementationHandoffProjectionOptions } from "./change-handoff.js";
-import { validateChangeProjectionResult } from "./change.js";
+import { validateChangeProjectionResult, type ChangeProjectionResult } from "./change.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { tryProjectGoldenPathImplementation } from "./golden-path-implementation.js";
 import { projectGoldenPathRecovery } from "./golden-path-recovery.js";
@@ -2369,6 +2369,39 @@ function requireLocalAdmissionSessionContext(
   };
 }
 
+/**
+ * #1213: the branch-side read `change publish` needs before and after
+ * branch.advance. A Source-bound Session reads its Implementation branch
+ * through the Session-scoped Implementation context (the same read `pr create`
+ * uses), never through `change.show(<implementation>)`: the Implementation is
+ * not one of its Change roots. Legacy task-rooted Sessions keep the Change read.
+ */
+async function readLocalPublishProjection(
+  issue: number,
+  context: LocalAdmissionSessionContext,
+): Promise<ChangeProjectionResult> {
+  const binding = context.binding;
+  if (binding.implementationBinding?.sources === undefined || issue !== binding.task.number)
+    return readChangeProjection(context.executor, changeReadRequest(issue));
+  const owned = await context.client.readPullRequestContext(
+    { id: binding.repository.id, name: binding.repository.name },
+    "default",
+    context.sessionId,
+  );
+  const current = validateChangeProjectionResult(owned.change);
+  if (current.projection === undefined)
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid Change projection.");
+  if (
+    binding.branchObservation !== undefined &&
+    current.projection.canonicalBranch !== binding.branchObservation.expectedBranch
+  )
+    throw new CliError(
+      "ADMISSION_SESSION_BRANCH_MISMATCH",
+      "The Implementation branch does not match the Session policy branch.",
+    );
+  return current.projection;
+}
+
 async function runLocalAdmissionChangePublishCommand(
   issue: number,
   parsed: ParsedArgs,
@@ -2376,7 +2409,7 @@ async function runLocalAdmissionChangePublishCommand(
   context: LocalAdmissionSessionContext,
 ): Promise<number> {
   const commitRev = typeof parsed.options.commit === "string" ? parsed.options.commit : "HEAD";
-  const projection = await readChangeProjection(context.executor, changeReadRequest(issue));
+  const projection = await readLocalPublishProjection(issue, context);
   const canonicalBranch = projection.canonicalBranch;
   if (canonicalBranch === undefined) {
     throw new CliError("CHANGE_PUBLISH_BRANCH_UNAVAILABLE", `Change #${issue} has no canonical implementation branch.`);
@@ -2445,7 +2478,7 @@ async function runLocalAdmissionChangePublishCommand(
   if (resultingHead === undefined) {
     throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned no resulting branch head.");
   }
-  const verification = await readChangeProjection(context.executor, changeReadRequest(issue));
+  const verification = await readLocalPublishProjection(issue, context);
   const verifiedBranch = verification.candidates.branches.find(
     (candidate) => candidate.candidate.name === resultBranch,
   );
@@ -2490,7 +2523,7 @@ async function runLocalAdmissionChangeCommand(
     projection = await readChangeProjection(context.executor, changeReadRequest(issue));
   } else {
     const signedProvenanceRecord =
-      operation === "issue" ? readLocalSessionChangeIssueProvenance(context.binding, environment) : undefined;
+      operation === "issue" ? readLocalSessionChangeIssueProvenance(context.binding, environment, issue) : undefined;
     if (operation === "issue" && signedProvenanceRecord === undefined) {
       throw new CliError(
         "ADMISSION_CHANGE_PROVENANCE_REQUIRED",

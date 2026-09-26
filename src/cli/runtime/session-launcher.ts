@@ -6,7 +6,7 @@ import { delegatorPublicKeyFingerprint } from "../../agent-authority/delegator-k
 import { validateDelegator, type Delegator } from "../../agent-authority/delegator.js";
 import { CANONICAL_BRANCH_TYPES, recognizeBranchName } from "../../branch-naming.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "../../agent-authority/codec.js";
-import { observeLocalBranch, type ObserveLocalBranchInput } from "./branch-observation.js";
+import { observeLocalBranch, type LocalBranchPolicyInput } from "./branch-observation.js";
 import {
   validateChangeProvenanceRecord,
   verifyChangeProvenanceRecord,
@@ -27,6 +27,12 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const DEFAULT_SESSION_TTL_SECONDS = 3_600;
 const CHANGE_CAPABILITIES = ["change.implement", "change.ready", "change.abort", "change.merge"] as const;
 const CHANGE_ISSUE_PROVENANCE_SUFFIX = ".change-issue-provenance.json";
+/**
+ * #1213: Source-bound Sessions keep one provenance artifact per Source Issue
+ * under this directory. Every other entry in `sessions/` is a `.json` file, so
+ * this directory name cannot collide with a binding or legacy artifact.
+ */
+const SOURCE_PROVENANCE_DIRECTORY = "change-issue-provenance";
 const CHILD_ENVIRONMENT_DENYLIST = new Set([
   "GH_TOKEN",
   "GITHUB_TOKEN",
@@ -61,7 +67,7 @@ export interface StartLocalSessionOptions {
   readonly resolveRepository: () => Promise<LocalSessionRepositoryIdentity>;
   readonly spawnChild?: typeof spawn;
   readonly now?: Date;
-  readonly branchObservation?: Omit<ObserveLocalBranchInput, "observedBranch">;
+  readonly branchObservation?: LocalBranchPolicyInput;
 }
 
 export class LocalSessionLauncherError extends Error {
@@ -215,6 +221,45 @@ function observedLocalBranch(cwd: string): string {
   fail("ADMISSION_SESSION_BRANCH_UNAVAILABLE", "A local Implementation branch is required.");
 }
 
+/** Branch-policy observation input without the #1213 Source evidence. */
+function branchPolicy(
+  input: LocalBranchPolicyInput,
+): Omit<LocalBranchPolicyInput, "sources" | "implementationBinding"> {
+  const { sources: _sources, implementationBinding: _implementationBinding, ...policy } = input;
+  return policy;
+}
+
+/**
+ * #1213: the exact same-repository Source Issues a Session may root Changes
+ * at, from the current authorized Implementation projection Admission
+ * attached. Without owner Source evidence the Session keeps its legacy
+ * task-rooted identity; owner Sources without that projection fail closed.
+ */
+function sessionChangeRoots(
+  issue: number,
+  repository: LocalSessionRepositoryIdentity,
+  branchInput: LocalBranchPolicyInput | undefined,
+): readonly number[] {
+  if (branchInput?.sources === undefined) return [issue];
+  const binding = branchInput.implementationBinding;
+  if (
+    binding?.sources === undefined ||
+    binding.task.number !== issue ||
+    binding.repository.repositoryHost !== repository.host ||
+    binding.repository.repositoryId !== repository.repositoryId
+  )
+    fail(
+      "ADMISSION_SESSION_IMPLEMENTATION_BINDING_REQUIRED",
+      "Current authorized Implementation Source evidence is required for this Session.",
+    );
+  const roots = binding.sources
+    .filter((source) => source.repositoryHost === repository.host && source.repositoryId === repository.repositoryId)
+    .map((source) => source.number);
+  if (roots.length === 0)
+    fail("ADMISSION_SESSION_CAPABILITY_UNAVAILABLE", "The Implementation declares no same-repository Source Issue.");
+  return roots;
+}
+
 function createBinding(
   sessionId: string,
   issue: number,
@@ -222,14 +267,26 @@ function createBinding(
   cwd: string,
   environment: NodeJS.ProcessEnv,
   now: Date,
-  branchInput?: Omit<ObserveLocalBranchInput, "observedBranch">,
+  branchInput?: LocalBranchPolicyInput,
 ): LocalSessionBinding {
+  const roots = sessionChangeRoots(issue, repository, branchInput);
   const runtimeAuthority = localRuntimeAuthority(environment, now);
   const { authority } = runtimeAuthority;
   const capabilities: CapabilityClaim[] = [];
-  for (const kind of CHANGE_CAPABILITIES) {
-    if (authority.capabilityCeiling.includes(kind)) capabilities.push({ kind, issue });
+  for (const root of roots) {
+    for (const kind of CHANGE_CAPABILITIES) {
+      if (authority.capabilityCeiling.includes(kind)) capabilities.push({ kind, issue: root });
+    }
   }
+  // #1213: a Source-bound Session keeps one task-bound change.implement claim as
+  // the compatibility authority for the Implementation's own PR publication and
+  // branch-side fallback. Admission never admits it as a Change root.
+  if (
+    branchInput?.implementationBinding !== undefined &&
+    !roots.includes(issue) &&
+    authority.capabilityCeiling.includes("change.implement")
+  )
+    capabilities.push({ kind: "change.implement", issue });
   if (authority.capabilityCeiling.includes("branch.advance")) {
     let branch: string;
     if (branchInput === undefined) branch = canonicalIssueBranch(cwd, issue);
@@ -244,7 +301,10 @@ function createBinding(
           "Branch observation does not match the Session repository and Implementation.",
         );
       try {
-        branch = observeLocalBranch({ ...branchInput, observedBranch: observedLocalBranch(cwd) }).expectedBranch;
+        branch = observeLocalBranch({
+          ...branchPolicy(branchInput),
+          observedBranch: observedLocalBranch(cwd),
+        }).expectedBranch;
       } catch {
         fail("ADMISSION_SESSION_BRANCH_MISMATCH", "Local branch does not match the repository policy observation.");
       }
@@ -270,7 +330,15 @@ function createBinding(
       now,
       ...(branchInput === undefined
         ? {}
-        : { branchObservation: observeLocalBranch({ ...branchInput, observedBranch: observedLocalBranch(cwd) }) }),
+        : {
+            branchObservation: observeLocalBranch({
+              ...branchPolicy(branchInput),
+              observedBranch: observedLocalBranch(cwd),
+            }),
+          }),
+      ...(branchInput?.implementationBinding === undefined
+        ? {}
+        : { implementationBinding: branchInput.implementationBinding }),
     });
   } catch {
     fail(
@@ -280,9 +348,38 @@ function createBinding(
   }
 }
 
-function provenancePath(sessionId: string): string {
-  validateSessionId(sessionId);
-  return `sessions/${sessionId}${CHANGE_ISSUE_PROVENANCE_SUFFIX}`;
+/**
+ * Provenance location for one Change root of one Session. A legacy Session
+ * (no signed Source set) has exactly one root, its task, in the historical
+ * file; a Source-bound Session stores each Source under its own path.
+ */
+function provenancePath(binding: LocalSessionBinding, rootIssue: number): string {
+  validateSessionId(binding.sessionId);
+  if (binding.implementationBinding?.sources === undefined)
+    return `sessions/${binding.sessionId}${CHANGE_ISSUE_PROVENANCE_SUFFIX}`;
+  validateIssue(rootIssue);
+  return `sessions/${SOURCE_PROVENANCE_DIRECTORY}/${binding.sessionId}/${rootIssue}.json`;
+}
+
+/**
+ * Change roots the Session holds change.issue authority for. In a Source-bound
+ * Session these are exactly its same-repository Sources; the task-bound
+ * compatibility claim is not a Change root and gets no provenance.
+ */
+function sessionProvenanceRoots(binding: LocalSessionBinding): readonly number[] {
+  const sources = binding.implementationBinding?.sources;
+  return binding.capabilities.flatMap((claim) =>
+    claim.kind === "change.implement" &&
+    (sources === undefined ||
+      sources.some(
+        (source) =>
+          source.repositoryHost === binding.implementationBinding?.repository.repositoryHost &&
+          source.repositoryId === binding.repository.id &&
+          source.number === claim.issue,
+      ))
+      ? [claim.issue]
+      : [],
+  );
 }
 
 function storedProvenanceValidator(value: unknown): SignedChangeProvenanceRecord {
@@ -297,6 +394,7 @@ function verifySessionProvenance(
   binding: LocalSessionBinding,
   record: SignedChangeProvenanceRecord,
   authority: Delegator,
+  rootIssue: number,
 ): void {
   if (
     binding.authority.id !== authority.id ||
@@ -310,21 +408,34 @@ function verifySessionProvenance(
   } catch {
     fail("ADMISSION_CHANGE_PROVENANCE_INVALID", "Signed Runtime provenance could not be verified.");
   }
-  if (payload.rootIssue !== binding.task.number || payload.operation !== "change.issue") {
-    fail("ADMISSION_CHANGE_PROVENANCE_MISMATCH", "Signed provenance is not bound to this Session Issue.");
+  if (
+    payload.rootIssue !== rootIssue ||
+    payload.operation !== "change.issue" ||
+    !sessionProvenanceRoots(binding).includes(rootIssue)
+  ) {
+    fail("ADMISSION_CHANGE_PROVENANCE_MISMATCH", "Signed provenance is not bound to this Session Change root.");
   }
 }
 
+/**
+ * Read the Runtime-signed change.issue provenance for one Change root of the
+ * Session (#1213). The root defaults to the task, the only root a legacy
+ * Session has; a root the Session holds no provenance for reads as absent.
+ */
 export function readLocalSessionChangeIssueProvenance(
   binding: LocalSessionBinding,
   environment: NodeJS.ProcessEnv = process.env,
+  rootIssue: number = binding.task.number,
 ): SignedChangeProvenanceRecord | undefined {
-  const record = readLocalJson("cli", provenancePath(binding.sessionId), storedProvenanceValidator, environment);
+  if (!sessionProvenanceRoots(binding).includes(rootIssue)) return undefined;
+  if (binding.implementationBinding?.sources === undefined && rootIssue !== binding.task.number) return undefined;
+  const record = readLocalJson("cli", provenancePath(binding, rootIssue), storedProvenanceValidator, environment);
   if (record === undefined) return undefined;
-  verifySessionProvenance(binding, record, trustedRuntimeAuthority(environment));
+  verifySessionProvenance(binding, record, trustedRuntimeAuthority(environment), rootIssue);
   return record;
 }
 
+/** Store one Runtime-signed change.issue provenance under its signed Change root. */
 export function storeLocalSessionChangeIssueProvenance(
   binding: LocalSessionBinding,
   record: SignedChangeProvenanceRecord,
@@ -332,25 +443,30 @@ export function storeLocalSessionChangeIssueProvenance(
 ): SignedChangeProvenanceRecord {
   validateSessionId(binding.sessionId);
   const validated = storedProvenanceValidator(record);
-  verifySessionProvenance(binding, validated, trustedRuntimeAuthority(environment));
-  return writeLocalJson("cli", provenancePath(binding.sessionId), validated, storedProvenanceValidator, environment);
+  const rootIssue = validated.rootIssue;
+  if (binding.implementationBinding?.sources === undefined && rootIssue !== binding.task.number)
+    fail("ADMISSION_CHANGE_PROVENANCE_MISMATCH", "Signed provenance is not bound to this Session Change root.");
+  verifySessionProvenance(binding, validated, trustedRuntimeAuthority(environment), rootIssue);
+  return writeLocalJson("cli", provenancePath(binding, rootIssue), validated, storedProvenanceValidator, environment);
 }
 
 async function ensureLocalSessionChangeIssueProvenance(
   binding: LocalSessionBinding,
   environment: NodeJS.ProcessEnv,
   now: Date,
-): Promise<SignedChangeProvenanceRecord> {
-  const existing = readLocalSessionChangeIssueProvenance(binding, environment);
-  if (existing !== undefined) return existing;
-  const signer = localRuntimeAuthority(environment, now);
-  let record: SignedChangeProvenanceRecord;
-  try {
-    record = await signer.signChangeProvenance(binding.task.number);
-  } catch {
-    fail("ADMISSION_CHANGE_PROVENANCE_SIGNING_FAILED", "Runtime Authority could not sign change.issue provenance.");
+): Promise<void> {
+  let signer: LocalRuntimeAuthority | undefined;
+  for (const rootIssue of sessionProvenanceRoots(binding)) {
+    if (readLocalSessionChangeIssueProvenance(binding, environment, rootIssue) !== undefined) continue;
+    signer ??= localRuntimeAuthority(environment, now);
+    let record: SignedChangeProvenanceRecord;
+    try {
+      record = await signer.signChangeProvenance(rootIssue);
+    } catch {
+      fail("ADMISSION_CHANGE_PROVENANCE_SIGNING_FAILED", "Runtime Authority could not sign change.issue provenance.");
+    }
+    storeLocalSessionChangeIssueProvenance(binding, record, environment);
   }
-  return storeLocalSessionChangeIssueProvenance(binding, record, environment);
 }
 
 function validateRepositoryIdentity(repository: LocalSessionRepositoryIdentity): void {
@@ -407,7 +523,7 @@ export async function startLocalSession(options: StartLocalSessionOptions): Prom
       let current;
       try {
         current = observeLocalBranch({
-          ...options.branchObservation,
+          ...branchPolicy(options.branchObservation),
           observedBranch: observedLocalBranch(options.cwd),
         });
       } catch {

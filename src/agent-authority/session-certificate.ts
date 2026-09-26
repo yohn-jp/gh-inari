@@ -473,8 +473,39 @@ export function validateSessionCertificatePayload(
   }
 
   if (task !== undefined && capabilities !== undefined) {
+    // #1213: a signed Implementation binding that carries the current contract
+    // Source set bounds change.* claims to its same-repository Sources plus
+    // the Implementation task itself (the compatibility authority for the
+    // Implementation's own PR publication and branch-side fallback, never a
+    // Change root). Without that set the claim must target the task itself.
+    const sources = implementationBinding?.sources;
+    const sourceIssues =
+      sources === undefined || implementationBinding === undefined
+        ? undefined
+        : new Set(
+            sources
+              .filter(
+                (source) =>
+                  source.repositoryHost.toLowerCase() ===
+                    implementationBinding.repository.repositoryHost.toLowerCase() &&
+                  source.repositoryId === implementationBinding.repository.repositoryId,
+              )
+              .map((source) => source.number),
+          );
     capabilities.forEach((claim, index) => {
       const issue = capabilityClaimIssueNumber(claim);
+      if (sourceIssues !== undefined) {
+        if (issue !== undefined && issue !== task.number && !sourceIssues.has(issue)) {
+          diagnostics.push(
+            createDiagnostic(
+              "SESSION_CERTIFICATE_TASK_SCOPE_MISMATCH",
+              `${path}.capabilities[${index}].issue`,
+              "A change.* capability's issue must be the task or a same-repository Source of the bound Implementation.",
+            ),
+          );
+        }
+        return;
+      }
       if (issue !== undefined && issue !== task.number) {
         diagnostics.push(
           createDiagnostic(

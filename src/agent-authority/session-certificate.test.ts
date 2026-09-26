@@ -316,3 +316,61 @@ test("evaluateSessionCertificateAgainstRuntimeAuthority rejects expiry and untru
   );
   assert.equal(inactive.admitted, false);
 });
+
+test("#1213 a signed Implementation Source set bounds change.* claims to its same-repository Sources", () => {
+  const repository = { repositoryHost: "github.com", repositoryId: "123456789" };
+  const implementationBinding = (sources?: readonly Record<string, unknown>[]) => ({
+    version: 1,
+    kind: "implementation-session-binding",
+    authorization: {
+      version: 1,
+      kind: "implementation-authorization",
+      contractVersion: 1,
+      implementation: { ...repository, number: 1213 },
+      governedBodyDigest: "a".repeat(64),
+    },
+    repository,
+    base: { branch: "main", revision: "b".repeat(40), freshness: "b".repeat(40) },
+    task: { kind: "issue", number: 1213 },
+    ...(sources === undefined ? {} : { sources }),
+  });
+  const sources = [
+    { ...repository, number: 1208 },
+    { ...repository, number: 1209 },
+    { repositoryHost: "github.com", repositoryId: "987654321", number: 7 },
+  ];
+  const certificate = (binding: unknown, issues: readonly number[]) =>
+    validateSessionCertificatePayload(
+      payload({
+        task: { kind: "issue", number: 1213 },
+        implementationBinding: binding,
+        capabilities: issues.map((issue) => ({ kind: "change.implement", issue })),
+      }),
+    );
+  const scopeMismatch = (result: ReturnType<typeof validateSessionCertificatePayload>) =>
+    !result.valid && result.diagnostics.some((d) => d.code === "SESSION_CERTIFICATE_TASK_SCOPE_MISMATCH");
+
+  // Exact-set membership for every Source; no primary Source.
+  assert.equal(certificate(implementationBinding(sources), [1208, 1209]).valid, true);
+  assert.equal(certificate(implementationBinding(sources), [1209]).valid, true);
+  // The Implementation task keeps one compatibility claim (PR publication / branch fallback, never a Change root).
+  assert.equal(certificate(implementationBinding(sources), [1208, 1213]).valid, true);
+  // An unrelated Issue and a cross-repository Source are outside the bound set.
+  assert.ok(scopeMismatch(certificate(implementationBinding(sources), [1208, 4242])));
+  assert.ok(scopeMismatch(certificate(implementationBinding(sources), [7])));
+  // Without a Source set the task rule is unchanged.
+  assert.equal(certificate(implementationBinding(), [1213]).valid, true);
+  assert.ok(scopeMismatch(certificate(implementationBinding(), [1208])));
+  assert.ok(scopeMismatch(certificate(undefined, [1208])));
+  // The Source set never detaches from the Implementation task.
+  assert.equal(
+    validateSessionCertificatePayload(
+      payload({
+        task: { kind: "issue", number: 1208 },
+        implementationBinding: implementationBinding(sources),
+        capabilities: [{ kind: "change.implement", issue: 1208 }],
+      }),
+    ).valid,
+    false,
+  );
+});

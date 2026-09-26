@@ -271,3 +271,29 @@ test("managed issuance signs the binding only after current authorization verifi
       error.code === "SESSION_CERTIFICATE_ISSUANCE_IMPLEMENTATION_BINDING_INVALID",
   );
 });
+
+test("#1213 projects the current contract Source set only on request and validates it canonically", () => {
+  const task = { kind: "issue", number: implementation.number } as const;
+  const legacy = projectImplementationSessionAuthorizationBinding({ ...currentAuthorization(), task });
+  assert.equal("sources" in legacy, false, "without includeSources the certificate projection is unchanged");
+
+  const bound = projectImplementationSessionAuthorizationBinding({
+    ...currentAuthorization(),
+    task,
+    includeSources: true,
+  });
+  assert.deepEqual(bound.sources, [source]);
+  assert.deepEqual(bound.task, task, "the Session task stays the Implementation");
+  assert.equal(validateImplementationSessionAuthorizationBinding(bound).valid, true);
+
+  const other = { ...repository, number: 700 };
+  const reordered = validateImplementationSessionAuthorizationBinding({ ...bound, sources: [other, source] });
+  assert.deepEqual(reordered.binding?.sources, [source, other], "Source sets are canonical, not caller-ordered");
+  for (const sources of [[], [source, source], [{ ...source, number: 0 }], "678"])
+    assert.equal(validateImplementationSessionAuthorizationBinding({ ...bound, sources }).valid, false);
+  assert.equal(
+    tryProjectImplementationSessionAuthorizationBinding({ ...currentAuthorization(), task, includeSources: "yes" })
+      .valid,
+    false,
+  );
+});
