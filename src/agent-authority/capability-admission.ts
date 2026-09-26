@@ -744,6 +744,27 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
+ * #1213: the Implementation task identity and the Change subject identity are
+ * distinct only when the current Implementation binding proves the subject is
+ * an exact same-repository member of its canonical Source set. Branch and pull
+ * request subjects stay bound to the Implementation task.
+ */
+function isCurrentImplementationSource(
+  context: SessionAdmissionAuthorizationContext,
+  repository: RepositoryIdentity,
+  subject: CapabilityAdmissionSubject,
+): boolean {
+  const sources = context.implementationBinding?.sources;
+  if (subject.kind !== "change" || sources === undefined) return false;
+  return sources.some(
+    (source) =>
+      source.repositoryHost.toLowerCase() === repository.repositoryHost.toLowerCase() &&
+      source.repositoryId === repository.repositoryId &&
+      source.number === subject.issue,
+  );
+}
+
+/**
  * Admit one already-authenticated semantic request. This function is pure
  * with respect to GitHub: it only validates bounded values and invokes the
  * existing pure Core/#370 authorities.
@@ -773,7 +794,11 @@ export function admitAuthenticatedSessionCapability(input: CapabilityAdmissionRe
   requireSubjectShape(operation, subject);
 
   const validatedContext = validateContext(input.context, operation);
-  if (validatedContext.context.task !== undefined && validatedContext.context.task.number !== subject.issue) {
+  if (
+    validatedContext.context.task !== undefined &&
+    validatedContext.context.task.number !== subject.issue &&
+    !isCurrentImplementationSource(validatedContext.context, validatedContext.repository, subject)
+  ) {
     deny("task");
   }
   const canonical = canonicalProjection(input.projection, validatedContext.repository, subject.issue);

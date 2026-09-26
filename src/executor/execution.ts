@@ -439,6 +439,8 @@ function branchPolicyDenied(code: string, message: string): LocalExecutorError {
  * for staleness. It is public data only; no credential leaves the Executor.
  * A non-Implementation Issue (for example a Source bug Issue) or an
  * unavailable/invalid policy is a bounded denial, never a fixed-grammar guess.
+ * The contract's canonical Source Issue references (#1213) are projected from
+ * the same parsed contract; no second contract parser is involved.
  */
 export async function readLocalExecutorBranchPolicy(
   request: LocalExecutorBranchPolicyRequest,
@@ -502,6 +504,8 @@ export async function readLocalExecutorBranchPolicy(
             treeSha: acquisition.policy.generation.treeSha,
           },
           ...(branch === undefined ? {} : { binding: { repository, implementation: request.implementation, branch } }),
+          // #1213: the bounded canonical Source set of the same parsed contract.
+          sources: parsed.contract.sources,
         });
       }),
     ),
