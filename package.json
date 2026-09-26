@@ -260,7 +260,8 @@
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm run typecheck && pnpm test",
     "readme:check": "node scripts/readme-integrity.mjs",
-    "boundaries:check": "node scripts/check-runtime-boundaries.mjs"
+    "boundaries:check": "node scripts/check-runtime-boundaries.mjs",
+    "certify:release": "node scripts/release-preparation-certification.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "2.0.0",
