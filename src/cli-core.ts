@@ -1,5 +1,6 @@
 import { open, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -198,6 +199,7 @@ import {
 } from "./composition/local-runtime-roles.js";
 import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
 import { renderLocalApplicationSetupFlow } from "./local-application-state-terminal.js";
+import type { SetupTerminalIO } from "./cli/setup/index.js";
 import { superviseLocalRuntime } from "./local-control/supervisor.js";
 import { startLocalConsole } from "./local-control/console-server.js";
 import {
@@ -353,6 +355,12 @@ export interface CliDependencies {
   readonly createLocalRuntimeConfig?: (
     input: LocalRuntimeConfigInput,
   ) => LocalRuntimeConfig | PromiseLike<LocalRuntimeConfig>;
+  /** Credential-free fetch used only to resolve a public repository ID for `inari setup` subcommands. */
+  readonly setupFetch?: typeof globalThis.fetch;
+  /** Setup console asset directory override (tests); production uses the packaged assets. */
+  readonly setupAssetDirectory?: string;
+  /** Observer of the started, owned setup host (tests close it through this handle). */
+  readonly onSetupHostStarted?: (handle: { readonly origin: string; close(): Promise<void> }) => void;
   /** Injectable repository onboarding seam for deterministic setup tests. */
   readonly setupRepository?: (
     input: RepositorySetupInput,
@@ -430,6 +438,8 @@ interface ParsedArgs {
   readonly fields: readonly RawFieldEntry[];
   /** Core projection capability identifiers, preserved in argv order. */
   readonly capabilities: readonly string[];
+  /** Repeatable `id=value` setup inputs (`--input`, `--enrollment-file`), preserved in argv order. */
+  readonly repeated: Readonly<Partial<Record<"input" | "enrollmentFile", readonly string[]>>>;
 }
 
 interface CliErrorShape {
@@ -1723,6 +1733,13 @@ async function runSetupCommand(
   dependencies: CliDependencies,
   json: boolean,
 ): Promise<number> {
+  const subcommand = parsed.positionals[1];
+  if (
+    parsed.positionals.length === 2 &&
+    (subcommand === "status" || subcommand === "next" || subcommand === "console")
+  ) {
+    return runSetupApplicationCommand(subcommand, parsed, root, dependencies, json);
+  }
   if (parsed.positionals.length !== 1 || parsed.positionals[0] !== "setup") {
     throw new CliError("UNKNOWN_COMMAND", "Unknown setup command.");
   }
@@ -1777,6 +1794,188 @@ async function runSetupCommand(
     }
   }
   return 0;
+}
+
+function splitSetupAssignments(values: readonly string[] | undefined, option: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const raw of values ?? []) {
+    const index = raw.indexOf("=");
+    const id = raw.slice(0, index);
+    if (!/^[A-Za-z0-9_-]{1,64}$/u.test(id) || Object.hasOwn(result, id))
+      throw new CliError("INVALID_OPTION", `Option ${option} requires one "<id>=<value>" per input ID.`, option);
+    result[id] = raw.slice(index + 1);
+  }
+  return result;
+}
+
+function setupTerminalIO(): SetupTerminalIO | undefined {
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) return undefined;
+  const ask = async (question: string): Promise<string | undefined> => {
+    const prompt = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = (await prompt.question(question)).trim();
+      return answer.length === 0 ? undefined : answer;
+    } catch {
+      return undefined;
+    } finally {
+      prompt.close();
+    }
+  };
+  return {
+    isTTY: true,
+    prompt: (input) =>
+      ask(`${input.label}${input.kind === "enrollment" ? " (file path; its bytes go to the owner unread)" : ""}: `),
+    confirm: async (summary) => (await ask(`${summary} Proceed? [y/N] `))?.toLowerCase() === "y",
+  };
+}
+
+/**
+ * `inari setup status|next|console`: every frontend builds the same Setup
+ * Application over the same persisted non-secret stores and #1120 owner
+ * adapters. Only the long-running setup host owns Runtime children.
+ */
+async function runSetupApplicationCommand(
+  subcommand: "status" | "next" | "console",
+  parsed: ParsedArgs,
+  root: string,
+  dependencies: CliDependencies,
+  json: boolean,
+): Promise<number> {
+  const commandId = `setup.${subcommand}` as const;
+  const definition = getCommand(commandId);
+  const unsupported = Object.keys(parsed.options).find((key) => !definition.optionIds.includes(key as OptionId));
+  if (parsed.capabilities.length > 0 || unsupported !== undefined) {
+    const optionId = unsupported ?? "capability";
+    const option = getOption(optionId as OptionId);
+    throw new CliError(
+      "INVALID_OPTION",
+      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by setup ${subcommand}.`,
+      "$argv",
+      { command: `setup ${subcommand}`, option: optionId },
+    );
+  }
+  const environment = dependencies.environment ?? process.env;
+  const host = await import("./composition/setup-host.js");
+  let repository: Awaited<ReturnType<typeof host.resolveSetupRepository>>;
+  try {
+    repository = await host.resolveSetupRepository({
+      root,
+      environment,
+      ...(typeof parsed.options.repository === "string" ? { repository: parsed.options.repository } : {}),
+      ...(typeof parsed.options.repositoryId === "string" ? { repositoryId: parsed.options.repositoryId } : {}),
+      ...(dependencies.setupFetch === undefined ? {} : { fetch: dependencies.setupFetch }),
+    });
+  } catch (error: unknown) {
+    if (error instanceof host.SetupHostError) throw new CliError(error.code, error.message, "--repository-id");
+    throw error;
+  }
+
+  if (subcommand === "console") {
+    const live = await host.findLiveSetupHost(environment);
+    if (live !== undefined) {
+      const port = new URL(live.endpoint).port;
+      if (json)
+        console.log(
+          JSON.stringify({
+            ok: true,
+            operation: "setup.console",
+            endpoint: live.endpoint,
+            url: `${live.endpoint}/`,
+            sshForward: `-L ${port}:127.0.0.1:${port}`,
+            reused: true,
+            foreground: false,
+          }),
+        );
+      else {
+        console.log(`The local setup console is already running: ${live.endpoint}/`);
+        console.log("No second host was started.");
+      }
+      return 0;
+    }
+    const lifecycle = host.createOwnedRuntimeLifecycle({ environment });
+    const application = host.createLocalSetupApplication({ environment, root, lifecycle });
+    let handle: Awaited<ReturnType<typeof host.startSetupHost>>;
+    try {
+      handle = await host.startSetupHost({
+        application,
+        repository,
+        environment,
+        lifecycle,
+        ...(dependencies.setupAssetDirectory === undefined ? {} : { assetDirectory: dependencies.setupAssetDirectory }),
+      });
+    } catch (error: unknown) {
+      if (error instanceof host.SetupHostError) throw new CliError(error.code, error.message);
+      throw error;
+    }
+    const shutdown = (): void => {
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+      void handle.close().catch(() => {
+        process.exitCode = EXIT_INTERNAL;
+      });
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+    void handle.closed.then(() => {
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+    });
+    const port = new URL(handle.origin).port;
+    const sshForward = `-L ${port}:127.0.0.1:${port}`;
+    if (json)
+      console.log(
+        JSON.stringify({
+          ok: true,
+          operation: "setup.console",
+          endpoint: handle.origin,
+          url: `${handle.origin}/`,
+          sshForward,
+          reused: false,
+          foreground: true,
+          repository,
+        }),
+      );
+    else {
+      console.log(`Local setup console: ${handle.origin}/`);
+      console.log("Loopback-only. The page receives a short-lived operator session in memory; nothing is stored.");
+      console.log("To use it from a workstation browser over SSH, forward the same loopback port:");
+      console.log(`  ssh ${sshForward} <user>@<remote-host>`);
+      console.log("Press Ctrl-C to stop the console and any Runtime it started.");
+    }
+    dependencies.onSetupHostStarted?.(handle);
+    return 0;
+  }
+
+  const application = host.createLocalSetupApplication({
+    environment,
+    root,
+    lifecycle: host.createObservedRuntimeLifecycle({ environment }),
+  });
+  const { runSetupAction } = await import("./cli/setup/index.js");
+  const io = json ? undefined : setupTerminalIO();
+  const result = await runSetupAction(application, repository, {
+    json,
+    detail: parsed.options.detail === true,
+    execute: subcommand === "next",
+    inputs: splitSetupAssignments(parsed.repeated.input, "--input"),
+    enrollmentFiles: splitSetupAssignments(parsed.repeated.enrollmentFile, "--enrollment-file"),
+    enrollmentSource: host.createFileEnrollmentSource(root),
+    confirmed: parsed.options.yes === true,
+    ...(io === undefined ? {} : { io }),
+  });
+  const operation = `setup.${subcommand}`;
+  if (json) {
+    console.log(
+      JSON.stringify(
+        result.kind === "result"
+          ? { ok: result.result.outcome === "succeeded", operation, kind: result.kind, result: result.result }
+          : { ok: result.kind === "state", operation, kind: result.kind, state: result.state },
+      ),
+    );
+  } else console.log(result.output);
+  if (result.kind === "state") return 0;
+  if (result.kind === "result") return result.result.outcome === "succeeded" ? 0 : EXIT_REMOTE;
+  return result.kind === "input-required" ? EXIT_VALIDATION : EXIT_USAGE;
 }
 
 function invalidArtifactNumberError(domain: "issue" | "pr", value: string | undefined): CliError {
@@ -5276,6 +5475,7 @@ function parseArguments(argv: readonly string[]): ParsedArgs {
   const options: Record<string, string | boolean> = {};
   const fields: RawFieldEntry[] = [];
   const capabilities: string[] = [];
+  const repeated: { input?: string[]; enrollmentFile?: string[] } = {};
   const tokenized = tokenizeCommandArgv(argv);
   for (const occurrence of tokenized.options) {
     const option = occurrence.definition;
@@ -5315,6 +5515,14 @@ function parseArguments(argv: readonly string[]): ParsedArgs {
       fields.push({ name: raw.slice(0, separatorIndex), value: raw.slice(separatorIndex + 1) });
       continue;
     }
+    if (option.id === "input" || option.id === "enrollmentFile") {
+      const raw = occurrence.value;
+      if (raw === undefined || raw.indexOf("=") <= 0)
+        throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} requires "<id>=<value>" syntax.`);
+      (repeated[option.id] ??= []).push(raw);
+      options[option.id] = true;
+      continue;
+    }
     if (option.id === "capability") {
       const capability = occurrence.value;
       if (capability === undefined || capability.length === 0)
@@ -5337,7 +5545,7 @@ function parseArguments(argv: readonly string[]): ParsedArgs {
       throw new CliError("INVALID_OPTION", `Option ${occurrence.rawName} requires a value.`);
     options[key] = occurrence.value;
   }
-  return { positionals: tokenized.positionals, options, fields, capabilities };
+  return { positionals: tokenized.positionals, options, fields, capabilities, repeated };
 }
 
 function toErrorShape(error: unknown): CliErrorShape {
@@ -5660,8 +5868,9 @@ function printHelpFor(positionals: readonly string[], helpValue: string | boolea
     if (definition?.id === "root.init") return printLeafHelp(definition);
   }
   if (domain === "setup") {
-    const definition = getCommandForPositionals(positionals);
-    if (definition?.id === "root.setup") return printLeafHelp(definition);
+    const definition = command === undefined ? undefined : getCommandForPositionals(positionals);
+    if (definition !== undefined && definition.domain === "setup") return printLeafHelp(definition);
+    return printSetupHelp();
   }
   printRootHelp();
 }
@@ -5674,7 +5883,7 @@ commands run through Inari; unsupported commands are rejected locally.
 
 Domains:
   init       Declare the local CLI Admission and Executor topology
-  setup      Repository-scoped Runtime onboarding and trust readiness
+  setup      Local setup state, next action, browser console, and repository onboarding
   issue      Governed Issue schema, validation, rendering, and lifecycle
   pr         Governed pull request schema, validation, rendering, and lifecycle
   impl       Canonical Implementation planning, validation, and authorization
@@ -5725,6 +5934,20 @@ Only commands in this list are supported under "${domain}". Use the GitHub CLI
 directly for other operations (for example, \`${DOMAIN_EXTERNAL_EXAMPLE[domain]}\`).
 
 Run \`inari ${domain} <command> --help\` for that command's inputs and an example.`);
+}
+
+/** `inari setup` keeps its repository-onboarding root command beside the Setup Application operations. */
+function printSetupHelp(): void {
+  const commands = [getCommand("root.setup"), ...getDomainCommands("setup")];
+  console.log(`Usage: inari setup [<command>] [...]
+
+Operations:
+${commands.map((entry) => `  ${commandUsage(entry)}`).join("\n")}
+
+\`inari setup status\`, \`next\` and \`console\` use one Setup Application over the same local,
+non-secret setup records; the browser console needs no Issuer key, trust or running Runtime.
+
+Run \`inari setup <command> --help\` for that command's inputs and an example.`);
 }
 
 function printSkillHelp(scenarioId: string | undefined): void {

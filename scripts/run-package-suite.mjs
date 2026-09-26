@@ -3,8 +3,9 @@
 // package.json's "files" field promises (no more, no less), then delegates
 // runtime verification to the standalone package certification against the
 // installed tarball.
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -689,6 +690,12 @@ const EXPECTED_PACKED_FILES = [
   "dist/composition/setup-observation.d.ts",
   "dist/composition/setup-observation.js",
   "dist/composition/setup-observation.js.map",
+  "dist/composition/setup-host.d.ts",
+  "dist/composition/setup-host.js",
+  "dist/composition/setup-host.js.map",
+  "dist/setup-console/index.html",
+  "dist/setup-console/setup-console.js",
+  "dist/setup-console/styles.css",
   "dist/authority/index.d.ts",
   "dist/authority/index.js",
   "dist/authority/index.js.map",
@@ -938,9 +945,110 @@ export async function validateCodexPlugin(packageJson, packedFiles) {
   // Scenario routing is certified by the installed artifact harness below.
 }
 
+// Installs the packed artifact outside the checkout and starts the installed
+// `inari setup console`: the host must serve exactly the packaged console
+// assets from beside its own installed module and deliver a same-origin
+// bootstrap, with no source-checkout path involved.
+async function certifyInstalledSetupConsole(tarballPath, packageName) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gh-inari-setup-console-"));
+  let child;
+  try {
+    const consumer = path.join(root, "consumer");
+    fs.mkdirSync(consumer);
+    fs.writeFileSync(path.join(consumer, "package.json"), JSON.stringify({ name: "consumer", private: true }));
+    run(
+      "npm",
+      [
+        "install",
+        "--no-save",
+        "--no-package-lock",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+        "--omit=dev",
+        tarballPath,
+      ],
+      { cwd: consumer },
+    );
+    const installed = fs.realpathSync(path.join(consumer, "node_modules", ...packageName.split("/")));
+    if (!path.relative(repoRoot, installed).startsWith(".."))
+      throw new Error("installed package resolved inside the checkout");
+    const environment = { ...process.env, INARI_CONFIG_HOME: path.join(root, "config") };
+    for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) delete environment[name];
+    child = spawn(
+      process.execPath,
+      [
+        path.join(installed, "dist", "index.js"),
+        "setup",
+        "console",
+        "--json",
+        "--repository",
+        "example/setup",
+        "--repository-id",
+        "1",
+      ],
+      { cwd: consumer, env: environment, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+    const started = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`installed setup console did not start: ${stdout}${stderr}`)),
+        20_000,
+      );
+      child.stdout.on("data", () => {
+        if (!stdout.includes("\n")) return;
+        clearTimeout(timer);
+        resolve(JSON.parse(stdout.split("\n")[0]));
+      });
+      child.once("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`installed setup console exited ${code}: ${stdout}${stderr}`));
+      });
+    });
+    if (started.operation !== "setup.console" || started.reused !== false)
+      throw new Error("installed setup console did not start an owned host");
+    for (const [route, file] of [
+      ["/", "index.html"],
+      ["/setup-console.js", "setup-console.js"],
+      ["/styles.css", "styles.css"],
+    ]) {
+      const response = await fetch(`${started.endpoint}${route}`);
+      const served = Buffer.from(await response.arrayBuffer());
+      const packaged = fs.readFileSync(path.join(installed, "dist", "setup-console", file));
+      if (response.status !== 200 || !served.equals(packaged))
+        throw new Error(`installed setup console did not serve the packaged ${file}`);
+    }
+    const bootstrap = await fetch(`${started.endpoint}/api/setup/bootstrap`, {
+      method: "POST",
+      headers: { origin: started.endpoint, "x-inari-setup-bootstrap": "1" },
+    });
+    if (bootstrap.status !== 200) throw new Error("installed setup console refused a same-origin bootstrap");
+    const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+    child.kill("SIGTERM");
+    const exit = await exited;
+    if (exit.code !== 0 && exit.signal !== "SIGTERM")
+      throw new Error(`installed setup console shutdown exited ${exit.code}`);
+    if (fs.existsSync(path.join(root, "config", "runtime", "endpoints", "setup.json")))
+      throw new Error("installed setup console left its discovery announcement after shutdown");
+    console.log("installed setup console verified: packaged assets served from the installed package, owned shutdown");
+  } finally {
+    if (child !== undefined && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const distEntry = path.join(repoRoot, "dist", "index.js");
   if (!fs.existsSync(distEntry)) throw new Error("dist is missing; run pnpm run build before the package suite");
+
+  for (const file of ["index.html", "setup-console.js", "styles.css"]) {
+    if (!fs.existsSync(path.join(repoRoot, "dist", "setup-console", file))) {
+      throw new Error(`Setup console build output is missing dist/setup-console/${file}`);
+    }
+  }
 
   const dashboardDist = path.join(repoRoot, "apps/dashboard", "dist");
   for (const file of ["index.html", "browser.js"]) {
@@ -1012,6 +1120,7 @@ async function main() {
     run(process.execPath, ["scripts/package-runtime-certification.mjs", "--tarball", tarballPath], {
       stdio: "inherit",
     });
+    await certifyInstalledSetupConsole(tarballPath, packageJson.name);
     run(process.execPath, ["scripts/release-preparation-certification.mjs"], { stdio: "inherit" });
     run(process.execPath, ["scripts/endpoint-dashboard-certification.mjs"], { stdio: "inherit" });
   } finally {

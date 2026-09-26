@@ -80,6 +80,8 @@ test("forms are rendered exactly for the canonical actions, with every declared 
         action.inputs.map((input) => [input.id, input.kind]),
       );
       assert.equal(all(form, (node) => node.attrs.type === "submit").length, 1);
+      // A re-render empties native file inputs; native validation must not block the in-memory selection.
+      assert.equal(form.attrs.novalidate, "");
       const acknowledge = all(form, (node) => node.attrs["data-acknowledge"] === action.id);
       assert.equal(acknowledge.length, action.confirmation.required ? 1 : 0);
       assert.match(

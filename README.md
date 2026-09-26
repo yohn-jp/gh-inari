@@ -52,6 +52,14 @@ Setup stores only a repository-scoped, secret-free Runtime profile. It never
 commits, pushes, approves, or merges Runtime Authority trust; `ready` is
 reported only after canonical protected-ref readiness succeeds.
 
+The local setup state is shared by the CLI and a loopback browser console:
+
+```bash
+inari setup status          # canonical state and the one next action
+inari setup next            # perform exactly that action through its owner
+inari setup console         # owned loopback setup host; works before any key or trust
+```
+
 ## The governed path
 
 ```text

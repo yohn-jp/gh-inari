@@ -388,6 +388,44 @@ Admission checks the configured Executor identity before becoming ready. The
 CLI and Agent child use the configured Admission route and do not need
 provider credentials.
 
+### Setup Application frontends (`inari setup status|next|console`)
+
+`inari setup status`, `inari setup next` and `inari setup console` use one Setup
+Application over the same persisted, non-secret setup records and the real
+owner adapters, so a fresh CLI and the browser report the same state and
+configuration generation without inheriting matching shell exports. The
+repository identity comes from `--repository-id`, the recorded Runtime profile,
+or a credential-free public repository read.
+
+- `inari setup status [--detail]` prints the canonical state and the one next
+  action. `inari setup next` performs only that offered action; confirmation is
+  interactive or `--yes`, secret-free inputs are `--input <id>=<value>`, and an
+  enrollment file is `--enrollment-file <id>=<path>`. Its bytes are streamed
+  unparsed to the owning component (the Executor for the Issuer key).
+- `inari setup console` starts an explicitly owned loopback setup/control host
+  on a dynamically allocated port (there is no fixed-port fallback) and prints
+  its URL and the matching SSH `-L` forward. It needs no Issuer key, repository
+  trust or ready Runtime. The host serves the packaged console assets
+  (`dist/setup-console/`); the page obtains a short-lived operator bearer/CSRF
+  pair from its own origin and keeps it in memory only; it is never stored,
+  placed in a URL or embedded in an asset. A repeated `inari setup console`
+  reports the running host instead of starting another; a stale announcement
+  is replaced.
+- Starting the ordinary Runtime from the browser uses the same Supervisor and
+  discovery model as `inari runtime supervise`. Starts are serialized, a running
+  owned or discovered healthy Runtime is reused, and a reachable Runtime that
+  this host did not start is never adopted, restarted or stopped. A crashed owned
+  child is stopped with its sibling and reported; a new start recovers.
+  Stopping the console (Ctrl-C/SIGTERM) closes its listener, removes only its
+  own announcement and stops only the Runtime children it started. The short
+  `setup status|next` CLI processes never spawn Runtime children; start the
+  Runtime from the console or with `inari runtime supervise`.
+
+The packaged console is exercised in a real browser by
+`pnpm run test:setup-browser` (exit 0 pass, 1 fail, 2 blocked when no
+Chromium-compatible browser or driver is available; set `INARI_SETUP_BROWSER`
+to choose one).
+
 Before Session start, check out the canonical Issue-bound Change branch
 (`<feat|fix|docs|refactor|test|chore>/<issue-number>-<slug>`) for the Issue
 you are implementing; `inari init` reports whether one is currently selected.

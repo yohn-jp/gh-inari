@@ -2,12 +2,14 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { extname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   LOCAL_ADMISSION_CLIENT_HEALTH_PATH,
   LOCAL_ADMISSION_CLIENT_PROTOCOL_VERSION,
 } from "../cli/runtime/admission-client.js";
 import { LOCAL_EXECUTOR_HEALTH_PATH, LOCAL_EXECUTOR_PROTOCOL_VERSION } from "./executor-http.js";
 import {
+  clearLocalRuntimeEndpoint,
   readLocalRuntimeEndpoint,
   requireLocalRuntimeEndpoint,
   type LocalRuntimeComponent,
@@ -72,9 +74,21 @@ function childEnvironment(component: LocalRuntimeComponent, environment: NodeJS.
   return child;
 }
 
-function createManagedChild(component: LocalRuntimeComponent, environment: NodeJS.ProcessEnv): ManagedChild {
-  const entry = process.argv[1];
-  if (entry === undefined || entry.length === 0) {
+/**
+ * The package's own CLI entrypoint, resolved beside this module (`dist/index.js`
+ * when installed, `src/index.ts` from a checkout); never the caller's argv.
+ */
+export function localRuntimeEntrypoint(): string {
+  const source = extname(fileURLToPath(import.meta.url)).toLowerCase() === ".ts";
+  return fileURLToPath(new URL(source ? "../index.ts" : "../index.js", import.meta.url));
+}
+
+function createManagedChild(
+  component: LocalRuntimeComponent,
+  environment: NodeJS.ProcessEnv,
+  entry: string,
+): ManagedChild {
+  if (entry.length === 0) {
     throw new LocalRuntimeSupervisorError(
       "LOCAL_RUNTIME_SUPERVISOR_ENTRYPOINT_MISSING",
       "The Inari CLI entrypoint is unavailable.",
@@ -257,8 +271,9 @@ async function startAndVerify(
   component: LocalRuntimeComponent,
   environment: NodeJS.ProcessEnv,
   children: ManagedChild[],
+  entry: string,
 ): Promise<ManagedChild> {
-  const child = createManagedChild(component, environment);
+  const child = createManagedChild(component, environment, entry);
   children.push(child);
   const id = await waitForStartup(child);
   let announcement: LocalRuntimeEndpoint;
@@ -291,7 +306,8 @@ async function waitForClose(child: ManagedChild, timeoutMs: number): Promise<boo
 }
 
 async function stopChild(child: ManagedChild, environment: NodeJS.ProcessEnv): Promise<boolean> {
-  if (child.child.exitCode === null && child.child.signalCode === null) child.child.kill("SIGTERM");
+  const exitedBeforeStop = child.child.exitCode !== null || child.child.signalCode !== null;
+  if (!exitedBeforeStop) child.child.kill("SIGTERM");
   let stopped = await waitForClose(child, SHUTDOWN_TIMEOUT_MS);
   let forced = false;
   if (!stopped) {
@@ -306,6 +322,15 @@ async function stopChild(child: ManagedChild, environment: NodeJS.ProcessEnv): P
     );
   }
   if (child.announcement !== undefined) {
+    // A child that exited on its own cannot clear its announcement; the owner
+    // removes only that exact instance, never another process's endpoint.
+    if (exitedBeforeStop) {
+      try {
+        clearLocalRuntimeEndpoint(child.announcement, environment);
+      } catch {
+        // The stale check below reports an announcement that could not be removed.
+      }
+    }
     const current = readLocalRuntimeEndpoint(child.component, environment);
     if (current?.instanceId === child.announcement.instanceId) {
       throw new LocalRuntimeSupervisorError(
@@ -333,12 +358,131 @@ async function stopChildren(children: readonly ManagedChild[], environment: Node
   return forced;
 }
 
+/** One started, verified Executor/Admission pair owned by the caller that started it. */
+export interface SupervisedLocalRuntime {
+  readonly executorId: string;
+  readonly admissionId: string;
+  /** Resolves when either owned child exits for any reason. */
+  readonly exited: Promise<{
+    readonly component: LocalRuntimeComponent;
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>;
+  /** Stops only these owned children; resolves true when forced termination was needed. */
+  stop(): Promise<boolean>;
+}
+
+export interface LocalRuntimeStartOptions {
+  /** CLI entrypoint the children run; defaults to this package's own entrypoint. */
+  readonly entrypoint?: string;
+}
+
+/**
+ * Start Executor then Admission as owned OS processes and verify each through
+ * Runtime discovery. On any failure every child started here is stopped
+ * before the error is rethrown; nothing outlives a failed start.
+ */
+export async function startLocalRuntime(
+  environment: NodeJS.ProcessEnv = process.env,
+  options: LocalRuntimeStartOptions = {},
+): Promise<SupervisedLocalRuntime> {
+  const entry = options.entrypoint ?? localRuntimeEntrypoint();
+  const children: ManagedChild[] = [];
+  try {
+    const executor = await startAndVerify("executor", environment, children, entry);
+    const admission = await startAndVerify("admission", environment, children, entry);
+    let stopping: Promise<boolean> | undefined;
+    return Object.freeze({
+      executorId: executor.announcement!.id,
+      admissionId: admission.announcement!.id,
+      exited: Promise.race(
+        children.map((child) =>
+          child.exit.then((result) => ({ component: child.component, code: result.code, signal: result.signal })),
+        ),
+      ),
+      stop: () => (stopping ??= stopChildren(children, environment)),
+    });
+  } catch (error: unknown) {
+    let shutdownError: unknown;
+    try {
+      await stopChildren(children, environment);
+    } catch (stopError: unknown) {
+      shutdownError = stopError;
+    }
+    if (shutdownError !== undefined) {
+      throw new LocalRuntimeSupervisorError(
+        "LOCAL_RUNTIME_SUPERVISOR_SHUTDOWN_FAILED",
+        `${error instanceof Error ? error.message : "Local Runtime supervision failed."} ${shutdownError instanceof Error ? shutdownError.message : "Child shutdown failed."}`,
+      );
+    }
+    throw error;
+  }
+}
+
+export type LocalRuntimeProbeStatus = "not-running" | "unhealthy" | "healthy";
+
+export interface LocalRuntimeProbe {
+  readonly status: LocalRuntimeProbeStatus;
+  /** Secret-free reason for a non-healthy status. */
+  readonly reason?: string;
+  readonly executorId?: string;
+  readonly admissionId?: string;
+}
+
+async function reachable(endpoint: string): Promise<boolean> {
+  try {
+    const response = await fetch(endpoint, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(2_000) });
+    await response.body?.cancel().catch(() => undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Observe the discovered local Runtime without owning it: no announcement or
+ * an unreachable (stale) announcement is `not-running`; a reachable service
+ * that fails its identity/readiness check is `unhealthy`. Admission reports
+ * ready only after its own Executor check, so a TLS Executor is judged by it.
+ */
+export async function probeLocalRuntime(environment: NodeJS.ProcessEnv = process.env): Promise<LocalRuntimeProbe> {
+  let executor: LocalRuntimeEndpoint | undefined;
+  let admission: LocalRuntimeEndpoint | undefined;
+  try {
+    executor = readLocalRuntimeEndpoint("executor", environment);
+    admission = readLocalRuntimeEndpoint("admission", environment);
+  } catch {
+    return { status: "unhealthy", reason: "Local Runtime discovery state is unreadable." };
+  }
+  const ids = {
+    ...(executor === undefined ? {} : { executorId: executor.id }),
+    ...(admission === undefined ? {} : { admissionId: admission.id }),
+  };
+  const live = await Promise.all([
+    executor === undefined ? false : reachable(executor.endpoint),
+    admission === undefined ? false : reachable(admission.endpoint),
+  ]);
+  if (!live[0] && !live[1]) return { status: "not-running", ...ids };
+  if (executor === undefined || admission === undefined || !live[0] || !live[1])
+    return { status: "unhealthy", reason: "Only part of the local Runtime is reachable.", ...ids };
+  try {
+    if (new URL(executor.endpoint).protocol === "http:") await verifyHealth("executor", executor.id, executor.endpoint);
+    await verifyHealth("admission", admission.id, admission.endpoint);
+  } catch (error: unknown) {
+    return {
+      status: "unhealthy",
+      reason: error instanceof LocalRuntimeSupervisorError ? error.message : "Local Runtime health failed.",
+      ...ids,
+    };
+  }
+  return { status: "healthy", ...ids };
+}
+
 /** Start and supervise two OS processes, using Runtime discovery for each readiness check. */
 export async function superviseLocalRuntime(
   environment: NodeJS.ProcessEnv = process.env,
   json = false,
 ): Promise<number> {
-  const children: ManagedChild[] = [];
   let requestedSignal: NodeJS.Signals | undefined;
   let resolveSignal: (signal: NodeJS.Signals) => void = () => {};
   const signalRequested = new Promise<NodeJS.Signals>((resolve) => {
@@ -355,59 +499,59 @@ export async function superviseLocalRuntime(
   process.on("SIGINT", onInterrupt);
   process.on("SIGTERM", onTerminate);
   try {
-    const executor = await startAndVerify("executor", environment, children);
-    const admission = await startAndVerify("admission", environment, children);
-    if (json) {
-      console.log(
-        JSON.stringify({
-          ok: true,
-          operation: "runtime.supervise",
-          executorId: executor.announcement?.id,
-          admissionId: admission.announcement?.id,
-          readiness: "ready",
-          foreground: true,
-        }),
+    const runtime = await startLocalRuntime(environment);
+    try {
+      if (json) {
+        console.log(
+          JSON.stringify({
+            ok: true,
+            operation: "runtime.supervise",
+            executorId: runtime.executorId,
+            admissionId: runtime.admissionId,
+            readiness: "ready",
+            foreground: true,
+          }),
+        );
+      } else {
+        console.log("Local Admission and Executor are ready under supervision.");
+        console.log("Both services expose secret-free loopback status pages at /status.");
+        console.log("Press Ctrl-C to stop both services.");
+      }
+      const outcome = await Promise.race([
+        runtime.exited.then((result) => ({ kind: "child" as const, ...result })),
+        signalRequested.then((signal) => ({ kind: "signal" as const, signal })),
+      ]);
+      if (requestedSignal !== undefined || outcome.kind === "signal") {
+        const forced = await runtime.stop();
+        if (forced) {
+          throw new LocalRuntimeSupervisorError(
+            "LOCAL_RUNTIME_SUPERVISOR_SHUTDOWN_FORCED",
+            "A local Runtime child required forced termination.",
+          );
+        }
+        return 0;
+      }
+      const termination =
+        outcome.signal === null ? `exit code ${outcome.code ?? "unknown"}` : `signal ${outcome.signal}`;
+      throw new LocalRuntimeSupervisorError(
+        "LOCAL_RUNTIME_SUPERVISOR_CHILD_EXITED",
+        `${outcome.component} stopped unexpectedly with ${termination}; the other local Runtime service was stopped.`,
       );
-    } else {
-      console.log("Local Admission and Executor are ready under supervision.");
-      console.log("Both services expose secret-free loopback status pages at /status.");
-      console.log("Press Ctrl-C to stop both services.");
-    }
-    const exit = Promise.race(children.map((child) => child.exit.then((result) => ({ child, result }))));
-    const outcome = await Promise.race([
-      exit.then((value) => ({ kind: "child" as const, ...value })),
-      signalRequested.then((signal) => ({ kind: "signal" as const, signal })),
-    ]);
-    if (requestedSignal !== undefined || outcome.kind === "signal") {
-      const forced = await stopChildren(children, environment);
-      if (forced) {
+    } catch (error: unknown) {
+      let shutdownError: unknown;
+      try {
+        await runtime.stop();
+      } catch (stopError: unknown) {
+        shutdownError = stopError;
+      }
+      if (shutdownError !== undefined) {
         throw new LocalRuntimeSupervisorError(
-          "LOCAL_RUNTIME_SUPERVISOR_SHUTDOWN_FORCED",
-          "A local Runtime child required forced termination.",
+          "LOCAL_RUNTIME_SUPERVISOR_SHUTDOWN_FAILED",
+          `${error instanceof Error ? error.message : "Local Runtime supervision failed."} ${shutdownError instanceof Error ? shutdownError.message : "Child shutdown failed."}`,
         );
       }
-      return 0;
+      throw error;
     }
-    const { child, result } = outcome;
-    const termination = result.signal === null ? `exit code ${result.code ?? "unknown"}` : `signal ${result.signal}`;
-    throw new LocalRuntimeSupervisorError(
-      "LOCAL_RUNTIME_SUPERVISOR_CHILD_EXITED",
-      `${child.component} stopped unexpectedly with ${termination}; the other local Runtime service was stopped.`,
-    );
-  } catch (error: unknown) {
-    let shutdownError: unknown;
-    try {
-      await stopChildren(children, environment);
-    } catch (stopError: unknown) {
-      shutdownError = stopError;
-    }
-    if (shutdownError !== undefined) {
-      throw new LocalRuntimeSupervisorError(
-        "LOCAL_RUNTIME_SUPERVISOR_SHUTDOWN_FAILED",
-        `${error instanceof Error ? error.message : "Local Runtime supervision failed."} ${shutdownError instanceof Error ? shutdownError.message : "Child shutdown failed."}`,
-      );
-    }
-    throw error;
   } finally {
     process.removeListener("SIGINT", onInterrupt);
     process.removeListener("SIGTERM", onTerminate);

@@ -95,3 +95,18 @@ test("runtime discovery reuses its registry for the loopback console component",
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the setup/control host has its own loopback-only discovery identity", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const setup = publishLocalRuntimeEndpoint("setup", "stp_0123456789abcdef", 41010, environment);
+    assert.equal(setup.endpoint, "http://127.0.0.1:41010");
+    assert.equal(readLocalRuntimeEndpoint("console", environment), undefined);
+    assert.throws(() => publishLocalRuntimeEndpoint("setup", "cnsl_0123456789abcdef", 41011, environment));
+    assert.throws(() => publishLocalRuntimeEndpoint("setup", "stp_0123456789abcdef", 41011, environment, "https"));
+    assert.throws(() => validateLocalRuntimeEndpoint({ ...setup, endpoint: "http://0.0.0.0:41010" }));
+    assert.equal(clearLocalRuntimeEndpoint(setup, environment), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

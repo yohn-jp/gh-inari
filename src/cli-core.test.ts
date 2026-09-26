@@ -1212,3 +1212,169 @@ test("session close selects only inherited INARI_SESSION_ID through the producti
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function setupConsoleAssets(root: string): Promise<string> {
+  const directory = path.join(root, "setup-console-assets");
+  await mkdir(directory, { recursive: true });
+  for (const file of ["index.html", "setup-console.js", "styles.css"])
+    await writeFile(path.join(directory, file), file);
+  return directory;
+}
+
+const SETUP_REPOSITORY = ["--repository", "yohn-jp/gh-inari", "--repository-id", "1330755860"];
+
+test("setup status and next use the shared Setup Application before any key, trust or Runtime exists", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const status = await capture(["setup", "status", "--json", ...SETUP_REPOSITORY], environment, {
+      repositoryRoot: root,
+    });
+    assert.equal(status.exitCode, 0);
+    const state = JSON.parse(status.stdout) as {
+      readonly ok: boolean;
+      readonly operation: string;
+      readonly kind: string;
+      readonly state: { readonly stage: string; readonly nextAction: { readonly kind: string } };
+    };
+    assert.equal(state.ok, true);
+    assert.equal(state.operation, "setup.status");
+    assert.equal(state.state.stage, "clean");
+    assert.equal(state.state.nextAction.kind, "perform");
+
+    const human = await capture(["setup", "status", "--detail", ...SETUP_REPOSITORY], environment, {
+      repositoryRoot: root,
+    });
+    assert.equal(human.exitCode, 0);
+    assert.match(human.stdout, /^Setup: clean\nNext: Configure the Executor Issuer App/u);
+    assert.match(human.stdout, /health observation: not-running/u);
+
+    const missing = await capture(["setup", "next", "--json", ...SETUP_REPOSITORY], environment, {
+      repositoryRoot: root,
+    });
+    assert.equal(missing.exitCode, 2);
+    assert.equal(JSON.parse(missing.stdout).kind, "input-required");
+
+    // The CLI hands only a file reference to the composition; the Executor owner rejects non-key bytes.
+    const marker = "cli-enrollment-not-a-key";
+    await writeFile(path.join(root, "issuer.pem"), marker);
+    const rejected = await capture(
+      [
+        "setup",
+        "next",
+        "--json",
+        "--yes",
+        "--input",
+        "app-id=123456",
+        "--enrollment-file",
+        "issuer-key=issuer.pem",
+        ...SETUP_REPOSITORY,
+      ],
+      environment,
+      { repositoryRoot: root },
+    );
+    assert.equal(rejected.exitCode, 3);
+    const result = JSON.parse(rejected.stdout) as {
+      readonly ok: boolean;
+      readonly result: { readonly outcome: string; readonly diagnostics: readonly { readonly code: string }[] };
+    };
+    assert.equal(result.ok, false);
+    assert.equal(result.result.outcome, "failed");
+    assert.ok(result.result.diagnostics.some((item) => item.code === "SETUP_ENROLLMENT_REJECTED"));
+    assert.equal(rejected.stdout.includes(marker), false);
+
+    const unsupported = await capture(["setup", "status", "--yes", "--json", ...SETUP_REPOSITORY], environment, {
+      repositoryRoot: root,
+    });
+    assert.equal(unsupported.exitCode, 1);
+    assert.equal(JSON.parse(unsupported.stdout).error.code, "INVALID_OPTION");
+    const malformed = await capture(["setup", "next", "--input", "no-separator", "--json"], environment, {
+      repositoryRoot: root,
+    });
+    assert.equal(JSON.parse(malformed.stdout).error.code, "INVALID_OPTION");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("setup console starts one owned host, reuses it on repeated start and agrees with the CLI", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  const setupAssetDirectory = await setupConsoleAssets(root);
+  let handle: { readonly origin: string; close(): Promise<void> } | undefined;
+  try {
+    const started = await capture(["setup", "console", "--json", ...SETUP_REPOSITORY], environment, {
+      repositoryRoot: root,
+      setupAssetDirectory,
+      onSetupHostStarted: (value) => (handle = value),
+    });
+    assert.equal(started.exitCode, 0);
+    const output = JSON.parse(started.stdout) as {
+      readonly operation: string;
+      readonly endpoint: string;
+      readonly sshForward: string;
+      readonly reused: boolean;
+    };
+    assert.equal(output.operation, "setup.console");
+    assert.equal(output.reused, false);
+    assert.ok(handle);
+    assert.equal(output.endpoint, handle.origin);
+    const port = new URL(output.endpoint).port;
+    assert.equal(output.sshForward, `-L ${port}:127.0.0.1:${port}`);
+
+    const repeated = await capture(["setup", "console", "--json", ...SETUP_REPOSITORY], environment, {
+      repositoryRoot: root,
+      setupAssetDirectory,
+      onSetupHostStarted: () => assert.fail("a second host must not start"),
+    });
+    assert.equal(repeated.exitCode, 0);
+    assert.equal(JSON.parse(repeated.stdout).reused, true);
+    assert.equal(JSON.parse(repeated.stdout).endpoint, output.endpoint);
+
+    // A fresh CLI process and the browser API observe the same persisted setup generation.
+    const bootstrap = (await (
+      await fetch(`${output.endpoint}/api/setup/bootstrap`, {
+        method: "POST",
+        headers: { origin: output.endpoint, "x-inari-setup-bootstrap": "1" },
+      })
+    ).json()) as { readonly bearer: string; readonly csrf: string };
+    const browserState = (await (
+      await fetch(`${output.endpoint}/api/setup/state`, {
+        headers: { authorization: `Bearer ${bootstrap.bearer}`, "x-csrf-token": bootstrap.csrf },
+      })
+    ).json()) as { readonly generation: unknown; readonly stage: string };
+    const cliState = JSON.parse(
+      (await capture(["setup", "status", "--json", ...SETUP_REPOSITORY], environment, { repositoryRoot: root })).stdout,
+    ).state as { readonly generation: unknown; readonly stage: string };
+    assert.deepEqual(browserState.generation, cliState.generation);
+    assert.equal(browserState.stage, cliState.stage);
+
+    await handle.close();
+    handle = undefined;
+    await assert.rejects(
+      lstat(path.join(environment.INARI_CONFIG_HOME as string, "runtime", "endpoints", "setup.json")),
+    );
+  } finally {
+    await handle?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("setup help derives every setup operation from command metadata", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const help = await capture(["setup", "--help"], environment);
+    assert.equal(help.exitCode, 0);
+    for (const line of [
+      "setup [--repository <repository>]",
+      "setup status [--repository <repository>] [--repository-id <id>] [--detail]",
+      "setup next [--repository <repository>] [--repository-id <id>] [--yes]",
+      "setup console [--repository <repository>] [--repository-id <id>]",
+    ])
+      assert.ok(help.stdout.includes(line), line);
+    const leaf = await capture(["setup", "console", "--help"], environment);
+    assert.match(leaf.stdout, /^Usage: inari setup console /u);
+    const unknown = await capture(["setup", "start", "--json"], environment);
+    assert.equal(JSON.parse(unknown.stdout).error.code, "UNKNOWN_COMMAND");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

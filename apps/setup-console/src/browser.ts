@@ -19,10 +19,20 @@ export interface SetupConsoleHandle {
   stop(): void;
 }
 
+export interface SetupConsoleStartOptions {
+  /**
+   * Called once when the server reports the operator session stale or
+   * rejected (e.g. after a configuration generation change or expiry); the
+   * host page may then obtain a fresh in-memory bootstrap.
+   */
+  readonly onSessionEnded?: () => void;
+}
+
 export function startSetupConsole(
   bootstrap: unknown,
   root: HTMLElement,
   window: Window = globalThis.window,
+  options: SetupConsoleStartOptions = {},
 ): SetupConsoleHandle {
   const context = createSetupOperatorContext(bootstrap);
   if (context.apiOrigin !== window.location.origin) {
@@ -30,6 +40,7 @@ export function startSetupConsole(
   }
   const { document } = window;
   let view: { render(): void; unmount(): void } | undefined;
+  let ended = false;
   const controller = createSetupController({
     transport: createSetupApiClient(context, window.fetch.bind(window)),
     scheduler: {
@@ -37,7 +48,14 @@ export function startSetupConsole(
       clearTimeout: (handle) => window.clearTimeout(handle as number),
     },
     isHidden: () => document.visibilityState === "hidden",
-    onChange: () => view?.render(),
+    onChange: (snapshot) => {
+      view?.render();
+      const code = snapshot.notice?.code;
+      if (!ended && (code === "session-stale" || code === "api-rejected")) {
+        ended = true;
+        options.onSessionEnded?.();
+      }
+    },
   });
   view = mountSetupConsole(root, controller, context.receivingMachine, {
     document,
