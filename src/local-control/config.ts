@@ -11,6 +11,7 @@ import {
   fsyncSync,
   linkSync,
   mkdirSync,
+  opendirSync,
   openSync,
   readSync,
   renameSync,
@@ -24,6 +25,8 @@ import { randomBytes } from "node:crypto";
 
 export const LOCAL_CONFIG_VERSION = 1 as const;
 export const MAX_LOCAL_CONFIG_BYTES = 64 * 1024;
+/** Upper bound for one bounded enumeration of a config-home storage directory. */
+export const MAX_LOCAL_STORAGE_DIRECTORY_ENTRIES = 1024;
 const MAX_LOCAL_PRIVATE_FILE_BYTES = 256 * 1024;
 
 export type LocalComponent = "cli" | "authority" | "admission" | "executor" | "runtime";
@@ -66,6 +69,12 @@ export interface LocalAuthorityConfig {
 }
 
 export type LocalConfigValidator<T> = (value: unknown) => T;
+
+/** One entry of a bounded config-home storage directory listing; symlinks are reported as `other`. */
+export interface LocalStorageDirectoryEntry {
+  readonly name: string;
+  readonly kind: "directory" | "file" | "other";
+}
 
 export type LocalControlErrorCode =
   | "LOCAL_CONTROL_INVALID_CONFIG"
@@ -537,6 +546,7 @@ function readExistingJson<T>(
   fileName: string,
   validator: LocalConfigValidator<T>,
   visibility: "private" | "public" = "private",
+  singleLink = false,
 ): T | undefined {
   const target = secureFilePath(directory, fileName);
   let fd: number;
@@ -553,6 +563,7 @@ function readExistingJson<T>(
     if (!stat.isFile() || stat.isSymbolicLink() || !isOwner(stat) || unsafePermissions) {
       throw unsafe("Local configuration file permissions or ownership are unsafe.");
     }
+    if (singleLink && stat.nlink !== 1) throw unsafe("Local configuration file has unexpected hard links.");
     if (stat.size > MAX_LOCAL_CONFIG_BYTES) {
       throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local configuration file is too large.");
     }
@@ -856,28 +867,156 @@ export function replaceLocalJsonIfCurrent<T>(
   const { directory, fileName } = safeFileName(relativePath);
   const directoryPath = componentDirectoryPath(component, directory, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
-    withSecureDirectory(directoryPath, (handle) => {
-      const existing = readExistingJson(handle, fileName, validator);
-      if (existing !== undefined && canonicalJson(existing) === canonicalJson(validated)) return existing;
-      const current = existing === undefined ? undefined : canonicalJson(existing);
-      const wanted = expectedValue === undefined ? undefined : canonicalJson(expectedValue);
-      if (current !== wanted) {
-        throw new LocalControlError(
-          "LOCAL_CONTROL_CONFIG_CONFLICT",
-          "Local configuration changed after it was inspected.",
-        );
-      }
-      persistReplaceJson(handle, fileName, validated);
-      const persisted = readExistingJson(handle, fileName, validator);
-      if (persisted === undefined || canonicalJson(persisted) !== canonicalJson(validated)) {
-        throw new LocalControlError(
-          "LOCAL_CONTROL_STORAGE_FAILED",
-          "Local configuration could not be verified after persistence.",
-        );
-      }
-      return persisted;
-    }),
+    withSecureDirectory(directoryPath, (handle) =>
+      replaceJsonIfCurrent(handle, fileName, expectedValue, validated, validator, false),
+    ),
   );
+}
+
+function replaceJsonIfCurrent<T>(
+  handle: DirectoryHandle,
+  fileName: string,
+  expectedValue: T | undefined,
+  validated: T,
+  validator: LocalConfigValidator<T>,
+  singleLink: boolean,
+): T {
+  const existing = readExistingJson(handle, fileName, validator, "private", singleLink);
+  if (existing !== undefined && canonicalJson(existing) === canonicalJson(validated)) return existing;
+  const current = existing === undefined ? undefined : canonicalJson(existing);
+  const wanted = expectedValue === undefined ? undefined : canonicalJson(expectedValue);
+  if (current !== wanted) {
+    throw new LocalControlError("LOCAL_CONTROL_CONFIG_CONFLICT", "Local configuration changed after it was inspected.");
+  }
+  persistReplaceJson(handle, fileName, validated);
+  const persisted = readExistingJson(handle, fileName, validator, "private", singleLink);
+  if (persisted === undefined || canonicalJson(persisted) !== canonicalJson(validated)) {
+    throw new LocalControlError(
+      "LOCAL_CONTROL_STORAGE_FAILED",
+      "Local configuration could not be verified after persistence.",
+    );
+  }
+  return persisted;
+}
+
+/**
+ * Config-home storage outside the component roots. Paths are relative to the
+ * config home, every segment is a bounded safe name, and the component roots
+ * stay owned by the component APIs above. These primitives carry no knowledge
+ * of what their callers store.
+ */
+function localStorageParts(relativePath: string): readonly string[] {
+  const parts = relativePath.split(/[\\/]/u);
+  if (parts.some((part) => !SAFE_SEGMENT.test(part) || part === "." || part === "..")) {
+    throw invalid("Local storage path is invalid.");
+  }
+  if (COMPONENT_NAMES.has(parts[0] as string)) {
+    throw invalid("Local component storage is owned by the component configuration APIs.");
+  }
+  return parts;
+}
+
+export function localStoragePath(relativePath: string, environment: NodeJS.ProcessEnv = process.env): string {
+  return path.join(resolveConfigHome(environment), ...localStorageParts(relativePath));
+}
+
+function localStorageFile(
+  relativePath: string,
+  environment: NodeJS.ProcessEnv,
+): { readonly directoryPath: string; readonly fileName: string } {
+  const parts = localStorageParts(relativePath);
+  if (parts.length < 2) throw invalid("Local storage files must live below a storage directory.");
+  return {
+    directoryPath: path.join(resolveConfigHome(environment), ...parts.slice(0, -1)),
+    fileName: parts.at(-1) as string,
+  };
+}
+
+/**
+ * Read owner-only config-home storage without any filesystem mutation. Absent
+ * storage is `undefined`; symlinks, hard-linked files, foreign ownership,
+ * unsafe modes, oversized or malformed content fail closed.
+ */
+export function readExistingLocalStorageJson<T>(
+  relativePath: string,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv = process.env,
+): T | undefined {
+  const { directoryPath, fileName } = localStorageFile(relativePath, environment);
+  const handle = openSecureDirectory(directoryPath, false, true, false);
+  if (handle === undefined) return undefined;
+  try {
+    return readExistingJson(handle, fileName, validator, "private", true);
+  } finally {
+    closeQuietly(handle.fd);
+  }
+}
+
+/**
+ * Compare-and-replace owner-only config-home storage with the same atomic,
+ * reread-verified discipline as `replaceLocalJsonIfCurrent`. Missing
+ * directories are created owner-only.
+ */
+export function replaceLocalStorageJsonIfCurrent<T>(
+  relativePath: string,
+  expected: T | undefined,
+  next: T,
+  validator: LocalConfigValidator<T>,
+  environment: NodeJS.ProcessEnv = process.env,
+): T {
+  const validated = validator(next);
+  const expectedValue = expected === undefined ? undefined : validator(expected);
+  const { directoryPath, fileName } = localStorageFile(relativePath, environment);
+  return withSecureDirectory(resolveConfigHome(environment), () =>
+    withSecureDirectory(directoryPath, (handle) =>
+      replaceJsonIfCurrent(handle, fileName, expectedValue, validated, validator, true),
+    ),
+  );
+}
+
+/**
+ * Enumerate an existing config-home storage directory without mutation or
+ * following symlinks. Entries are sorted by name; more than `maxEntries`
+ * entries fail closed instead of being truncated. Absent storage is `undefined`.
+ */
+export function listExistingLocalStorageDirectory(
+  relativePath: string,
+  maxEntries: number,
+  environment: NodeJS.ProcessEnv = process.env,
+): readonly LocalStorageDirectoryEntry[] | undefined {
+  if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > MAX_LOCAL_STORAGE_DIRECTORY_ENTRIES) {
+    throw invalid("Local storage enumeration bound is invalid.");
+  }
+  const handle = openSecureDirectory(localStoragePath(relativePath, environment), false, true, false);
+  if (handle === undefined) return undefined;
+  try {
+    let directory: ReturnType<typeof opendirSync>;
+    try {
+      directory = opendirSync(descriptorPath(handle.fd));
+    } catch {
+      throw unsafe("Local storage directory could not be enumerated safely.");
+    }
+    const entries: LocalStorageDirectoryEntry[] = [];
+    try {
+      for (let entry = directory.readSync(); entry !== null; entry = directory.readSync()) {
+        if (entries.length >= maxEntries) {
+          throw new LocalControlError(
+            "LOCAL_CONTROL_CONFIG_TOO_LARGE",
+            "Local storage directory has too many entries.",
+          );
+        }
+        entries.push({
+          name: entry.name,
+          kind: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other",
+        });
+      }
+    } finally {
+      directory.closeSync();
+    }
+    return entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+  } finally {
+    closeQuietly(handle.fd);
+  }
 }
 
 /** Atomically replace bounded local state owned by Inari, such as a live endpoint announcement. */
