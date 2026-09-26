@@ -37,11 +37,26 @@ const DEFAULT_BRANCH = "trunk";
 const BRANCH = "work/golden-path-42";
 const BRANCH_PATTERN = "^work/[a-z-]+-[0-9]+$";
 
-const sha1 = (value) => createHash("sha1").update(value).digest("hex");
-const gitBlobSha = (bytes) => sha1(Buffer.concat([Buffer.from(`blob ${bytes.byteLength}\0`), bytes]));
+// Synthetic provider tree/commit identities: 40 hex characters, no Git hash semantics needed.
+const objectId = (value) => createHash("sha256").update(value).digest("hex").slice(0, 40);
+// Blob identities follow Git's object format, since the provider stand-in stores content by it.
+const gitBlobSha = (bytes) =>
+  createHash("sha1")
+    .update(Buffer.concat([Buffer.from(`blob ${bytes.byteLength}\0`), bytes]))
+    .digest("hex");
 
 function git(cwd, ...args) {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  // An explicit, isolated Git identity: never the operator's global Git config.
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Golden Path",
+    GIT_AUTHOR_EMAIL: "golden-path@example.test",
+    GIT_COMMITTER_NAME: "Golden Path",
+    GIT_COMMITTER_EMAIL: "golden-path@example.test",
+  };
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env });
   assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
   return result.stdout.trim();
 }
@@ -79,8 +94,8 @@ function initialProviderState(issuerPublicKey) {
     blobs[sha] = bytes.toString("base64");
     entries.push({ path: file, mode: "100644", type: "blob", sha });
   }
-  const tree = sha1(`tree\0${JSON.stringify(entries)}`);
-  const commit = sha1(`commit\0${tree}`);
+  const tree = objectId(`tree\0${JSON.stringify(entries)}`);
+  const commit = objectId(`commit\0${tree}`);
   return {
     endpoint: ENDPOINT,
     appId: APP_ID,
@@ -151,8 +166,8 @@ async function operatorPush(readState, writeState, branch, file, bytes) {
   state.blobs[sha] = bytes.toString("base64");
   entries.push({ path: file, mode: "100644", type: "blob", sha });
   entries.sort((left, right) => left.path.localeCompare(right.path));
-  const tree = sha1(`tree\0${JSON.stringify(entries)}`);
-  const commit = sha1(`commit\0${tree}\0${parent}`);
+  const tree = objectId(`tree\0${JSON.stringify(entries)}`);
+  const commit = objectId(`commit\0${tree}\0${parent}`);
   state.trees[tree] = entries;
   state.commits[commit] = { tree, parents: [parent], message: "docs: golden path" };
   state.refs[branch] = commit;
@@ -568,8 +583,8 @@ writeFileSync(process.argv[2], JSON.stringify({
         const entries = current.trees[current.commits[trusted].tree].filter(
           (entry) => !entry.path.startsWith(".github/inari/authorities/"),
         );
-        const tree = sha1(`tree\0${JSON.stringify(entries)}`);
-        const revoked = sha1(`commit\0${tree}\0${trusted}`);
+        const tree = objectId(`tree\0${JSON.stringify(entries)}`);
+        const revoked = objectId(`commit\0${tree}\0${trusted}`);
         current.trees[tree] = entries;
         current.commits[revoked] = { tree, parents: [trusted], message: "revoke trust" };
         current.refs[DEFAULT_BRANCH] = revoked;
