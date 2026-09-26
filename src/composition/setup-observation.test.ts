@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -8,6 +9,9 @@ import { createDelegatorRecord } from "../agent-authority/delegator-operations.j
 import { generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
 import type { Delegator } from "../agent-authority/delegator.js";
 import { projectSetupState } from "../application/setup/index.js";
+import { ExecutorAppCredentialStore } from "../executor/credential-store.js";
+import { ExecutorRepositoryBindingStore } from "../executor/repository-binding-store.js";
+import { ensureLocalExecutorConfiguration } from "../executor/setup.js";
 import { validateLocalAdmissionConfig, writeLocalJson } from "../local-control/config.js";
 import { publishLocalRuntimeEndpoint } from "../local-control/runtime-discovery.js";
 import { findSetupSecretMaterial, type SetupGeneration } from "../runtime-contracts/index.js";
@@ -274,6 +278,52 @@ test("the real App-user provider never starts bootstrap authorization implicitly
     await assert.rejects(real.readCanonicalAuthorities(context), { stage: "authorization" });
     await assert.rejects(real.publishAuthority(context, record()), { stage: "authorization" });
     assert.equal(requests, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#1201 provider binding is the Executor's App-scoped binding of this repository ID at the exact generation", async () => {
+  const { root, environment } = home();
+  try {
+    const { config: executor } = await ensureLocalExecutorConfiguration(environment);
+    const apps = new ExecutorAppCredentialStore(environment);
+    const key = Buffer.from(
+      generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ format: "pem", type: "pkcs8" }),
+    );
+    const saved = apps.save(executor.id, "5151", key).record;
+    const credential = apps.markProviderVerified("5151", saved.generation);
+    const store = new SetupConfigStore({ environment });
+    store.update(repository, 0, {
+      app: { appId: "5151", installationId: "88" },
+      executor: { configId: executor.id, issuerKeyFingerprint: credential.fingerprint },
+    });
+    const status = async () => (await observeSetup(repository, { environment, provider })).providerBinding.status;
+    assert.equal(await status(), "unbound");
+    new ExecutorRepositoryBindingStore(environment).publish({
+      repositoryHost: repository.repositoryHost,
+      repositoryId: repository.repositoryId,
+      nameWithOwner: repository.nameWithOwner,
+      appId: "5151",
+      installationId: "88",
+      generation: credential.generation,
+      fingerprint: credential.fingerprint,
+    });
+    assert.equal(await status(), "bound");
+    // A rename is resolved by repository ID; the binding is not selected by name.
+    const renamed = { ...repository, nameWithOwner: "yohn-jp/renamed" };
+    store.update(renamed, store.read(repository)!.revision, {});
+    assert.equal((await observeSetup(renamed, { environment, provider })).providerBinding.status, "bound");
+    // A rotated key leaves the older binding stale until the Executor reverifies it.
+    apps.save(
+      executor.id,
+      "5151",
+      Buffer.from(
+        generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ format: "pem", type: "pkcs8" }),
+      ),
+      credential,
+    );
+    assert.equal((await observeSetup(renamed, { environment, provider })).providerBinding.status, "unbound");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -38,9 +38,9 @@ import {
 import { SetupTrustSelectionError, selectSetupAuthority } from "../authority/setup-trust.js";
 import {
   ExecutorEnrollmentOwner,
+  executorAppCustody,
   executorIssuerCustody,
   type ExecutorEnrollmentOwnerOptions,
-  type ExecutorIssuerCustodyStatus,
 } from "../executor/enrollment/owner.js";
 import { LocalExecutorError, ensureLocalExecutorConfiguration } from "../executor/setup.js";
 import { bindLocalCliAdmissionRoute, ensureLocalCliTopology } from "../local-control/config.js";
@@ -64,6 +64,7 @@ import {
   type SetupJournalPort,
   type SetupObservationPort,
 } from "../runtime-contracts/index.js";
+import { executorCredentialFor, type ExecutorCredentialProjection } from "./repository-component-binding.js";
 import { SetupConfigStore, SetupConfigStoreError, type SetupConfigPatch } from "./setup-config-store.js";
 import { SetupJournalStore } from "./setup-journal-store.js";
 import {
@@ -185,10 +186,18 @@ function receipt(
   });
 }
 
-function custodyState(environment: NodeJS.ProcessEnv): string {
+/**
+ * Public custody state of one App: its App-scoped credential and the legacy
+ * single-App projection, which a projected enrollment writes first (#1199).
+ */
+function custodyState(environment: NodeJS.ProcessEnv, appId: string): string {
   try {
-    const current = executorIssuerCustody(environment);
-    return current === undefined ? "absent" : `${current.generation}:${current.fingerprint}`;
+    const legacy = executorIssuerCustody(environment);
+    const scoped = executorAppCustody(environment).apps.find((app) => app.appId === appId);
+    return JSON.stringify([
+      legacy === undefined ? "absent" : `${legacy.appId}:${legacy.generation}:${legacy.fingerprint}`,
+      scoped === undefined ? "absent" : `${scoped.generation}:${scoped.fingerprint}`,
+    ]);
   } catch {
     return "unreadable";
   }
@@ -258,13 +267,13 @@ export function createExecutorSetupEnrollmentPort(options: SetupAdapterOptions =
           ),
         ]);
       }
-      const before = custodyState(environment);
+      const before = custodyState(environment, appId);
       try {
         const enrolled = await owner.enrollStream(capability, request, secret, signal);
         return receipt(request, [], enrolled.publicFingerprint);
       } catch (error: unknown) {
         // Reconcile from fresh owner evidence: unchanged custody proves no effect.
-        if (before !== "unreadable" && custodyState(environment) === before)
+        if (before !== "unreadable" && custodyState(environment, appId) === before)
           return receipt(request, [
             diagnostic("SETUP_ENROLLMENT_REJECTED", "The Executor rejected the key; custody is unchanged."),
           ]);
@@ -283,12 +292,10 @@ interface ActionContext {
   readonly evidence: SetupConfigurationEvidence;
 }
 
-function custodyMatches(
-  custody: ExecutorIssuerCustodyStatus | undefined,
-  evidence: SetupConfigurationEvidence,
-  appId: string,
-): custody is ExecutorIssuerCustodyStatus {
-  return custody !== undefined && custody.appId === appId && custody.configId === evidence.executorConfigId;
+/** The Executor's current credential of exactly `appId`, held by the configured Executor (#1199/#1201). */
+function appCustody(evidence: SetupConfigurationEvidence, appId: string): ExecutorCredentialProjection | undefined {
+  const credential = executorCredentialFor(evidence.executorCustody, appId);
+  return credential !== undefined && credential.configId === evidence.executorConfigId ? credential : undefined;
 }
 
 export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupActionPort {
@@ -306,8 +313,8 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
     const appId = request.inputs["app-id"];
     if (typeof appId !== "string" || !DECIMAL_ID.test(appId))
       return outcome(request, "failed", [diagnostic("SETUP_APP_ID_INVALID", "A numeric Issuer App ID is required.")]);
-    const custody = evidence.custody;
-    if (!custodyMatches(custody, evidence, appId))
+    const custody = appCustody(evidence, appId);
+    if (custody === undefined)
       return outcome(request, "failed", [
         diagnostic("SETUP_EXECUTOR_ENROLLMENT_MISSING", "No Executor-held Issuer key is enrolled for this App ID."),
       ]);
@@ -370,9 +377,9 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
 
   async function completeConfiguration(context: ActionContext): Promise<SetupActionResult> {
     const { request, repository, evidence } = context;
-    const custody = evidence.custody;
-    const appId = evidence.config?.app?.appId ?? custody?.appId;
-    if (appId === undefined || !custodyMatches(custody, evidence, appId))
+    const appId = evidence.config?.app?.appId ?? evidence.custody?.appId;
+    const custody = appId === undefined ? undefined : appCustody(evidence, appId);
+    if (appId === undefined || custody === undefined)
       return outcome(request, "failed", [
         diagnostic("SETUP_EXECUTOR_ENROLLMENT_MISSING", "Configure the Executor Issuer App before completing setup."),
       ]);
@@ -500,8 +507,8 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
 
   async function bindRepository({ request, repository, evidence }: ActionContext): Promise<SetupActionResult> {
     const context = providerContext(evidence);
-    const custody = evidence.custody;
-    if (context === undefined || !custodyMatches(custody, evidence, context.appId))
+    const custody = context === undefined ? undefined : appCustody(evidence, context.appId);
+    if (context === undefined || custody === undefined)
       return outcome(request, "failed", [
         diagnostic("SETUP_EXECUTOR_ENROLLMENT_MISSING", "Configure the Executor Issuer App before binding."),
       ]);

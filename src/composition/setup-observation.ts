@@ -4,11 +4,13 @@
  * Projects the five Setup dimensions from actual owner evidence, each kept
  * distinct and bound to one configuration generation:
  *
- * - configuration: the shared setup record plus Executor custody, Executor,
- *   Authority and Admission configuration and the Runtime profile migration
- *   state, read without mutation;
+ * - configuration: the canonical setup record plus the repository's
+ *   App-scoped Executor custody, Executor, Authority-ID and Admission
+ *   configuration and the Runtime profile migration state, read without
+ *   mutation (#1201);
  * - provider-binding: the recorded App installation of the repository and the
- *   Executor's verification of its Issuer key against that installation;
+ *   Executor's own binding of this repository ID to that App installation and
+ *   exact verified credential generation;
  * - repository-trust: the protected-ref Runtime Authority records compared
  *   with the adopted Authority (same ID, key, notBefore, TTL and exact
  *   capability ceiling); a recorded publication is pending, never trusted;
@@ -19,7 +21,6 @@
  * never initiate an action, and no secret enters the observation.
  */
 import { createHash } from "node:crypto";
-import { lstatSync } from "node:fs";
 import path from "node:path";
 import { delegatorPublicKeyFingerprint } from "../agent-authority/delegator-key.js";
 import {
@@ -29,7 +30,6 @@ import {
   type Delegator,
 } from "../agent-authority/delegator.js";
 import { DelegatorTrustError, loadDelegatorTrust } from "../agent-authority/delegator-trust.js";
-import { executorIssuerCustody, type ExecutorIssuerCustodyStatus } from "../executor/enrollment/owner.js";
 import { issuerKeyReference, localExecutorAppId } from "../executor/issuer-input.js";
 import { GitHubAppDeviceFlowClient, type GitHubAppUserCredential } from "../github/app-user-credential.js";
 import {
@@ -43,7 +43,6 @@ import {
   localComponentPath,
   readExistingLocalJson,
   validateLocalAdmissionConfig,
-  validateLocalAuthorityConfig,
   validateLocalCliConfig,
   validateLocalExecutorConfig,
 } from "../local-control/config.js";
@@ -74,6 +73,15 @@ import {
   type SetupObservationPort,
   validateRuntimeFailure,
 } from "../runtime-contracts/index.js";
+import {
+  executorBindingFor,
+  executorCredentialFor,
+  readAuthorityReference,
+  readExecutorCustodyEvidence,
+  type ExecutorBindingProjection,
+  type ExecutorCredentialProjection,
+  type ExecutorCustodyEvidence,
+} from "./repository-component-binding.js";
 import { SetupConfigStore, type SetupConfigRecord } from "./setup-config-store.js";
 
 // ---------------------------------------------------------------------------
@@ -370,8 +378,14 @@ export interface SetupConfigurationEvidence {
   readonly generation: string;
   readonly config?: SetupConfigRecord;
   readonly executorConfigId?: string;
-  readonly custody?: ExecutorIssuerCustodyStatus;
-  readonly authorityDescriptorFingerprint?: string;
+  /** All public Executor custody evidence (App-scoped canonical, legacy single-App compatibility). */
+  readonly executorCustody?: ExecutorCustodyEvidence;
+  /** The repository's App credential: the recorded App, else the App bound to this repository ID. */
+  readonly custody?: ExecutorCredentialProjection;
+  /** The Executor's binding of this repository ID; never selected by name. */
+  readonly binding?: ExecutorBindingProjection;
+  /** Public fingerprint of the Authority identity the repository references (Authority-ID custody first). */
+  readonly authorityFingerprint?: string;
   readonly admission?: { readonly id: string; readonly executorId: string };
   /** Admission instance the local CLI routes Session requests to. */
   readonly cliAdmissionRouteId?: string;
@@ -411,15 +425,19 @@ function digest(value: unknown): string {
   return createHash("sha256").update(canonical(value), "utf8").digest("hex");
 }
 
-/** Custody is read only when its public index exists, so observation never creates owner directories. */
-function readCustody(environment: NodeJS.ProcessEnv): ExecutorIssuerCustodyStatus | undefined {
-  try {
-    lstatSync(localComponentPath("executor", "issuer/issuer-key.json", environment));
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-  return executorIssuerCustody(environment);
+/**
+ * The repository's App credential: the recorded App; else the App the
+ * Executor bound this repository ID to; else the only credential the Executor
+ * holds (single-App setup before an App is recorded).
+ */
+function selectCustody(
+  custody: ExecutorCustodyEvidence | undefined,
+  config: SetupConfigRecord | undefined,
+  binding: ExecutorBindingProjection | undefined,
+): ExecutorCredentialProjection | undefined {
+  const appId = config?.app?.appId ?? binding?.appId;
+  if (appId !== undefined) return executorCredentialFor(custody, appId);
+  return custody?.credentials.length === 1 ? custody.credentials[0] : undefined;
 }
 
 /** Read every owner's configuration evidence without mutation and derive the configuration generation. */
@@ -431,10 +449,9 @@ export async function readSetupConfigurationEvidence(
   const executor = read(() =>
     readExistingLocalJson("executor", "config.json", validateLocalExecutorConfig, environment),
   );
-  const custody = read(() => readCustody(environment));
-  const descriptor = read(() =>
-    readExistingLocalJson("authority", "config.json", validateLocalAuthorityConfig, environment),
-  );
+  const custody = read(() => readExecutorCustodyEvidence(environment));
+  const recordedAuthority = config.state === "present" ? config.value.authority : undefined;
+  const authority = read(() => readAuthorityReference(recordedAuthority, environment));
   const admission = read(() =>
     readExistingLocalJson("admission", "config.json", validateLocalAdmissionConfig, environment),
   );
@@ -459,8 +476,8 @@ export async function readSetupConfigurationEvidence(
     [
       ["setup-config", config],
       ["executor/config.json", executor],
-      ["executor/issuer", custody],
-      ["authority/config.json", descriptor],
+      ["executor/custody", custody],
+      ["authority", authority],
       ["admission/config.json", admission],
       ["admission/runtime-authority.json", pin],
       ["cli/config.json", cli],
@@ -470,14 +487,16 @@ export async function readSetupConfigurationEvidence(
     .filter(([, item]) => item.state === "unreadable")
     .map(([subject]) => subject);
   const value = <T>(item: Read<T>): T | undefined => (item.state === "present" ? item.value : undefined);
+  const binding = executorBindingFor(value(custody), repository);
+  const selected = selectCustody(value(custody), value(config), binding);
   const evidence = {
     repository,
     ...(value(config) === undefined ? {} : { config: value(config) }),
     ...(value(executor) === undefined ? {} : { executorConfigId: value(executor)!.id }),
-    ...(value(custody) === undefined ? {} : { custody: value(custody) }),
-    ...(value(descriptor) === undefined
-      ? {}
-      : { authorityDescriptorFingerprint: value(descriptor)!.publicKeyFingerprint }),
+    ...(value(custody) === undefined ? {} : { executorCustody: value(custody) }),
+    ...(selected === undefined ? {} : { custody: selected }),
+    ...(binding === undefined ? {} : { binding }),
+    ...(value(authority) === undefined ? {} : { authorityFingerprint: value(authority)!.publicKeyFingerprint }),
     ...(value(admission) === undefined
       ? {}
       : { admission: { id: value(admission)!.id, executorId: value(admission)!.executor.id } }),
@@ -494,7 +513,7 @@ export async function readSetupConfigurationEvidence(
   const generation = `cfg-${digest({
     repository: { repositoryHost: repository.repositoryHost, repositoryId: repository.repositoryId },
     config: evidence.config,
-    authority: evidence.authorityDescriptorFingerprint,
+    authority: evidence.authorityFingerprint,
     admission: evidence.admission,
     cliAdmissionRouteId: evidence.cliAdmissionRouteId,
     pin: evidence.pin === undefined ? undefined : canonicalDelegatorJson(evidence.pin),
@@ -557,7 +576,7 @@ export function missingConfiguration(
   )
     missing.push("executor");
   const authority = config?.authority;
-  if (authority === undefined || evidence.authorityDescriptorFingerprint !== authority.publicKeyFingerprint)
+  if (authority === undefined || evidence.authorityFingerprint !== authority.publicKeyFingerprint)
     missing.push("authority");
   if (evidence.admission === undefined || evidence.admission.executorId !== evidence.executorConfigId)
     missing.push("admission");
@@ -614,7 +633,7 @@ function configurationStatus(
         diagnostic("SETUP_CONFIGURATION_UNREADABLE", `Unreadable setup evidence: ${evidence.unreadable.join(", ")}.`),
       ],
     };
-  if (evidence.config === undefined && evidence.custody === undefined)
+  if (evidence.config === undefined && evidence.executorCustody === undefined)
     return { status: "unconfigured", diagnostics: externalIssuerReferenceDiagnostics(environment) };
   const missing = missingConfiguration(evidence, environment);
   if (missing.length === 0) return { status: "configured", diagnostics: [] };
@@ -630,10 +649,12 @@ function providerBindingStatus(evidence: SetupConfigurationEvidence): DimensionR
   const custody = evidence.custody;
   if (app === undefined || custody === undefined) return { status: "unbound", diagnostics: [] };
   const profile = evidence.profile;
-  // #1182: the Executor's own verified repository binding is the owner evidence execution uses.
-  const bound = custody.bindings.find((item) => item.repositoryId === evidence.repository.repositoryId);
+  // #1182/#1199: the Executor's own binding of this repository ID, to its App's exact verified
+  // generation, is the owner evidence execution uses.
+  const bound = evidence.binding;
   if (
     custody.appId !== app.appId ||
+    (bound !== undefined && bound.appId !== app.appId) ||
     (bound !== undefined && app.installationId !== undefined && bound.installationId !== app.installationId) ||
     (bound !== undefined && profile !== undefined && profile.app.installationId !== bound.installationId) ||
     (profile !== undefined &&
@@ -644,7 +665,7 @@ function providerBindingStatus(evidence: SetupConfigurationEvidence): DimensionR
       status: "mismatched",
       diagnostics: [diagnostic("SETUP_PROVIDER_BINDING_MISMATCH", "Recorded App binding differs from owner state.")],
     };
-  if (app.installationId !== undefined && bound?.installationId === app.installationId)
+  if (app.installationId !== undefined && bound?.installationId === app.installationId && bound.status === "bound")
     return { status: "bound", diagnostics: [] };
   return {
     status: "unbound",
