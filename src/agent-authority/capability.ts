@@ -11,12 +11,14 @@
  * unreachable from ordinary delegated authority -- there is no capability
  * kind for them to begin with.
  *
- * Branch and pull-request-head identity reuses the repository's one branch
- * grammar (`branch-naming.ts`) instead of a second parallel
- * pattern.
+ * Branch, pull-request head, and pull-request base values are exact
+ * authorized targets. They are checked only for repository-neutral safe Git
+ * spelling (`validateBranchSpelling`); ordinary branch naming is decided by
+ * the target repository's branch policy (`repository-branch-policy.ts`) and
+ * bound through Session/Admission evidence, never re-imposed here.
  */
 
-import { validateBranchName } from "../branch-naming.js";
+import { validateBranchSpelling } from "../branch-naming.js";
 
 export const CAPABILITY_KINDS = Object.freeze([
   "change.implement",
@@ -105,18 +107,19 @@ function isSafeIssueNumber(value: unknown): value is number {
 }
 
 /**
- * `main` validates as a branch name under the shared grammar because it is
- * a legitimate PR base reference, but it is never a branch an agent
- * capability can be delegated to create or write to -- that would collapse
- * into default-branch/trust-root authority, which section 11.6 places
- * outside ordinary delegated capability.
+ * An agent-writable target is any repository-neutral safe branch spelling. No
+ * branch name is universally forbidden here: default/protected-branch denial
+ * is applied against the actual provider-resolved default branch and the
+ * Implementation base by Admission and branch advancement, not by this
+ * vocabulary.
  */
 function validAgentBranchName(value: unknown): value is string {
-  return typeof value === "string" && value !== "main" && value.length > 0 && validateBranchName(value).length === 0;
+  return typeof value === "string" && validateBranchSpelling(value).length === 0;
 }
 
+/** A PR base is a safe provider branch name; it may be a non-`main` default branch. */
 function validBaseBranchName(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && validateBranchName(value).length === 0;
+  return typeof value === "string" && validateBranchSpelling(value).length === 0;
 }
 
 function addUnknownProperties(
@@ -184,7 +187,7 @@ export function validateCapabilityClaim(input: unknown, path = "$"): CapabilityC
     addUnknownProperties(input, new Set(["kind", "branch", "max"]), path, diagnostics);
     if (requireProperty(input, "branch", path, diagnostics) && !validAgentBranchName(input.branch)) {
       diagnostics.push(
-        diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.branch`, "branch must be a canonical repository branch name."),
+        diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.branch`, "branch must be a safe repository branch name."),
       );
     }
     if (requireProperty(input, "max", path, diagnostics) && input.max !== CAPABILITY_CREATE_MAX) {
@@ -208,7 +211,7 @@ export function validateCapabilityClaim(input: unknown, path = "$"): CapabilityC
     addUnknownProperties(input, new Set(["kind", "branch", "pathPolicy"]), path, diagnostics);
     if (requireProperty(input, "branch", path, diagnostics) && !validAgentBranchName(input.branch)) {
       diagnostics.push(
-        diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.branch`, "branch must be a canonical repository branch name."),
+        diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.branch`, "branch must be a safe repository branch name."),
       );
     }
     let pathPolicy: string | undefined;
@@ -245,12 +248,12 @@ export function validateCapabilityClaim(input: unknown, path = "$"): CapabilityC
   addUnknownProperties(input, new Set(["kind", "head", "base", "max"]), path, diagnostics);
   if (requireProperty(input, "head", path, diagnostics) && !validAgentBranchName(input.head)) {
     diagnostics.push(
-      diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.head`, "head must be a canonical repository branch name."),
+      diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.head`, "head must be a safe repository branch name."),
     );
   }
   if (requireProperty(input, "base", path, diagnostics) && !validBaseBranchName(input.base)) {
     diagnostics.push(
-      diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.base`, "base must be a canonical repository branch name."),
+      diagnostic("CAPABILITY_INVALID_CLAIM", `${path}.base`, "base must be a safe repository branch name."),
     );
   }
   if (requireProperty(input, "max", path, diagnostics) && input.max !== CAPABILITY_CREATE_MAX) {

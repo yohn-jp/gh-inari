@@ -371,3 +371,13 @@ test("Implementation identity consumes the canonical source-Issue routing projec
   assert.equal(directEpic.valid, false);
   assert.ok(directEpic.diagnostics.some((entry) => entry.code === "IMPLEMENTATION_CHANGE_IDENTITY_ROUTING_INVALID"));
 });
+
+test("Implementation-native identity binds a repository-neutral exact branch without the historical grammar", () => {
+  const result = tryProjectImplementationChangeIdentity(identityInput(575, "story/575-alternative-policy"));
+  assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.identity?.branch.name, "story/575-alternative-policy");
+  for (const branch of ["issue/575-identity", "release/1.0.0", "story/../575", "main"]) {
+    const denied = tryProjectImplementationChangeIdentity(identityInput(575, branch));
+    assert.equal(denied.valid, false, branch);
+  }
+});

@@ -25,7 +25,7 @@ import {
   type ExistingArtifactCandidate,
 } from "./artifact.js";
 import type { ArtifactContract } from "./contract/artifact-contract.js";
-import { GitHubAdapter } from "./github/adapter.js";
+import type { GitHubAdapter } from "./github/adapter.js";
 import { isGitHubAdapterError } from "./github/errors.js";
 import type {
   GitHubIssue,
@@ -42,6 +42,7 @@ import {
   parsePullRequestPolicyOverlay,
   PullRequestPolicyError,
 } from "./pr-policy.js";
+import { createRepositoryBranchPolicy, type RepositoryBranchPolicyAcquisition } from "./repository-branch-policy.js";
 import {
   compilePullRequestTemplate,
   parsePullRequestTemplate,
@@ -482,6 +483,65 @@ export async function resolveRepositoryBranchGovernance(
   const policy = await readRepositoryPolicySource(adapter, source);
   if (policy === undefined) return undefined;
   return parsePullRequestPolicyOverlay(policy.source).branch;
+}
+
+/**
+ * Acquire the target repository's ordinary Change branch policy, bound to the
+ * authoritative default-branch generation (repository, provider-resolved
+ * default branch, tree SHA, and PR policy fingerprint). This reuses the PR
+ * policy `branch` rule; it is not a second policy file. A missing policy or
+ * branch rule is an available policy without a rule, which consumers resolve
+ * to a bounded action-required result. An invalid policy is a bounded denial.
+ * Source acquisition failures remain fail-closed GovernanceErrors.
+ *
+ * `resolveRepositoryBranchGovernance` remains as the compatibility adapter for
+ * callers that consume only the bare pattern.
+ */
+export async function acquireRepositoryBranchPolicy(
+  adapter: RepositoryGovernanceSourceReader,
+): Promise<RepositoryBranchPolicyAcquisition> {
+  const source = await readRepositoryGovernanceSource(adapter);
+  const { context, ref } = source;
+  const repository = {
+    host: context.hostname,
+    owner: context.owner,
+    name: context.name,
+    nameWithOwner: context.nameWithOwner,
+    ...(context.repositoryId === undefined ? {} : { repositoryId: context.repositoryId }),
+  };
+  let policy: RepositoryPolicySource | undefined;
+  try {
+    policy = await readRepositoryPolicySource(adapter, source);
+  } catch (error: unknown) {
+    if (error instanceof GovernanceError && error.code === "GOVERNANCE_SOURCE_INVALID") {
+      return { status: "denied", code: "BRANCH_POLICY_INVALID", message: error.message, path: "$.policy" };
+    }
+    throw error;
+  }
+  const generation = {
+    authority: "repository-default-branch" as const,
+    repository,
+    ref,
+    treeSha: source.treeSha,
+    ...(policy === undefined ? {} : { policy: sourceIdentity(policy.entry, ref, policy.source) }),
+  };
+  let rule: PullRequestBranchGovernance | undefined;
+  if (policy !== undefined) {
+    try {
+      rule = parsePullRequestPolicyOverlay(policy.source).branch;
+    } catch (error: unknown) {
+      if (error instanceof PullRequestPolicyError) {
+        return {
+          status: "denied",
+          code: "BRANCH_POLICY_INVALID",
+          message: `Repository PR policy is invalid: ${error.message}`,
+          path: error.path,
+        };
+      }
+      throw error;
+    }
+  }
+  return createRepositoryBranchPolicy({ generation, ...(rule === undefined ? {} : { rule }) });
 }
 
 async function compileRepositoryGovernedContractFromSource(

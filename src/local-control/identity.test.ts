@@ -12,7 +12,17 @@ import {
   writeLocalJson,
   type LocalAuthorityConfig,
 } from "./config.js";
-import { ensureLocalComponentIdentity, setupLocalAuthority } from "./identity.js";
+import {
+  bindLocalAuthorityDescriptor,
+  copyLocalAuthorityKey,
+  ensureLocalComponentIdentity,
+  setupLocalAuthority,
+} from "./identity.js";
+import {
+  delegatorPublicKeyFingerprint,
+  generateAndPersistDelegatorKeyPair,
+  loadDelegatorKeyPair,
+} from "../agent-authority/delegator-key.js";
 
 async function temporaryEnvironment(): Promise<{ readonly root: string; readonly environment: NodeJS.ProcessEnv }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "inari-local-identity-"));
@@ -86,6 +96,51 @@ test("Authority descriptor rejects unsupported fields", async () => {
     const config = setupLocalAuthority(environment).config;
     assert.throws(() => validateLocalAuthorityConfig({ ...config, privateKey: "secret" }), /unsupported fields/u);
     ensureLocalComponentDirectory("authority", environment);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an adopted Runtime Authority key is copied into custody without moving, generating or replacing keys", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const sourcePath = path.join(root, "config", "runtime-keys", "legacy.pem");
+    const source = generateAndPersistDelegatorKeyPair(sourcePath);
+    const fingerprint = delegatorPublicKeyFingerprint(source);
+    const sourceBytes = await readFile(sourcePath);
+    const other = generateAndPersistDelegatorKeyPair(path.join(root, "other", "key.pem"));
+
+    assert.throws(
+      () => copyLocalAuthorityKey(sourcePath, delegatorPublicKeyFingerprint(other), environment),
+      /adopted public fingerprint/u,
+    );
+    await assert.rejects(lstat(localComponentPath("authority", "private-key.pem", environment)));
+    assert.throws(() => bindLocalAuthorityDescriptor(fingerprint, environment), /loaded safely/u);
+
+    const custody = copyLocalAuthorityKey(sourcePath, fingerprint, environment);
+    assert.equal(custody, localComponentPath("authority", "private-key.pem", environment));
+    assert.equal(delegatorPublicKeyFingerprint(loadDelegatorKeyPair(custody)), fingerprint);
+    assert.equal((await lstat(custody)).mode & 0o077, 0);
+    assert.deepEqual(await readFile(sourcePath), sourceBytes);
+    assert.equal(copyLocalAuthorityKey(sourcePath, fingerprint, environment), custody);
+
+    const descriptor = bindLocalAuthorityDescriptor(fingerprint, environment);
+    assert.equal(descriptor.config.publicKeyFingerprint, fingerprint);
+    assert.deepEqual(bindLocalAuthorityDescriptor(fingerprint, environment), descriptor);
+    assert.deepEqual(setupLocalAuthority(environment).config, descriptor.config);
+
+    const conflicting = path.join(root, "conflict", "key.pem");
+    generateAndPersistDelegatorKeyPair(conflicting);
+    assert.throws(
+      () =>
+        copyLocalAuthorityKey(
+          conflicting,
+          delegatorPublicKeyFingerprint(loadDelegatorKeyPair(conflicting)),
+          environment,
+        ),
+      /adopted public fingerprint/u,
+    );
+    assert.equal(delegatorPublicKeyFingerprint(loadDelegatorKeyPair(custody)), fingerprint);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

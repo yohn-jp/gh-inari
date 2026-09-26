@@ -260,6 +260,7 @@
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm run typecheck && pnpm test",
     "readme:check": "node scripts/readme-integrity.mjs",
+    "boundaries:check": "node scripts/check-runtime-boundaries.mjs",
     "certify:release": "node scripts/release-preparation-certification.mjs"
   },
   "dependencies": {
@@ -330,6 +331,7 @@
       "dependencies": [
         "format:check",
         "readme:check",
+        "boundaries:check",
         "lint",
         "test",
         "dashboard:test",

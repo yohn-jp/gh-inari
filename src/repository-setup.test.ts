@@ -125,6 +125,7 @@ test("setup publishes only the public trust record and reports trust-pending unt
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
       authorityPublisher: async (options) => {
         assert.equal(options.repository.repositoryNameWithOwner, "acme/inari");
         assert.deepEqual(Object.keys(options.authority).sort(), [
@@ -138,6 +139,7 @@ test("setup publishes only the public trust record and reports trust-pending unt
           "status",
           "version",
         ]);
+        assert.deepEqual(options.authority.capabilityCeiling, ["change.implement"]);
         assert.doesNotMatch(JSON.stringify(options), /unrelated-worktree-secret|\.mcp\.json|privateKeyPath/u);
         return {
           status: "created",
@@ -149,6 +151,7 @@ test("setup publishes only the public trust record and reports trust-pending unt
     });
     assert.equal(result.state, "trust-pending");
     assert.equal(result.publication?.pullRequest.number, 17);
+    assert.deepEqual(result.trust, { status: "pending-human-trust", nextAction: "recheck-trust" });
     assert.equal(result.readiness?.ok, false);
     assert.equal(result.readiness?.state, "unknown-authority");
     const profile = JSON.parse(await readFile(result.profilePath as string, "utf8")) as { state: string };
@@ -203,6 +206,7 @@ test("setup fails closed on Endpoint profile drift without rotating or overwriti
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
     });
     assert.equal(first.state, "trust-pending");
     const profilePath = first.profilePath as string;
@@ -278,6 +282,7 @@ test("setup fails closed on mismatched local authority state without changing th
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
     });
     assert.equal(first.state, "trust-pending");
     const profilePath = first.profilePath as string;
@@ -476,6 +481,7 @@ test("fresh setup reaches ready from canonical trust and reruns idempotently", a
       endpoint: "https://endpoint.example.test",
       endpointDescriptor: descriptor,
       appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
     });
     const second = await setupRepository({
       root,
@@ -487,12 +493,135 @@ test("fresh setup reaches ready from canonical trust and reruns idempotently", a
     });
     assert.equal(first.state, "ready");
     assert.equal(second.state, "ready");
+    assert.deepEqual(second.trust, { status: "trusted" });
     assert.equal(first.authority?.authorityId, second.authority?.authorityId);
+    await assert.rejects(
+      () =>
+        setupRepository({
+          root,
+          configHome,
+          repository: "acme/inari",
+          endpoint: "https://endpoint.example.test",
+          endpointDescriptor: descriptor,
+          appUserBroker: broker,
+          capabilityCeiling: ["change.ready"],
+        }),
+      (error: unknown) =>
+        error instanceof RepositorySetupError && error.code === "REPOSITORY_SETUP_TRUST_CHANGE_REQUIRED",
+    );
     assert.equal(
       (await readdir(path.join(root, DELEGATOR_ARTIFACT_DIRECTORY))).filter((name) => name.endsWith(".json")).length,
       1,
     );
   } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(configHome, { recursive: true, force: true });
+  }
+});
+
+test("setup with a canonical Authority and missing local key fails without creating key, artifact, or profile", async () => {
+  const sourceRoot = await mkdtemp(path.join(process.cwd(), ".setup-test-"));
+  const sourceConfigHome = await mkdtemp(path.join(os.tmpdir(), "inari-setup-profile-"));
+  const root = await mkdtemp(path.join(process.cwd(), ".setup-test-"));
+  const configHome = await mkdtemp(path.join(os.tmpdir(), "inari-setup-profile-"));
+  const scope = {
+    app: { kind: "github-app", slug: "inari-issuer", appId: "42", principal: "app:inari-issuer" },
+    installation: { appId: "42", installationId: "7", repositoryHost: "github.com" },
+    repository: { repositoryHost: "github.com", repositoryId: "99", nameWithOwner: "acme/inari" },
+    repositorySelection: "selected",
+    permissions: { contents: "read", issues: "read", pull_requests: "read" },
+    expiresAt: "2027-01-01T00:00:00.000Z",
+  } as const;
+  let canonical: { name: string; content: string } | undefined;
+  const broker = {
+    async withRepositoryReadCapability<T>(
+      _request: unknown,
+      operation: (capability: GitHubAppRepositoryReadCapability) => Promise<T>,
+    ): Promise<T> {
+      return operation({
+        providerPrincipal: scope.app,
+        scope,
+        transport: {
+          request: async ({ path: requestPath }) => {
+            if (requestPath.endsWith("/git/ref/heads/main"))
+              return { status: 200, body: { ref: "refs/heads/main", object: { sha: "a".repeat(40) } } };
+            if (requestPath.includes("/git/trees/"))
+              return {
+                status: 200,
+                body: {
+                  sha: "b".repeat(40),
+                  truncated: false,
+                  tree:
+                    canonical === undefined
+                      ? []
+                      : [
+                          { path: DELEGATOR_ARTIFACT_DIRECTORY, type: "tree", sha: "c".repeat(40) },
+                          {
+                            path: `${DELEGATOR_ARTIFACT_DIRECTORY}/${canonical.name}`,
+                            type: "blob",
+                            sha: "d".repeat(40),
+                          },
+                        ],
+                },
+              };
+            if (requestPath.includes("/git/blobs/") && canonical !== undefined)
+              return {
+                status: 200,
+                body: {
+                  sha: "d".repeat(40),
+                  encoding: "base64",
+                  content: Buffer.from(canonical.content, "utf8").toString("base64"),
+                },
+              };
+            return { status: 200, body: { default_branch: "main" } };
+          },
+        },
+      });
+    },
+  } as unknown as import("./github/app-provider-credential-broker.js").AppProviderCredentialBroker;
+  const listFiles = async (directory: string): Promise<string[]> => {
+    try {
+      return (await readdir(directory, { recursive: true })).map(String).sort();
+    } catch {
+      return [];
+    }
+  };
+  try {
+    const source = await setupRepository({
+      root: sourceRoot,
+      configHome: sourceConfigHome,
+      repository: "acme/inari",
+      endpoint: "https://endpoint.example.test",
+      endpointDescriptor: descriptor,
+      appUserBroker: broker,
+      capabilityCeiling: ["change.implement"],
+    });
+    const artifactPath = path.resolve(sourceRoot, source.authority?.artifactPath as string);
+    canonical = { name: path.basename(artifactPath), content: await readFile(artifactPath, "utf8") };
+    const configBefore = await listFiles(configHome);
+    const artifactsBefore = await listFiles(path.join(root, DELEGATOR_ARTIFACT_DIRECTORY));
+    for (const authorityId of [undefined, source.authority?.authorityId as string]) {
+      await assert.rejects(
+        () =>
+          setupRepository({
+            root,
+            configHome,
+            repository: "acme/inari",
+            endpoint: "https://endpoint.example.test",
+            endpointDescriptor: descriptor,
+            appUserBroker: broker,
+            capabilityCeiling: ["change.implement"],
+            ...(authorityId === undefined ? {} : { authorityId }),
+          }),
+        (error: unknown) =>
+          error instanceof RepositorySetupError && error.code === "REPOSITORY_SETUP_AUTHORITY_MISMATCH",
+      );
+      assert.deepEqual(await listFiles(configHome), configBefore);
+      assert.deepEqual(await listFiles(path.join(root, DELEGATOR_ARTIFACT_DIRECTORY)), artifactsBefore);
+    }
+  } finally {
+    await rm(sourceRoot, { recursive: true, force: true });
+    await rm(sourceConfigHome, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
     await rm(configHome, { recursive: true, force: true });
   }

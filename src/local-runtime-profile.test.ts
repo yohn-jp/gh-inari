@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   LocalRuntimeProfileStore,
   localRuntimeProfilePath,
+  validateLocalRuntimeProfile,
   type LocalRuntimeProfile,
 } from "./local-runtime-profile.js";
 
@@ -56,6 +57,32 @@ test("Runtime profile lookup rejects ambiguous repository matches", async () => 
         code: "LOCAL_RUNTIME_PROFILE_MISMATCH",
       },
     );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Runtime profile replacement is compare-and-swap, identity-preserving, and idempotent", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "inari-profile-test-"));
+  try {
+    const store = new LocalRuntimeProfileStore({ configHome: home });
+    const current = profile();
+    await store.save(current);
+    const next = {
+      ...current,
+      authority: { ...current.authority, privateKeyPath: "/secure/authority/private-key.pem" },
+    };
+    await assert.rejects(
+      store.replace({ ...current, state: "trust-pending" }, next),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "LOCAL_RUNTIME_PROFILE_MISMATCH",
+    );
+    assert.deepEqual(await store.load(current), current);
+    await assert.rejects(store.replace(current, { ...next, endpoint: "https://other.example.test" }));
+    await store.replace(current, next);
+    assert.deepEqual(await store.load(current), next);
+    await store.replace(current, next);
+    assert.deepEqual(validateLocalRuntimeProfile(next), next);
+    assert.throws(() => validateLocalRuntimeProfile({ ...next, token: "x" }), /unknown field/u);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

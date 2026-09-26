@@ -4,7 +4,54 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { projectLocalApplicationState } from "./local-application-state.js";
+import { projectLocalApplicationState, projectLocalRuntimeReadiness } from "./local-application-state.js";
+import { createRepositoryBranchPolicy } from "./repository-branch-policy.js";
+
+test("setup projects explicitly observed alternative branch policy without authorizing independently", async () => {
+  const root = await temporaryRoot();
+  try {
+    git(root, "init", "--quiet");
+    git(root, "checkout", "-q", "-b", "work/777-session");
+    const generation = { ref: "trunk", treeSha: "a".repeat(40) };
+    const acquired = createRepositoryBranchPolicy({
+      generation: {
+        authority: "repository-default-branch",
+        repository: {
+          host: "github.com",
+          repositoryId: "123",
+          owner: "acme",
+          name: "inari",
+          nameWithOwner: "acme/inari",
+        },
+        ...generation,
+      },
+      rule: { pattern: "^work/[0-9]+-[a-z]+$", format: "work/{issueNumber}-{slug}" },
+    });
+    assert.equal(acquired.status, "available");
+    if (acquired.status !== "available") return;
+    const input = {
+      policy: acquired.policy,
+      target: { repository: { repositoryHost: "github.com", repositoryId: "123" }, implementation: 777 },
+      observedGeneration: generation,
+      naming: { slug: "session" },
+    };
+    const ready = await projectLocalApplicationState({
+      root,
+      environment: environmentFor(root),
+      branchObservation: input,
+    });
+    assert.equal(ready.changeBranch.status, "ready");
+    assert.equal(ready.changeBranch.issue, 777);
+    const stale = await projectLocalApplicationState({
+      root,
+      environment: environmentFor(root),
+      branchObservation: { ...input, observedGeneration: { ref: "trunk", treeSha: "b".repeat(40) } },
+    });
+    assert.equal(stale.changeBranch.status, "branch-mismatch");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 async function temporaryRoot(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), "inari-local-application-state-"));
@@ -156,6 +203,19 @@ test("#1092: the Issuer key setup step checks only the Executor-owned reference 
     assert.equal(rendered.includes(sentinel), false);
     assert.equal(rendered.includes("PRIVATE KEY"), false);
     assert.equal(rendered.includes("EXECUTOR_ISSUER_KEY_INVALID"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1108: live Runtime readiness is projected from public role health without a running Runtime", async () => {
+  const root = await temporaryRoot();
+  try {
+    assert.deepEqual(await projectLocalRuntimeReadiness(environmentFor(root)), {
+      executor: "not-running",
+      admission: "not-running",
+      overall: "not-ready",
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
