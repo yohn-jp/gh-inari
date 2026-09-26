@@ -35,6 +35,10 @@ export const LOCAL_ADMISSION_CLIENT_SESSION_ID_HEADER = "x-inari-session-id" as 
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_SESSION_BINDING_BYTES = 16 * 1024;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
+const DEFAULT_CONTROL_TIMEOUT_MS = 10_000;
+const MAX_CONTROL_TIMEOUT_MS = 60_000;
+const DEFAULT_EXECUTION_TIMEOUT_MS = 60_000;
+const MAX_EXECUTION_TIMEOUT_MS = 60_000;
 
 export interface LocalAdmissionFailureDetails {
   readonly endpoint: "repository" | "branch-policy" | "pull-request-context" | "session" | "execution";
@@ -110,6 +114,8 @@ export interface LocalAdmissionClientOptions {
   readonly endpoint: string;
   readonly fetchImpl?: typeof fetch;
   readonly timeoutMs?: number;
+  readonly executionTimeoutMs?: number;
+  readonly timers?: Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
 }
 
 function validLoopbackEndpoint(value: string): string {
@@ -170,12 +176,34 @@ function requireEnvelope(value: unknown, status: number): Record<string, unknown
   return value;
 }
 
+function timeoutError(path: string): LocalAdmissionClientError {
+  if (path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH) {
+    return new LocalAdmissionClientError(
+      "ADMISSION_EXECUTION_TIMEOUT",
+      "The Admission execution deadline expired; the outcome is unknown, and server-side execution may still complete.",
+    );
+  }
+  return new LocalAdmissionClientError(
+    "ADMISSION_REQUEST_TIMEOUT",
+    "Configured local Admission request exceeded its deadline.",
+  );
+}
+
 export function createLocalAdmissionClient(options: LocalAdmissionClientOptions): LocalAdmissionClient {
   const endpoint = validLoopbackEndpoint(options.endpoint);
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+  const timers = options.timers ?? globalThis;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_CONTROL_TIMEOUT_MS) {
     throw new LocalAdmissionClientError("ADMISSION_TIMEOUT_INVALID", "Admission timeout is invalid.");
+  }
+  const executionTimeoutMs = options.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(executionTimeoutMs) ||
+    executionTimeoutMs < 1 ||
+    executionTimeoutMs > MAX_EXECUTION_TIMEOUT_MS
+  ) {
+    throw new LocalAdmissionClientError("ADMISSION_TIMEOUT_INVALID", "Admission execution timeout is invalid.");
   }
 
   async function request(
@@ -188,26 +216,44 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
       body,
       path === LOCAL_ADMISSION_CLIENT_SESSIONS_PATH ? MAX_SESSION_BINDING_BYTES + 128 : MAX_RESPONSE_BYTES,
     );
-    let response: Response;
+    const requestTimeoutMs = path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH ? executionTimeoutMs : timeoutMs;
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = timers.setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+    }, requestTimeoutMs);
     try {
-      response = await fetchImpl(new URL(path, endpoint), {
-        method,
-        headers: {
-          "content-type": "application/json",
-          ...(sessionId === undefined ? {} : { [LOCAL_ADMISSION_CLIENT_SESSION_ID_HEADER]: sessionId }),
-        },
-        body: serialized,
-        credentials: "omit",
-        cache: "no-store",
-        redirect: "error",
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch {
-      throw new LocalAdmissionClientError("ADMISSION_TRANSPORT_FAILED", "Configured local Admission is unavailable.");
+      let response: Response;
+      try {
+        response = await fetchImpl(new URL(path, endpoint), {
+          method,
+          headers: {
+            "content-type": "application/json",
+            ...(sessionId === undefined ? {} : { [LOCAL_ADMISSION_CLIENT_SESSION_ID_HEADER]: sessionId }),
+          },
+          body: serialized,
+          credentials: "omit",
+          cache: "no-store",
+          redirect: "error",
+          signal: controller.signal,
+        });
+      } catch {
+        if (timedOut) throw timeoutError(path);
+        throw new LocalAdmissionClientError("ADMISSION_TRANSPORT_FAILED", "Configured local Admission is unavailable.");
+      }
+      let parsed: unknown;
+      try {
+        parsed = await responseJson(response);
+      } catch (error) {
+        if (timedOut) throw timeoutError(path);
+        throw error;
+      }
+      if (!response.ok) throw failureError(path, response.status, parsed);
+      return requireEnvelope(parsed, response.status);
+    } finally {
+      timers.clearTimeout(timeout);
     }
-    const parsed = await responseJson(response);
-    if (!response.ok) throw failureError(path, response.status, parsed);
-    return requireEnvelope(parsed, response.status);
   }
 
   return Object.freeze({
