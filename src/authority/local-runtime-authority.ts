@@ -22,6 +22,7 @@ import {
   type LocalSessionBinding,
 } from "../local-control/session-binding.js";
 import type { AuthoritySigningPort } from "../runtime-contracts/index.js";
+import { AuthorityStoreError, openLocalAuthorityCustody, type LocalAuthoritySelector } from "./authority-store.js";
 
 export class LocalRuntimeAuthorityError extends Error {
   readonly code: string;
@@ -57,13 +58,17 @@ export interface OpenLocalRuntimeAuthorityOptions {
   readonly trustedAuthority: () => Delegator;
   /** Signing time for Change provenance. */
   readonly now?: Date;
+  /**
+   * Exact Authority-ID-scoped custody entry to open. When omitted the legacy
+   * single `authority/config.json + private-key.pem` custody is opened.
+   */
+  readonly authoritySelector?: LocalAuthoritySelector;
 }
 
-/**
- * Load local Runtime Authority key custody, check it against its custody
- * descriptor and the Admission-pinned public trust, and return a signer.
- */
-export function openLocalRuntimeAuthority(options: OpenLocalRuntimeAuthorityOptions): LocalRuntimeAuthority {
+function openLegacyCustody(options: OpenLocalRuntimeAuthorityOptions): {
+  readonly runtimeKey: DelegatorKeyPair;
+  readonly authority: Delegator;
+} {
   const { environment } = options;
   const authorityConfig = readLocalJson("authority", "config.json", validateLocalAuthorityConfig, environment);
   if (authorityConfig === undefined) fail("LOCAL_CONTROL_INVALID_CONFIG", "Local Runtime Authority is not configured.");
@@ -86,6 +91,45 @@ export function openLocalRuntimeAuthority(options: OpenLocalRuntimeAuthorityOpti
   if (authority.key.x !== authorityConfig.publicKey.x) {
     fail("ADMISSION_AUTHORITY_MISMATCH", "Local Runtime Authority key does not match Admission trust.");
   }
+  return { runtimeKey, authority };
+}
+
+/**
+ * Open one exact Authority-ID-scoped entry. Custody (ID, descriptor, key and
+ * optional fingerprint pin) is proven before trust is read; the trusted
+ * canonical record must then carry the same Authority ID and public key.
+ */
+function openSelectedCustody(
+  options: OpenLocalRuntimeAuthorityOptions,
+  selector: LocalAuthoritySelector,
+): { readonly runtimeKey: DelegatorKeyPair; readonly authority: Delegator } {
+  let custody: ReturnType<typeof openLocalAuthorityCustody>;
+  try {
+    custody = openLocalAuthorityCustody(selector, options.environment);
+  } catch (error: unknown) {
+    if (error instanceof AuthorityStoreError) fail(error.code, error.message);
+    throw error;
+  }
+  const authority = options.trustedAuthority();
+  if (
+    authority.id !== custody.identity.authorityId ||
+    authority.key.x !== custody.identity.publicKey.x ||
+    delegatorPublicKeyFingerprint(authority.key) !== custody.identity.publicKeyFingerprint
+  ) {
+    fail("ADMISSION_AUTHORITY_MISMATCH", "Local Runtime Authority identity does not match Admission trust.");
+  }
+  return { runtimeKey: custody.key, authority };
+}
+
+/**
+ * Load local Runtime Authority key custody, check it against its custody
+ * descriptor and the Admission-pinned public trust, and return a signer.
+ */
+export function openLocalRuntimeAuthority(options: OpenLocalRuntimeAuthorityOptions): LocalRuntimeAuthority {
+  const { runtimeKey, authority } =
+    options.authoritySelector === undefined
+      ? openLegacyCustody(options)
+      : openSelectedCustody(options, options.authoritySelector);
 
   return Object.freeze({
     authority,

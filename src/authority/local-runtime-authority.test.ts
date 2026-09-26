@@ -4,13 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { createDelegatorRecord } from "../agent-authority/delegator-operations.js";
-import { generateDelegatorKeyPair, loadDelegatorKeyPair } from "../agent-authority/delegator-key.js";
+import {
+  delegatorPublicKeyFingerprint,
+  generateDelegatorKeyPair,
+  loadDelegatorKeyPair,
+} from "../agent-authority/delegator-key.js";
 import type { Delegator } from "../agent-authority/delegator.js";
 import { verifyChangeProvenanceRecord } from "../change-provenance-record.js";
 import { localComponentPath } from "../local-control/config.js";
 import { setupLocalAuthority } from "../local-control/identity.js";
 import { verifyLocalSessionBinding } from "../local-control/session-binding.js";
-import { LocalRuntimeAuthorityError, openLocalRuntimeAuthority } from "./index.js";
+import { LocalRuntimeAuthorityError, openLocalRuntimeAuthority, prepareLocalAuthorityIdentity } from "./index.js";
 
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 const ISSUE = 1108;
@@ -115,5 +119,100 @@ test("the Authority owner fails closed on missing custody, key mismatch and trus
     );
   } finally {
     await rm(empty, { recursive: true, force: true });
+  }
+});
+
+test("the Authority owner opens one exact Authority-ID-scoped identity among several", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inari-runtime-authority-multi-"));
+  const environment = { INARI_CONFIG_HOME: path.join(root, "config") };
+  try {
+    const records = ["runtime-alpha", "runtime-beta"].map((authorityId) => {
+      const { identity } = prepareLocalAuthorityIdentity(authorityId, environment);
+      return createDelegatorRecord({
+        id: authorityId,
+        key: identity.publicKey,
+        notBefore: new Date("2026-08-01T00:00:00.000Z"),
+        maxSessionTtlSeconds: 3_600,
+        capabilityCeiling: ["change.implement"],
+      });
+    });
+    const [alpha, beta] = records as [Delegator, Delegator];
+    for (const record of records) {
+      const signer = openLocalRuntimeAuthority({
+        environment,
+        trustedAuthority: () => record,
+        authoritySelector: { authorityId: record.id, publicKeyFingerprint: delegatorPublicKeyFingerprint(record.key) },
+        now: NOW,
+      });
+      assert.equal(signer.authority, record);
+      assert.equal("runtimeKey" in signer, false);
+      const payload = verifyChangeProvenanceRecord(await signer.signChangeProvenance(ISSUE), record);
+      assert.equal(payload.rootIssue, ISSUE);
+    }
+
+    // Trusted canonical record must carry the same Authority ID and key.
+    assert.throws(
+      () =>
+        openLocalRuntimeAuthority({
+          environment,
+          trustedAuthority: () => beta,
+          authoritySelector: { authorityId: alpha.id },
+        }),
+      code("ADMISSION_AUTHORITY_MISMATCH"),
+    );
+    const renamed = createDelegatorRecord({
+      id: "runtime-renamed",
+      key: alpha.key,
+      notBefore: new Date("2026-08-01T00:00:00.000Z"),
+      maxSessionTtlSeconds: 3_600,
+      capabilityCeiling: ["change.implement"],
+    });
+    assert.throws(
+      () =>
+        openLocalRuntimeAuthority({
+          environment,
+          trustedAuthority: () => renamed,
+          authoritySelector: { authorityId: alpha.id },
+        }),
+      code("ADMISSION_AUTHORITY_MISMATCH"),
+    );
+
+    // Custody is proven before trust is read.
+    let trustRead = false;
+    const readTrust = () => {
+      trustRead = true;
+      return alpha;
+    };
+    assert.throws(
+      () =>
+        openLocalRuntimeAuthority({
+          environment,
+          trustedAuthority: readTrust,
+          authoritySelector: { authorityId: alpha.id, publicKeyFingerprint: delegatorPublicKeyFingerprint(beta.key) },
+        }),
+      code("AUTHORITY_IDENTITY_MISMATCH"),
+    );
+    assert.throws(
+      () =>
+        openLocalRuntimeAuthority({
+          environment,
+          trustedAuthority: readTrust,
+          authoritySelector: { authorityId: "runtime-gamma" },
+        }),
+      code("AUTHORITY_IDENTITY_NOT_FOUND"),
+    );
+    await unlink(localComponentPath("authority", "keys/runtime-alpha/private-key.pem", environment));
+    assert.throws(
+      () =>
+        openLocalRuntimeAuthority({
+          environment,
+          trustedAuthority: readTrust,
+          authoritySelector: { authorityId: alpha.id },
+        }),
+      code("RUNTIME_AUTHORITY_KEY_NOT_FOUND"),
+    );
+    assert.equal(trustRead, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

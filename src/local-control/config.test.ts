@@ -7,6 +7,8 @@ import {
   bindLocalCliAdmissionRoute,
   configuredLocalRuntimeBindHost,
   createLocalPrivateFile,
+  isLocalAuthorityId,
+  listExistingLocalComponentDirectory,
   listExistingLocalStorageDirectory,
   localStoragePath,
   MAX_LOCAL_STORAGE_DIRECTORY_ENTRIES,
@@ -23,6 +25,7 @@ import {
   resolveConfigHome,
   readLocalPrivateFile,
   validateLocalAdmissionConfig,
+  validateLocalAuthorityIdentityConfig,
   validateLocalCliConfig,
   validateLocalExecutorConfig,
   type LocalCliConfig,
@@ -518,6 +521,68 @@ test("config-home storage enumeration is sorted, non-following and bounded", asy
       () => listExistingLocalStorageDirectory("store", 4, environment),
       localControlCode("LOCAL_CONTROL_UNSAFE_STORAGE"),
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Authority identity descriptors are closed and bind a canonical Authority ID", () => {
+  const descriptor = {
+    version: 1,
+    authorityId: "runtime-alpha",
+    publicKey: { kty: "OKP", crv: "Ed25519", x: "A".repeat(43) },
+    publicKeyFingerprint: `sha256:${"a".repeat(64)}`,
+    privateKeyFile: "private-key.pem",
+  };
+  assert.deepEqual(validateLocalAuthorityIdentityConfig(descriptor), descriptor);
+  for (const invalidDescriptor of [
+    { ...descriptor, privateKey: "secret" },
+    { ...descriptor, privateKeyPath: "/tmp/private-key.pem" },
+    { ...descriptor, authorityId: undefined },
+    { ...descriptor, authorityId: "Runtime-Alpha" },
+    { ...descriptor, authorityId: "../runtime" },
+    { ...descriptor, privateKeyFile: "../private-key.pem" },
+    { ...descriptor, publicKey: { ...descriptor.publicKey, d: "secret" } },
+    { ...descriptor, version: 2 },
+  ]) {
+    assert.throws(
+      () => validateLocalAuthorityIdentityConfig(invalidDescriptor),
+      localControlCode("LOCAL_CONTROL_INVALID_CONFIG"),
+    );
+  }
+  assert.equal(isLocalAuthorityId("runtime-alpha"), true);
+  assert.equal(isLocalAuthorityId("runtime/alpha"), false);
+  assert.equal(isLocalAuthorityId(""), false);
+});
+
+test("component directory enumeration is sorted, non-mutating and bounded", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    assert.equal(listExistingLocalComponentDirectory("authority", "keys", 4, environment), undefined);
+    await assert.rejects(lstat(environment.INARI_CONFIG_HOME as string), { code: "ENOENT" });
+    ensureLocalComponentDirectory("authority", environment, "keys", "runtime-b");
+    ensureLocalComponentDirectory("authority", environment, "keys", "runtime-a");
+    const directory = localComponentPath("authority", "keys", environment);
+    await writeFile(path.join(directory, "c.json"), "{}\n", { mode: 0o600 });
+    assert.deepEqual(listExistingLocalComponentDirectory("authority", "keys", 3, environment), [
+      { name: "c.json", kind: "file" },
+      { name: "runtime-a", kind: "directory" },
+      { name: "runtime-b", kind: "directory" },
+    ]);
+    assert.throws(
+      () => listExistingLocalComponentDirectory("authority", "keys", 2, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_TOO_LARGE"),
+    );
+    assert.throws(
+      () => listExistingLocalComponentDirectory("authority", "../keys", 4, environment),
+      localControlCode("LOCAL_CONTROL_INVALID_CONFIG"),
+    );
+    await chmod(directory, 0o770);
+    assert.throws(
+      () => listExistingLocalComponentDirectory("authority", "keys", 4, environment),
+      localControlCode("LOCAL_CONTROL_UNSAFE_STORAGE"),
+    );
+    assert.equal((await lstat(directory)).mode & 0o7777, 0o770);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

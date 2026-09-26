@@ -68,6 +68,22 @@ export interface LocalAuthorityConfig {
   readonly privateKeyFile: "private-key.pem";
 }
 
+/** Directory below the `authority` component that holds Authority-ID-scoped key custody. */
+export const LOCAL_AUTHORITY_KEYS_DIRECTORY = "keys" as const;
+
+/**
+ * Authority-ID-scoped custody descriptor stored at
+ * `authority/keys/<authorityId>/config.json`. It binds the Authority ID to its
+ * public key/fingerprint and to the owner-relative private-key file name.
+ */
+export interface LocalAuthorityIdentityConfig {
+  readonly version: typeof LOCAL_CONFIG_VERSION;
+  readonly authorityId: string;
+  readonly publicKey: { readonly kty: "OKP"; readonly crv: "Ed25519"; readonly x: string };
+  readonly publicKeyFingerprint: string;
+  readonly privateKeyFile: "private-key.pem";
+}
+
 export type LocalConfigValidator<T> = (value: unknown) => T;
 
 /** One entry of a bounded config-home storage directory listing; symlinks are reported as `other`. */
@@ -96,6 +112,7 @@ export class LocalControlError extends Error {
 const COMPONENT_NAMES: ReadonlySet<string> = new Set(["cli", "authority", "admission", "executor", "runtime"]);
 const SAFE_SEGMENT = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
 const ID_VALUE = /^[a-zA-Z0-9_-]{16,64}$/u;
+const AUTHORITY_ID_VALUE = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/u;
 const LOCALHOST = "127.0.0.1";
 const NON_LOOPBACK_BIND = "0.0.0.0";
 const PRIVATE_DIRECTORY_MODE = 0o700;
@@ -507,6 +524,35 @@ export function validateLocalAuthorityConfig(value: unknown): LocalAuthorityConf
     publicKey: { kty: "OKP", crv: "Ed25519", x: key.x },
     publicKeyFingerprint: config.publicKeyFingerprint,
     privateKeyFile: "private-key.pem",
+  };
+}
+
+/** True when `value` is a canonical Runtime Authority ID usable as an owner storage segment. */
+export function isLocalAuthorityId(value: unknown): value is string {
+  return typeof value === "string" && AUTHORITY_ID_VALUE.test(value);
+}
+
+export function validateLocalAuthorityIdentityConfig(value: unknown): LocalAuthorityIdentityConfig {
+  const config = assertRecord(value, "Authority identity configuration is invalid.");
+  assertClosed(
+    config,
+    ["version", "authorityId", "publicKey", "publicKeyFingerprint", "privateKeyFile"],
+    "Authority identity configuration has unsupported fields.",
+  );
+  const authorityId = config.authorityId;
+  if (!isLocalAuthorityId(authorityId)) throw invalid("Authority identity configuration is invalid.");
+  const validated = validateLocalAuthorityConfig({
+    version: config.version,
+    publicKey: config.publicKey,
+    publicKeyFingerprint: config.publicKeyFingerprint,
+    privateKeyFile: config.privateKeyFile,
+  });
+  return {
+    version: LOCAL_CONFIG_VERSION,
+    authorityId,
+    publicKey: validated.publicKey,
+    publicKeyFingerprint: validated.publicKeyFingerprint,
+    privateKeyFile: validated.privateKeyFile,
   };
 }
 
@@ -984,10 +1030,31 @@ export function listExistingLocalStorageDirectory(
   maxEntries: number,
   environment: NodeJS.ProcessEnv = process.env,
 ): readonly LocalStorageDirectoryEntry[] | undefined {
+  return listExistingDirectory(localStoragePath(relativePath, environment), maxEntries);
+}
+
+/**
+ * Enumerate an existing directory below a component root with the same
+ * non-mutating, non-following and bounded discipline as
+ * `listExistingLocalStorageDirectory`. Absent storage is `undefined`.
+ */
+export function listExistingLocalComponentDirectory(
+  component: LocalComponent,
+  relativePath: string,
+  maxEntries: number,
+  environment: NodeJS.ProcessEnv = process.env,
+): readonly LocalStorageDirectoryEntry[] | undefined {
+  return listExistingDirectory(localComponentPath(component, relativePath, environment), maxEntries);
+}
+
+function listExistingDirectory(
+  directoryPath: string,
+  maxEntries: number,
+): readonly LocalStorageDirectoryEntry[] | undefined {
   if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > MAX_LOCAL_STORAGE_DIRECTORY_ENTRIES) {
     throw invalid("Local storage enumeration bound is invalid.");
   }
-  const handle = openSecureDirectory(localStoragePath(relativePath, environment), false, true, false);
+  const handle = openSecureDirectory(directoryPath, false, true, false);
   if (handle === undefined) return undefined;
   try {
     let directory: ReturnType<typeof opendirSync>;
