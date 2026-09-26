@@ -1,4 +1,12 @@
-/** Isolated Executor enrollment authority. Only trusted local composition calls issue(). */
+/**
+ * Isolated Executor enrollment authority. Only trusted local composition calls issue().
+ *
+ * Custody is App-scoped (#1199): an owner enrolls, verifies and binds only its
+ * own App. The legacy single-App index remains the setup-compatible projection
+ * of the App it already holds (or of the first App enrolled into an empty
+ * Executor); every change to it is adopted into App-scoped custody and
+ * repository bindings before the owner reports success.
+ */
 import { randomBytes } from "node:crypto";
 import { constants, fstatSync, openSync, readSync, closeSync } from "node:fs";
 import {
@@ -10,7 +18,21 @@ import {
 import { GitHubAppInstallationCredentialBroker } from "../../github/app-installation-credential-broker.js";
 import type { RepositoryIdentity } from "../../github/effect-authorizer.js";
 import { LocalRuntimeProfileStore } from "../../local-runtime-profile.js";
-import { ExecutorCredentialStore, type StoredIssuerBinding, type StoredIssuerKey } from "../credential-store.js";
+import {
+  ExecutorAppCredentialStore,
+  ExecutorCredentialStore,
+  type AppCredentialGeneration,
+  type StoredAppCredential,
+  type StoredIssuerBinding,
+  type StoredIssuerKey,
+} from "../credential-store.js";
+import { adoptLegacyExecutorCustody } from "../credential-migration.js";
+import {
+  ExecutorRepositoryBindingStore,
+  repositoryBindingState,
+  type ExecutorRepositoryBinding,
+  type ExecutorRepositoryBindingState,
+} from "../repository-binding-store.js";
 
 export interface ExecutorEnrollmentCapability {
   readonly token: string;
@@ -29,8 +51,16 @@ interface Grant {
   readonly issuedAt: number;
   readonly expiresAt: number;
   readonly nonce: string;
-  readonly current?: StoredIssuerKey;
+  readonly current?: AppCredentialGeneration;
+  /** Whether the grant was issued against the legacy single-App projection. */
+  readonly projected: boolean;
   readonly replacementConfirmed: boolean;
+}
+
+/** The custody an owner acts on: the legacy projection of its App, or its App-scoped credential. */
+interface CustodyReference {
+  readonly projected: boolean;
+  readonly current?: Pick<StoredIssuerKey, "configId" | "appId" | "generation" | "fingerprint" | "providerVerified">;
 }
 
 export interface ExecutorEnrollmentOwnerOptions {
@@ -56,7 +86,46 @@ export type ExecutorIssuerCustodyStatus = Pick<
   readonly bindings: readonly StoredIssuerBinding[];
 };
 
-/** Reads the current custody record without exposing key bytes or the key path. */
+/** Public, secret-free projection of App-scoped Executor custody and its repository bindings (#1199). */
+export interface ExecutorAppCustodyStatus {
+  readonly apps: readonly Pick<
+    StoredAppCredential,
+    "configId" | "appId" | "generation" | "fingerprint" | "providerVerified"
+  >[];
+  readonly bindings: readonly (ExecutorRepositoryBinding & { readonly status: ExecutorRepositoryBindingState })[];
+}
+
+/** Reads App-scoped custody and bindings without creating directories or exposing key bytes or paths. */
+export function executorAppCustody(environment?: NodeJS.ProcessEnv): ExecutorAppCustodyStatus {
+  const apps = new ExecutorAppCredentialStore(environment).list();
+  const bindings = new ExecutorRepositoryBindingStore(environment).list();
+  return Object.freeze({
+    apps: Object.freeze(
+      apps.map((app) =>
+        Object.freeze({
+          configId: app.configId,
+          appId: app.appId,
+          generation: app.generation,
+          fingerprint: app.fingerprint,
+          providerVerified: app.providerVerified,
+        }),
+      ),
+    ),
+    bindings: Object.freeze(
+      bindings.map((binding) =>
+        Object.freeze({
+          ...binding,
+          status: repositoryBindingState(
+            binding,
+            apps.find((app) => app.appId === binding.appId),
+          ),
+        }),
+      ),
+    ),
+  });
+}
+
+/** Reads the legacy single-App custody projection without exposing key bytes or the key path. */
 export function executorIssuerCustody(environment?: NodeJS.ProcessEnv): ExecutorIssuerCustodyStatus | undefined {
   const record = new ExecutorCredentialStore(environment).current();
   return record === undefined
@@ -80,6 +149,8 @@ function denied(): Error {
 export class ExecutorEnrollmentOwner {
   readonly #options: ExecutorEnrollmentOwnerOptions;
   readonly #store: ExecutorCredentialStore;
+  readonly #apps: ExecutorAppCredentialStore;
+  readonly #bindings: ExecutorRepositoryBindingStore;
   readonly #grants = new Map<string, Grant>();
   readonly #now: () => number;
   #pending: Promise<unknown> = Promise.resolve();
@@ -88,11 +159,74 @@ export class ExecutorEnrollmentOwner {
     if (!/^[A-Za-z0-9_-]{16,64}$/u.test(options.configId) || !/^[1-9][0-9]{0,19}$/u.test(options.appId)) throw denied();
     this.#options = options;
     this.#store = new ExecutorCredentialStore(options.environment);
+    this.#apps = new ExecutorAppCredentialStore(options.environment);
+    this.#bindings = new ExecutorRepositoryBindingStore(options.environment);
     this.#now = options.now ?? Date.now;
   }
 
+  /**
+   * The custody this owner acts on. The legacy index is projected only for the
+   * App it holds, or for an App enrolled while no legacy index and no
+   * App-scoped credential of that App exist; any other App is App-scoped only
+   * and never reads the legacy App's key. A legacy index bound to another
+   * Executor configuration is denied.
+   */
+  #reference(): CustodyReference {
+    const legacy = this.#store.current();
+    if (legacy !== undefined && legacy.configId !== this.#options.configId) throw denied();
+    if (legacy !== undefined && legacy.appId === this.#options.appId) {
+      try {
+        this.#converge();
+      } catch {
+        // A diverged projection is repaired only by an owner write; every write converges or fails closed.
+      }
+      return { projected: true, current: legacy };
+    }
+    const current = this.#apps.current(this.#options.appId);
+    if (legacy === undefined && current === undefined) return { projected: true };
+    if (current !== undefined && current.configId !== this.#options.configId) throw denied();
+    return current === undefined ? { projected: false } : { projected: false, current };
+  }
+
+  /** Adopt the legacy projection of this owner's App into App-scoped custody and bindings. */
+  #converge(replacing?: AppCredentialGeneration): void {
+    adoptLegacyExecutorCustody(this.#options.environment, replacing === undefined ? {} : { replacing });
+  }
+
+  /** A repository binding never moves to another App or installation (#1199). */
+  #bindingAllowed(binding: StoredIssuerBinding): boolean {
+    const existing = this.#bindings.read(binding.repositoryId);
+    return (
+      existing === undefined ||
+      (existing.repositoryHost === binding.repositoryHost &&
+        existing.appId === this.#options.appId &&
+        existing.installationId === binding.installationId)
+    );
+  }
+
+  /**
+   * Record a verified generation, and a verified repository installation when
+   * one was proven. App-scoped custody and the repository binding commit
+   * first; the legacy projection follows, so a failure never leaves a legacy
+   * binding that execution cannot resolve.
+   */
+  #recordVerified(projected: boolean, generation: string, binding: StoredIssuerBinding | undefined): void {
+    if (binding !== undefined && !this.#bindingAllowed(binding)) throw denied();
+    const credential = this.#apps.markProviderVerified(this.#options.appId, generation);
+    if (binding !== undefined)
+      this.#bindings.publish({
+        ...binding,
+        appId: credential.appId,
+        generation: credential.generation,
+        fingerprint: credential.fingerprint,
+      });
+    if (!projected) return;
+    if (binding === undefined) this.#store.markProviderVerified(generation);
+    else this.#store.recordBinding(generation, binding);
+  }
+
   current(): Pick<StoredIssuerKey, "configId" | "appId" | "generation" | "fingerprint"> | undefined {
-    const record = this.#store.current();
+    const record = this.#reference().current;
     return record === undefined
       ? undefined
       : Object.freeze({
@@ -128,7 +262,13 @@ export class ExecutorEnrollmentOwner {
     readonly fingerprint: string;
   }): ExecutorEnrollmentCapability {
     const now = this.#now();
-    const current = this.#store.current();
+    let reference: CustodyReference;
+    try {
+      reference = this.#reference();
+    } catch {
+      throw denied();
+    }
+    const current = reference.current;
     if (current !== undefined && (current.configId !== this.#options.configId || current.appId !== this.#options.appId))
       throw denied();
     if (
@@ -147,8 +287,11 @@ export class ExecutorEnrollmentOwner {
       issuedAt: now,
       expiresAt: now + CAPABILITY_LIFETIME_MS,
       nonce,
+      projected: reference.projected,
       replacementConfirmed: expectedReplacement !== undefined,
-      ...(current === undefined ? {} : { current }),
+      ...(current === undefined
+        ? {}
+        : { current: Object.freeze({ generation: current.generation, fingerprint: current.fingerprint }) }),
     });
     return Object.freeze({ token });
   }
@@ -174,13 +317,13 @@ export class ExecutorEnrollmentOwner {
     )
       throw denied();
     const request = validateSecretEnrollmentRequest(untrustedRequest);
-    const current = this.#store.current();
-    if (
-      current?.generation !== grant.current?.generation ||
-      current?.fingerprint !== grant.current?.fingerprint ||
-      (current !== undefined && (current.configId !== grant.configId || current.appId !== grant.appId))
-    )
-      throw denied();
+    const stale = (reference: CustodyReference): boolean =>
+      reference.projected !== grant.projected ||
+      reference.current?.generation !== grant.current?.generation ||
+      reference.current?.fingerprint !== grant.current?.fingerprint ||
+      (reference.current !== undefined &&
+        (reference.current.configId !== grant.configId || reference.current.appId !== grant.appId));
+    if (stale(this.#reference())) throw denied();
     const chunks: Buffer[] = [];
     let length = 0;
     for await (const chunk of secret) {
@@ -193,16 +336,17 @@ export class ExecutorEnrollmentOwner {
     const pem = Buffer.concat(chunks);
     // A concurrent enrollment can commit while bytes are being read. Serialize the final check and commit.
     const commit = this.#pending.then(async () => {
-      const latest = this.#store.current();
-      if (latest?.generation !== grant.current?.generation || latest?.fingerprint !== grant.current?.fingerprint)
-        throw denied();
+      const latest = this.#reference();
+      if (stale(latest)) throw denied();
       // An unconfirmed grant can only retry the same key.
-      const { record } = this.#store.save(
-        grant.configId,
-        grant.appId,
-        pem,
-        grant.replacementConfirmed || latest === undefined ? grant.current : undefined,
-      );
+      const expected = grant.replacementConfirmed || latest.current === undefined ? grant.current : undefined;
+      let record: Pick<StoredIssuerKey, "generation" | "fingerprint" | "providerVerified">;
+      if (grant.projected) {
+        const before = this.#apps.current(grant.appId);
+        record = this.#store.save(grant.configId, grant.appId, pem, expected).record;
+        // The legacy projection changed first; App-scoped custody adopts the same generation.
+        this.#converge(before);
+      } else record = this.#apps.save(grant.configId, grant.appId, pem, expected).record;
       let providerVerified = false;
       let binding: StoredIssuerBinding | undefined;
       try {
@@ -217,8 +361,7 @@ export class ExecutorEnrollmentOwner {
       }
       if (providerVerified) {
         try {
-          if (binding === undefined) this.#store.markProviderVerified(record.generation);
-          else this.#store.recordBinding(record.generation, binding);
+          this.#recordVerified(grant.projected, record.generation, binding);
         } catch {
           providerVerified = false;
         }
@@ -269,14 +412,15 @@ export class ExecutorEnrollmentOwner {
   }
 
   /**
-   * Verify the already stored Issuer key against an explicitly bound App
-   * installation of `repository` and record the result. Trusted local
-   * composition only; the key never leaves the Executor owner.
+   * Verify the already stored Issuer key of this owner's App against an
+   * explicitly bound App installation of `repository` and record the result
+   * as that repository's binding to the exact verified generation. Trusted
+   * local composition only; the key never leaves the Executor owner.
    */
   async verifyStoredProvider(repository: RepositoryIdentity, installationId: string): Promise<boolean> {
     if (!/^[1-9][0-9]{0,19}$/u.test(installationId)) throw denied();
     const commit = this.#pending.then(async () => {
-      const current = this.#store.current();
+      const { projected, current } = this.#reference();
       if (current === undefined || current.configId !== this.#options.configId || current.appId !== this.#options.appId)
         throw denied();
       const binding: StoredIssuerBinding = {
@@ -285,10 +429,22 @@ export class ExecutorEnrollmentOwner {
         nameWithOwner: repository.nameWithOwner,
         installationId,
       };
-      const recorded = current.bindings?.find((item) => item.repositoryId === repository.repositoryId);
-      if (recorded !== undefined && recorded.installationId !== installationId) throw denied();
-      if (recorded !== undefined && recorded.nameWithOwner === repository.nameWithOwner) return true;
-      const pem = this.#store.readKey(current).toString("utf8");
+      if (!this.#bindingAllowed(binding)) throw denied();
+      const credential = this.#apps.current(this.#options.appId);
+      if (credential === undefined || credential.generation !== current.generation) throw denied();
+      const existing = this.#bindings.read(repository.repositoryId);
+      const legacy = projected
+        ? (current as StoredIssuerKey).bindings?.find((item) => item.repositoryId === repository.repositoryId)
+        : undefined;
+      if (legacy !== undefined && legacy.installationId !== installationId) throw denied();
+      if (
+        existing !== undefined &&
+        repositoryBindingState(existing, credential) === "bound" &&
+        existing.nameWithOwner === repository.nameWithOwner &&
+        (!projected || legacy?.nameWithOwner === repository.nameWithOwner)
+      )
+        return true;
+      const pem = this.#apps.readKey(credential).toString("utf8");
       let verified = false;
       try {
         verified = await (this.#options.verifyInstallation?.(pem, repository, installationId) ??
@@ -296,8 +452,8 @@ export class ExecutorEnrollmentOwner {
       } catch {
         verified = false;
       }
-      // The verified installation becomes the Executor's own repository binding (#1182).
-      if (verified) this.#store.recordBinding(current.generation, binding);
+      // The verified installation becomes the Executor's own repository binding (#1182, #1199).
+      if (verified) this.#recordVerified(projected, credential.generation, binding);
       return verified;
     });
     this.#pending = commit.catch(() => undefined);
