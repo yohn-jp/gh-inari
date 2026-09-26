@@ -20,7 +20,7 @@ import {
   type ImplementationBaseEvidence,
 } from "./implementation-authorization.js";
 import { IMPLEMENTATION_CONTRACT_VERSION, type ImplementationRepositoryIdentity } from "./implementation-contract.js";
-import { normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
+import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 
 export const IMPLEMENTATION_SESSION_BINDING_VERSION = 1 as const;
 export type ImplementationSessionBindingVersion = typeof IMPLEMENTATION_SESSION_BINDING_VERSION;
@@ -48,10 +48,19 @@ export interface ImplementationSessionAuthorizationBinding {
   readonly repository: ImplementationRepositoryIdentity;
   readonly base: ImplementationBaseEvidence;
   readonly task: SessionCertificateTask;
+  /**
+   * Canonical Source Issue set of the current authorized Implementation
+   * contract (#1213), sorted by canonical reference key. Present only when the
+   * projection was requested with `includeSources`; it bounds Source-rooted
+   * `change.*` Session capabilities. Absent on legacy/Direct App bindings.
+   */
+  readonly sources?: readonly IssueReference[];
 }
 
 export interface ImplementationSessionAuthorizationBindingInput extends ImplementationAuthorizationVerificationInput {
   readonly task: unknown;
+  /** Project the current contract Source set into the binding (#1213). */
+  readonly includeSources?: boolean;
 }
 
 export type ImplementationSessionBindingViolationCode =
@@ -90,7 +99,7 @@ export class ImplementationSessionBindingError extends Error {
   }
 }
 
-const BINDING_KEYS = new Set(["version", "kind", "authorization", "repository", "base", "task"]);
+const BINDING_KEYS = new Set(["version", "kind", "authorization", "repository", "base", "task", "sources"]);
 const AUTHORIZATION_KEYS = new Set(["version", "kind", "contractVersion", "implementation", "governedBodyDigest"]);
 const REPOSITORY_KEYS = new Set(["repositoryHost", "repositoryId", "repository"]);
 const BASE_KEYS = new Set(["branch", "revision", "freshness"]);
@@ -106,7 +115,9 @@ const INPUT_KEYS = new Set([
   "supersession",
   "completed",
   "task",
+  "includeSources",
 ]);
+const MAX_SOURCES = 64;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]+$/u;
 const BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
@@ -268,6 +279,50 @@ function validateBase(
   return { branch, revision, freshness };
 }
 
+function validateSources(
+  value: unknown,
+  path: string,
+  violations: ImplementationSessionBindingViolation[],
+): readonly IssueReference[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_SOURCES) {
+    addViolation(
+      violations,
+      "IMPLEMENTATION_SESSION_BINDING_INVALID_VALUE",
+      path,
+      `Source set must contain 1-${MAX_SOURCES} Issue references.`,
+    );
+    return undefined;
+  }
+  const sources: IssueReference[] = [];
+  const keys = new Set<string>();
+  value.forEach((entry, index) => {
+    const reference = normalizeIssueReference(entry, `${path}[${index}]`);
+    if (!reference.valid || reference.reference === undefined) {
+      addViolation(
+        violations,
+        "IMPLEMENTATION_SESSION_BINDING_INVALID_VALUE",
+        `${path}[${index}]`,
+        "Source reference is invalid.",
+      );
+      return;
+    }
+    const key = issueReferenceKey(reference.reference);
+    if (keys.has(key)) {
+      addViolation(
+        violations,
+        "IMPLEMENTATION_SESSION_BINDING_INVALID_VALUE",
+        `${path}[${index}]`,
+        "Source references must be unique.",
+      );
+      return;
+    }
+    keys.add(key);
+    sources.push(reference.reference);
+  });
+  if (sources.length !== value.length) return undefined;
+  return sources.sort((left, right) => compareStrings(issueReferenceKey(left), issueReferenceKey(right)));
+}
+
 function validateBinding(input: unknown): ImplementationSessionBindingResult {
   const violations: ImplementationSessionBindingViolation[] = [];
   if (!isRecord(input)) {
@@ -342,6 +397,7 @@ function validateBinding(input: unknown): ImplementationSessionBindingResult {
   const repository = validateRepository(input.repository, "$.repository", violations);
   const base = validateBase(input.base, "$.base", violations);
   const task = validateTask(input.task, "$.task", violations);
+  const sources = input.sources === undefined ? undefined : validateSources(input.sources, "$.sources", violations);
   if (
     authorization !== undefined &&
     repository !== undefined &&
@@ -377,6 +433,7 @@ function validateBinding(input: unknown): ImplementationSessionBindingResult {
       repository,
       base,
       task,
+      ...(sources === undefined ? {} : { sources }),
     }),
     violations: [],
   };
@@ -437,6 +494,13 @@ export function tryProjectImplementationSessionAuthorizationBinding(
     return { valid: false, violations };
   }
   unknownProperties(input, INPUT_KEYS, "$", violations);
+  if (input.includeSources !== undefined && typeof input.includeSources !== "boolean")
+    addViolation(
+      violations,
+      "IMPLEMENTATION_SESSION_BINDING_INVALID_VALUE",
+      "$.includeSources",
+      "includeSources must be a boolean.",
+    );
   const verification = tryVerifyImplementationAuthorization(authorizationInputWithoutTask(input));
   violations.push(...authorizationViolations(verification.violations));
   if (violations.length > 0) return { valid: false, violations: Object.freeze(violations) };
@@ -476,6 +540,9 @@ export function tryProjectImplementationSessionAuthorizationBinding(
     repository: verification.authorization.repository,
     base: verification.authorization.base,
     task: input.task,
+    ...(input.includeSources === true && verification.contract !== undefined
+      ? { sources: verification.contract.sources }
+      : {}),
   };
   const normalized = validateBinding(candidate);
   if (!normalized.valid || normalized.binding === undefined)

@@ -277,3 +277,62 @@ test("uses injected clock input for exclusive expiry and enforces Authority capa
     /TTL/u,
   );
 });
+
+test("#1213 a signed Implementation binding carries the Source set bounding Source-rooted change.* claims", () => {
+  const { keyPair, authority } = authorityFixture();
+  const repository = { repositoryHost: "github.com", repositoryId: REPOSITORY.id };
+  const implementationBinding = {
+    version: 1,
+    kind: "implementation-session-binding",
+    authorization: {
+      version: 1,
+      kind: "implementation-authorization",
+      contractVersion: 1,
+      implementation: { ...repository, number: 1213 },
+      governedBodyDigest: "a".repeat(64),
+    },
+    repository,
+    base: { branch: "main", revision: "b".repeat(40), freshness: "b".repeat(40) },
+    task: { kind: "issue", number: 1213 },
+    sources: [
+      { ...repository, number: 1208 },
+      { ...repository, number: 1209 },
+    ],
+  } as const;
+  const issue = (capabilities: readonly { kind: "change.implement" | "change.ready"; issue: number }[]) =>
+    createLocalSessionBinding({
+      sessionId: "session-sources",
+      repository: REPOSITORY,
+      task: { kind: "issue", number: 1213 },
+      capabilities,
+      ttlSeconds: 120,
+      runtimeAuthority: authority,
+      runtimeKey: keyPair,
+      now: NOW,
+      implementationBinding,
+    });
+  const binding = issue([
+    { kind: "change.implement", issue: 1208 },
+    { kind: "change.ready", issue: 1209 },
+  ]);
+  assert.deepEqual(binding.task, { kind: "issue", number: 1213 });
+  assert.deepEqual(binding.implementationBinding, implementationBinding);
+  assert.deepEqual(verifyLocalSessionBinding(binding, authority, { now: NOW }).value, binding);
+
+  // The Source set is signed: dropping or widening it invalidates the binding.
+  const { implementationBinding: _dropped, ...withoutSources } = binding;
+  assert.equal(verifyLocalSessionBinding(withoutSources, authority, { now: NOW }).valid, false);
+  const widened = {
+    ...binding,
+    implementationBinding: {
+      ...implementationBinding,
+      sources: [...implementationBinding.sources, { ...repository, number: 4242 }],
+    },
+  };
+  assert.equal(verifyLocalSessionBinding(widened, authority, { now: NOW }).valid, false);
+  // Claims outside the Source set are never issued; the task keeps only its compatibility claim.
+  assert.throws(() => issue([{ kind: "change.implement", issue: 4242 }]), /claims are invalid/u);
+  assert.deepEqual(issue([{ kind: "change.implement", issue: 1213 }]).capabilities, [
+    { kind: "change.implement", issue: 1213 },
+  ]);
+});

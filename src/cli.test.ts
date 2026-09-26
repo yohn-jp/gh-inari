@@ -19,6 +19,25 @@ import { COMMAND_CONTRACT_VERSION, getCommand, getOption, RUNTIME_CAPABILITIES }
 import { projectChangeFromGitHubEvidence } from "./change.js";
 import { normalizeSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
 import type { LocalRuntimeConfig } from "./relay/local-runtime-config.js";
+import { execFileSync } from "node:child_process";
+import { once } from "node:events";
+import { readdir } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
+import { createDelegatorRecord } from "./agent-authority/delegator-operations.js";
+import { loadDelegatorKeyPair } from "./agent-authority/delegator-key.js";
+import { validateDelegator } from "./agent-authority/delegator.js";
+import type { AuthorizedExecutionResult } from "./authorized-execution.js";
+import { verifyChangeProvenanceRecord } from "./change-provenance-record.js";
+import { renderImplementationIssueBody } from "./implementation-contract.js";
+import { createLocalAdmissionHttpServer } from "./local-control/admission-server.js";
+import { localComponentPath, validateLocalCliConfig, writeLocalJson } from "./local-control/config.js";
+import { LocalExecutorClient } from "./local-control/executor-client.js";
+import { createLocalExecutorHttpServer } from "./local-control/executor-server.js";
+import { setupLocalAuthority } from "./local-control/identity.js";
+import { publishLocalRuntimeEndpoint } from "./local-control/runtime-discovery.js";
+import { readLocalSessionBinding, readLocalSessionChangeIssueProvenance } from "./cli/runtime/session-launcher.js";
+import { createRepositoryBranchPolicy } from "./repository-branch-policy.js";
+import { compileRepositoryGovernedContract } from "./governance.js";
 
 class CliStubTransport implements FixtureCommandTransport {
   private readonly callHistory: string[][] = [];
@@ -4815,4 +4834,417 @@ test("supported value-taking options before the domain stay on the closed comman
 
   const diagnoseResult = await captureJson(["--minimum-version", "999.0.0", "diagnose", "--json"]);
   assert.equal(diagnoseResult.exitCode, 2);
+});
+
+// ---------------------------------------------------------------------------
+// #1213: an Implementation-bound local Session operates on its canonical
+// Source Change roots through the production Admission authority.
+// ---------------------------------------------------------------------------
+
+const SOURCE_REPOSITORY_ID = "123456789";
+const SOURCE_IMPLEMENTATION = 1213;
+const SOURCE_BRANCH = "fix/1213-implementation-source-change-binding";
+const SOURCE_REPOSITORY = {
+  repositoryHost: "github.com",
+  repositoryId: SOURCE_REPOSITORY_ID,
+  repository: "acme/inari",
+};
+
+async function captureCli(
+  argv: string[],
+  environment: NodeJS.ProcessEnv,
+  dependencies: Parameters<typeof runCli>[1] = {},
+): Promise<{ readonly exitCode: number; readonly stdout: string }> {
+  const stdout: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+  console.error = () => undefined;
+  try {
+    return { exitCode: await runCli(argv, { ...dependencies, environment }), stdout: stdout.join("\n") };
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+}
+
+function sourceImplementationEvidence(
+  sources: readonly Record<string, unknown>[],
+  baseHead: string,
+  projection: ReturnType<typeof projectChangeFromGitHubEvidence>,
+): Record<string, unknown> {
+  const reference = { ...SOURCE_REPOSITORY, number: SOURCE_IMPLEMENTATION };
+  const body = renderImplementationIssueBody({
+    version: 1,
+    kind: "implementation",
+    repository: SOURCE_REPOSITORY,
+    sources,
+    objective: "Compose Implementation Source identity into local Session Change execution.",
+    nonGoals: ["Choosing a primary Source."],
+    architecture: {
+      decision: "Session task stays the Implementation; Change roots are canonical Sources.",
+      affectedComponents: ["Admission"],
+      invariants: ["Current Implementation evidence is reread on every execution."],
+      compatibilityConstraints: [],
+    },
+    scope: { readOnly: ["src/**"], write: ["src/**"], create: [], delete: [], deny: [] },
+    constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+    verification: {
+      acceptanceCriteria: ["Unrelated Sources are denied."],
+      targetedTests: [],
+      requiredChecks: [],
+      postconditions: [],
+    },
+    execution: {
+      baseBranch: "main",
+      baseRevision: baseHead,
+      baseFreshness: baseHead,
+      branch: SOURCE_BRANCH,
+      dependencies: [],
+    },
+  });
+  return {
+    implementation: reference,
+    issue: { reference, body },
+    repository: SOURCE_REPOSITORY,
+    base: { branch: "main", revision: baseHead, freshness: baseHead },
+    readiness: { evidence: [] },
+    change: projection,
+  };
+}
+
+function sourceChangeProjection(issue: number, branch = `fix/${issue}-source-change`, head = "c".repeat(40)) {
+  const projection = projectChangeFromGitHubEvidence({
+    change: { repositoryHost: "github.com", repositoryId: SOURCE_REPOSITORY_ID, rootIssue: issue },
+    branchGovernance: { pattern: "^fix/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "fix", slug: "source-change" },
+    baseBranch: "main",
+    evidence: {
+      issue: { status: "available", value: { number: issue, state: "open" } },
+      branches: {
+        status: "available",
+        value: [{ name: branch, sha: head, rootIssue: issue }],
+      },
+      pullRequests: {
+        status: "available",
+        value: [
+          {
+            number: issue + 10_000,
+            head: branch,
+            headSha: head,
+            base: "main",
+            state: "open",
+            draft: true,
+            merged: false,
+            rootIssue: issue,
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(projection.valid, true);
+  return projection;
+}
+
+function sourceBranchPolicy(sources: readonly Record<string, unknown>[]) {
+  const acquired = createRepositoryBranchPolicy({
+    generation: {
+      authority: "repository-default-branch",
+      repository: {
+        host: "github.com",
+        repositoryId: SOURCE_REPOSITORY_ID,
+        owner: "acme",
+        name: "inari",
+        nameWithOwner: "acme/inari",
+      },
+      ref: "main",
+      treeSha: "9".repeat(40),
+    },
+  });
+  assert.equal(acquired.status, "available");
+  if (acquired.status !== "available") throw new Error("unreachable");
+  const repository = { repositoryHost: "github.com", repositoryId: SOURCE_REPOSITORY_ID };
+  return {
+    version: 1,
+    kind: "local-branch-policy-input",
+    policy: acquired.policy,
+    target: { repository, implementation: SOURCE_IMPLEMENTATION },
+    observedGeneration: { ref: "main", treeSha: "9".repeat(40) },
+    binding: { repository, implementation: SOURCE_IMPLEMENTATION, branch: SOURCE_BRANCH },
+    sources,
+  };
+}
+
+/** Repository-governed PR contract evidence for the Session-scoped Implementation context read. */
+function sourcePullRequestAdapter() {
+  const context = {
+    hostname: "github.com",
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    url: "https://github.com/acme/inari",
+    repositoryId: SOURCE_REPOSITORY_ID,
+  };
+  return {
+    resolveRepositoryContext: async () => context,
+    getRepositoryContext: async () => context,
+    getRepositoryDefaultBranch: async () => "main",
+    findBranch: async (name: string) => ({ name, ref: `refs/heads/${name}`, sha: "7".repeat(40) }),
+    getRepositoryTree: async () => ({
+      sha: "8".repeat(40),
+      entries: [{ path: ".github/PULL_REQUEST_TEMPLATE.md", type: "blob" as const, sha: "6".repeat(40) }],
+    }),
+    getRepositoryBlob: async () => "## Summary\n\nSummarize the change.\n",
+  };
+}
+
+test("#1213 an Implementation Session issues and shows only its current canonical Source Changes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inari-source-session-"));
+  const environment: NodeJS.ProcessEnv = { INARI_CONFIG_HOME: path.join(root, "config"), PATH: process.env.PATH ?? "" };
+  const repositoryRoot = path.join(root, "repository");
+  await mkdir(repositoryRoot);
+  execFileSync("git", ["init", "--quiet"], { cwd: repositoryRoot });
+  execFileSync("git", ["checkout", "-b", SOURCE_BRANCH], { cwd: repositoryRoot });
+  execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/inari.git"], { cwd: repositoryRoot });
+  execFileSync("git", ["config", "user.name", "Inari Test"], { cwd: repositoryRoot });
+  execFileSync("git", ["config", "user.email", "inari-test@example.invalid"], { cwd: repositoryRoot });
+  await mkdir(path.join(repositoryRoot, "src"));
+  await writeFile(path.join(repositoryRoot, "src", "example.ts"), "export const baseline = true;\n", "utf8");
+  execFileSync("git", ["add", "src/example.ts"], { cwd: repositoryRoot });
+  execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: repositoryRoot });
+  const baseHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+  await writeFile(path.join(repositoryRoot, "src", "example.ts"), "export const baseline = false;\n", "utf8");
+  execFileSync("git", ["commit", "--quiet", "-am", "implementation change"], { cwd: repositoryRoot });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+  // The Implementation's own branch-side projection (PR publication / branch.advance), never a Source root.
+  let implementationHead = baseHead;
+  const implementationProjection = () =>
+    sourceChangeProjection(SOURCE_IMPLEMENTATION, SOURCE_BRANCH, implementationHead);
+  const executions: { readonly operation: string; readonly issue: number }[] = [];
+
+  setupLocalAuthority(environment);
+  const keyPair = loadDelegatorKeyPair(localComponentPath("authority", "private-key.pem", environment));
+  const authority = createDelegatorRecord({
+    id: "cli-source-session-test",
+    key: keyPair,
+    notBefore: new Date("2026-01-01T00:00:00.000Z"),
+    maxSessionTtlSeconds: 3_600,
+    capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge", "branch.advance"],
+  });
+  writeLocalJson(
+    "admission",
+    "runtime-authority.json",
+    authority,
+    (value) => {
+      const validation = validateDelegator(value);
+      if (!validation.valid || validation.value === undefined) throw new Error("invalid test Authority");
+      return validation.value;
+    },
+    environment,
+  );
+
+  const source = (number: number, repositoryId = SOURCE_REPOSITORY_ID) => ({
+    repositoryHost: "github.com",
+    repositoryId,
+    number,
+  });
+  // Two same-repository Sources (no primary) and one cross-repository Source.
+  let currentSources: Record<string, unknown>[] = [source(1208), source(1209), source(7, "987654321")];
+  const evidenceRequests: { issue?: number; implementationIssue?: number }[] = [];
+  const issuedRoots: number[] = [];
+  const trust = {
+    repository: { repositoryHost: "github.com", repositoryId: SOURCE_REPOSITORY_ID, nameWithOwner: "acme/inari" },
+    authority: { ref: "refs/heads/main", sha: "a".repeat(40) },
+    runtimeAuthority: authority,
+  };
+  const executorServer = createLocalExecutorHttpServer({
+    config: {
+      version: 1,
+      id: "exec_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 8765 },
+      provider: { kind: "github", credentialProfile: "default" },
+    },
+    listenPort: 0,
+    version: "0.17.1-test",
+    executorId: "exec_0123456789abcdef",
+    resolveRepository: async () => trust.repository,
+    readBranchPolicy: async () => sourceBranchPolicy(currentSources),
+    readEvidence: async (request) => {
+      if (request.issue === undefined) return trust;
+      evidenceRequests.push({ issue: request.issue, implementationIssue: request.implementationIssue });
+      const projection =
+        request.issue === SOURCE_IMPLEMENTATION ? implementationProjection() : sourceChangeProjection(request.issue);
+      return {
+        ...trust,
+        change: projection,
+        implementation: sourceImplementationEvidence(currentSources, baseHead, implementationProjection()),
+      };
+    },
+    readGovernedContract: async () =>
+      compileRepositoryGovernedContract(sourcePullRequestAdapter() as never, "pr", "default"),
+    execute: async (execution): Promise<AuthorizedExecutionResult> => {
+      const issue = (execution.request as { readonly issue: number }).issue;
+      executions.push({ operation: execution.operation, issue });
+      if (execution.operation === "branch.advance") {
+        assert.equal(execution.capability.kind, "branch.advance");
+        const request = execution.request as { readonly expectedHead: string };
+        implementationHead = head;
+        return {
+          version: 1,
+          operation: "branch.advance",
+          status: "succeeded",
+          branchAdvance: {
+            version: 1,
+            operation: "branch.advance",
+            status: "succeeded",
+            outcome: "advanced",
+            branch: SOURCE_BRANCH,
+            expectedHead: request.expectedHead,
+            resultingHead: head,
+          },
+        };
+      }
+      if (execution.operation === "change.issue") {
+        const record = execution.request.signedProvenanceRecord;
+        assert.ok(record);
+        assert.equal(verifyChangeProvenanceRecord(record, authority).rootIssue, issue);
+        issuedRoots.push(issue);
+      }
+      const projection = sourceChangeProjection(issue);
+      return { version: 1, operation: execution.operation, status: "succeeded", projection, execution: { projection } };
+    },
+  });
+  await once(executorServer, "listening");
+  const executorEndpoint = `http://127.0.0.1:${(executorServer.address() as AddressInfo).port}`;
+  const admissionServer = createLocalAdmissionHttpServer(
+    {
+      version: 1,
+      id: "adm_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 0 },
+      executor: { id: "exec_0123456789abcdef", endpoint: executorEndpoint },
+    },
+    "0.17.1-test",
+    authority,
+    new LocalExecutorClient({ id: "exec_0123456789abcdef", endpoint: executorEndpoint }),
+    { environment },
+  );
+  await once(admissionServer, "listening");
+  const admissionPort = (admissionServer.address() as AddressInfo).port;
+  const close = (server: { close(callback: (error?: Error) => void): unknown }) =>
+    new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+
+  try {
+    const admissionId = "adm_0123456789abcdef";
+    writeLocalJson(
+      "cli",
+      "config.json",
+      { version: 1, topology: { admission: "local", executor: "local" }, admission: { id: admissionId } },
+      validateLocalCliConfig,
+      environment,
+    );
+    publishLocalRuntimeEndpoint("admission", admissionId, admissionPort, environment);
+    const dependencies = { repositoryRoot };
+
+    const started = await captureCli(
+      ["session", "start", "--issue", String(SOURCE_IMPLEMENTATION), "--", process.execPath, "-e", "process.exit(0)"],
+      environment,
+      dependencies,
+    );
+    assert.equal(started.exitCode, 0, started.stdout);
+
+    const sessionsDirectory = path.join(environment.INARI_CONFIG_HOME as string, "cli", "sessions");
+    const bindingFile = (await readdir(sessionsDirectory)).find((name) => name.endsWith(".json"));
+    assert.ok(bindingFile);
+    const sessionId = bindingFile.slice(0, -".json".length);
+    const binding = readLocalSessionBinding(sessionId, environment);
+    assert.ok(binding);
+    // The Session task stays the Implementation; change.* claims are exactly the same-repository Sources.
+    assert.deepEqual(binding.task, { kind: "issue", number: SOURCE_IMPLEMENTATION });
+    assert.deepEqual(
+      binding.capabilities.filter((claim) => claim.kind !== "branch.advance"),
+      [
+        ...[1208, 1209].flatMap((issue) =>
+          ["change.implement", "change.ready", "change.abort", "change.merge"].map((kind) => ({ kind, issue })),
+        ),
+        // The single task-bound compatibility claim: Implementation PR publication, never a Change root.
+        { kind: "change.implement", issue: SOURCE_IMPLEMENTATION },
+      ],
+    );
+    assert.deepEqual(
+      binding.capabilities.filter((claim) => claim.kind === "branch.advance"),
+      [{ kind: "branch.advance", branch: SOURCE_BRANCH }],
+    );
+    assert.equal(binding.implementationBinding?.task.number, SOURCE_IMPLEMENTATION);
+    assert.deepEqual(
+      binding.implementationBinding?.sources?.map((reference) => [reference.repositoryId, reference.number]),
+      [
+        [SOURCE_REPOSITORY_ID, 1208],
+        [SOURCE_REPOSITORY_ID, 1209],
+        ["987654321", 7],
+      ],
+    );
+    // One Runtime-signed change.issue provenance per Source, stored and selected by Source.
+    assert.deepEqual((await readdir(path.join(sessionsDirectory, "change-issue-provenance", sessionId))).sort(), [
+      "1208.json",
+      "1209.json",
+    ]);
+    for (const issue of [1208, 1209])
+      assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, issue)?.rootIssue, issue);
+    assert.equal(readLocalSessionChangeIssueProvenance(binding, environment), undefined);
+    assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, 7), undefined);
+
+    environment.INARI_SESSION_ID = sessionId;
+    for (const issue of [1208, 1209]) {
+      const issued = await captureCli(["change", "issue", String(issue), "--json"], environment, dependencies);
+      assert.equal(issued.exitCode, 0, issued.stdout);
+      const shown = await captureCli(["change", "show", String(issue), "--json"], environment, dependencies);
+      assert.equal(shown.exitCode, 0, shown.stdout);
+    }
+    assert.deepEqual(issuedRoots, [1208, 1209]);
+    // Current Implementation evidence is read by the Implementation task, independently of the Change root.
+    assert.ok(evidenceRequests.length > 0);
+    assert.ok(evidenceRequests.every((request) => request.implementationIssue === SOURCE_IMPLEMENTATION));
+    assert.ok(evidenceRequests.some((request) => request.issue === 1208));
+
+    // Unrelated, the Implementation itself, and a cross-repository Source are denied.
+    evidenceRequests.length = 0;
+    for (const issue of [4242, SOURCE_IMPLEMENTATION, 7]) {
+      const denied = await captureCli(["change", "show", String(issue), "--json"], environment, dependencies);
+      assert.notEqual(denied.exitCode, 0, `change show ${issue} must be denied`);
+      assert.equal(JSON.parse(denied.stdout).error.details.reason, "ADMISSION_TASK_MISMATCH");
+    }
+    // Denied against the signed Session Source set before any Change evidence is read.
+    assert.deepEqual(evidenceRequests, []);
+    const unrelatedIssue = await captureCli(["change", "issue", "4242", "--json"], environment, dependencies);
+    assert.notEqual(unrelatedIssue.exitCode, 0);
+    assert.equal(JSON.parse(unrelatedIssue.stdout).error.code, "ADMISSION_CHANGE_PROVENANCE_REQUIRED");
+
+    // The Implementation branch is published through its own task/branch authority, without change.show(<impl>).
+    executions.length = 0;
+    const published = await captureCli(
+      ["change", "publish", String(SOURCE_IMPLEMENTATION), "--commit", "HEAD", "--json"],
+      environment,
+      dependencies,
+    );
+    assert.equal(published.exitCode, 0, published.stdout);
+    assert.equal(JSON.parse(published.stdout).resultingHead, head);
+    assert.deepEqual(executions, [{ operation: "branch.advance", issue: SOURCE_IMPLEMENTATION }]);
+
+    // A Source removed from the current Implementation contract fails closed although the Session still names it.
+    currentSources = [source(1208)];
+    evidenceRequests.length = 0;
+    const removed = await captureCli(["change", "show", "1209", "--json"], environment, dependencies);
+    assert.notEqual(removed.exitCode, 0);
+    assert.equal(JSON.parse(removed.stdout).error.details.reason, "ADMISSION_TASK_MISMATCH");
+    assert.deepEqual(evidenceRequests, [{ issue: 1209, implementationIssue: SOURCE_IMPLEMENTATION }]);
+    const kept = await captureCli(["change", "show", "1208", "--json"], environment, dependencies);
+    assert.equal(kept.exitCode, 0, kept.stdout);
+    assert.deepEqual(issuedRoots, [1208, 1209]);
+  } finally {
+    delete environment.INARI_SESSION_ID;
+    await close(admissionServer);
+    await close(executorServer);
+    await rm(root, { recursive: true, force: true });
+  }
 });
