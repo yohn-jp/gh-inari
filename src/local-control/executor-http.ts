@@ -12,6 +12,7 @@ import {
   type RuntimeFailureReason,
   type RuntimeFailureStage,
 } from "../runtime-contracts/runtime-failure.js";
+import { validateExecutorObservation, type ExecutorObservation } from "../runtime-contracts/executor-observation.js";
 
 export const LOCAL_EXECUTOR_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_EXECUTOR_EXECUTIONS_PATH = "/v1/executions" as const;
@@ -20,7 +21,24 @@ export const LOCAL_EXECUTOR_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_EXECUTOR_HEALTH_PATH = "/health" as const;
 export const LOCAL_EXECUTOR_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
 export const LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH = "/v1/governed-contract" as const;
+/** Read-only Executor owner observation (#1223); reserved to the Control principal on non-loopback. */
+export const LOCAL_EXECUTOR_OWNER_OBSERVATION_PATH = "/v1/owner/observation" as const;
 export const MAX_LOCAL_EXECUTOR_BODY_BYTES = 1_048_576;
+
+/** Principal that may invoke an Executor route on an authenticated (non-loopback) transport. */
+export type LocalExecutorRoutePrincipal = "admission" | "control";
+
+/**
+ * Route authorization for authenticated transports (#1223). Admission holds
+ * the execution authority and may use every Admission→Executor route but not
+ * owner observation; Control may use only owner observation and the health
+ * probe. Unknown paths are left to the handler's 404.
+ */
+export function localExecutorRouteAllows(principal: LocalExecutorRoutePrincipal, pathname: string): boolean {
+  if (pathname === LOCAL_EXECUTOR_HEALTH_PATH) return true;
+  if (pathname === LOCAL_EXECUTOR_OWNER_OBSERVATION_PATH) return principal === "control";
+  return principal === "admission";
+}
 
 export interface LocalExecutorEvidenceRequest {
   readonly version: 1;
@@ -39,6 +57,8 @@ export interface LocalExecutorHttpHandlerOptions {
   readonly readEvidence?: (request: LocalExecutorEvidenceRequest) => Promise<unknown>;
   readonly readBranchPolicy?: (request: LocalExecutorBranchPolicyRequest) => Promise<unknown>;
   readonly readGovernedContract?: (request: LocalExecutorGovernedContractRequest) => Promise<unknown>;
+  /** Executor-owned read-only observation of its App custody and repository bindings (#1223). */
+  readonly observeOwner?: () => Promise<ExecutorObservation>;
   readonly maxBodyBytes?: number;
 }
 
@@ -270,6 +290,32 @@ export function createLocalExecutorHttpHandler(
         executorId: options.executorId,
         protocol: LOCAL_EXECUTOR_PROTOCOL_VERSION,
         readiness: ready ? "ready" : "not-ready",
+      });
+    }
+
+    if (pathname === LOCAL_EXECUTOR_OWNER_OBSERVATION_PATH) {
+      if (request.method !== "GET") {
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only GET is supported." } });
+      }
+      const unavailable = json(503, {
+        ok: false,
+        error: { code: "OWNER_OBSERVATION_UNAVAILABLE", message: "Executor owner observation is unavailable." },
+      });
+      if (options.observeOwner === undefined) return unavailable;
+      let observation: ExecutorObservation;
+      try {
+        observation = validateExecutorObservation(await options.observeOwner());
+      } catch {
+        return unavailable;
+      }
+      // The observation must be this Executor's own custody, never another configuration's.
+      if (observation.executorId !== options.executorId) return unavailable;
+      return json(200, {
+        ok: true,
+        component: "executor",
+        executorId: options.executorId,
+        protocol: LOCAL_EXECUTOR_PROTOCOL_VERSION,
+        observation,
       });
     }
 

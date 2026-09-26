@@ -7,13 +7,16 @@ import type { TLSSocket } from "node:tls";
 import { Readable } from "node:stream";
 import { readLocalJson, validateLocalAdmissionConfig, type LocalExecutorConfig } from "../local-control/config.js";
 import {
+  isLocalControlId,
   LocalTransportSecurityError,
   loadLocalMtlsIdentity,
   verifyLocalMtlsPeerIdentity,
 } from "../local-control/transport-security.js";
 import {
   createLocalExecutorHttpHandler,
+  localExecutorRouteAllows,
   type LocalExecutorHttpHandlerOptions,
+  type LocalExecutorRoutePrincipal,
 } from "../local-control/executor-http.js";
 import {
   clearLocalRuntimeEndpoint,
@@ -32,6 +35,7 @@ import {
 } from "./execution.js";
 import { configuredLocalExecutor, LOCAL_EXECUTOR_DEFAULT_PORT } from "./setup.js";
 import { issuerExecutionEnvironment } from "./enrollment/issuer-reference.js";
+import { observeLocalExecutorOwner } from "./observation.js";
 
 export const LOCAL_EXECUTOR_STATUS_PATH = "/status" as const;
 const LOCAL_EXECUTOR_HISTORICAL_PORT = 8765;
@@ -44,6 +48,11 @@ export interface LocalExecutorHttpServerOptions extends LocalExecutorHttpHandler
   readonly config: LocalExecutorConfig;
   readonly listenPort?: number;
   readonly transport?: ReturnType<typeof loadLocalMtlsIdentity>;
+  /**
+   * Non-loopback only: the explicitly supplied Control principal ID whose mTLS
+   * identity may observe owner state (#1223). Absent means no Control access.
+   */
+  readonly controlPeerId?: string;
 }
 
 function writeResponse(response: Response, outgoing: ServerResponse): Promise<void> {
@@ -84,16 +93,28 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
   ) {
     throw new TypeError("Local Executor non-loopback bind requires a configured mTLS identity.");
   }
+  if (options.controlPeerId !== undefined && (!nonLoopback || !isLocalControlId(options.controlPeerId))) {
+    throw new TypeError("Local Executor Control identity is valid only as a non-loopback mTLS peer.");
+  }
   let server: Server;
   const handle = (incoming: IncomingMessage, outgoing: ServerResponse): void => {
+    // Non-loopback: the authenticated peer is either Admission (execution
+    // authority) or the explicitly configured Control principal (owner
+    // observation); each is confined to its own routes. Loopback keeps the
+    // existing local policy.
+    let principal: LocalExecutorRoutePrincipal | undefined;
     if (nonLoopback) {
       const socket = incoming.socket as TLSSocket;
       const peer = socket.getPeerCertificate();
-      if (
-        !socket.authorized ||
-        options.transport === undefined ||
-        !verifyLocalMtlsPeerIdentity(peer, "admission", options.transport.peerId)
-      ) {
+      if (socket.authorized && options.transport !== undefined) {
+        if (verifyLocalMtlsPeerIdentity(peer, "admission", options.transport.peerId)) principal = "admission";
+        else if (
+          options.controlPeerId !== undefined &&
+          verifyLocalMtlsPeerIdentity(peer, "control", options.controlPeerId)
+        )
+          principal = "control";
+      }
+      if (principal === undefined) {
         socket.destroy();
         return;
       }
@@ -101,6 +122,18 @@ export function createLocalExecutorHttpServer(options: LocalExecutorHttpServerOp
     void (async () => {
       try {
         const pathname = new URL(incoming.url ?? "/", "http://127.0.0.1").pathname;
+        if (principal !== undefined && !localExecutorRouteAllows(principal, pathname)) {
+          outgoing.statusCode = 403;
+          outgoing.setHeader("content-type", "application/json; charset=utf-8");
+          outgoing.setHeader("cache-control", "no-store");
+          outgoing.end(
+            JSON.stringify({
+              ok: false,
+              error: { code: "ROUTE_FORBIDDEN", message: "The authenticated principal may not use this route." },
+            }),
+          );
+          return;
+        }
         if (pathname === LOCAL_EXECUTOR_STATUS_PATH) {
           if (nonLoopback && !isLocalRuntimeLoopbackAddress(incoming.socket.remoteAddress)) {
             outgoing.statusCode = 404;
@@ -203,6 +236,7 @@ export async function startConfiguredLocalExecutor(
     readEvidence: (request) => readLocalExecutorEvidence(request, executionEnvironment),
     readBranchPolicy: (request) => readLocalExecutorBranchPolicy(request, executionEnvironment),
     readGovernedContract: (request) => readLocalExecutorGovernedContract(request, executionEnvironment),
+    observeOwner: async () => observeLocalExecutorOwner({ environment }),
     ready: () => true,
     ...(transport === undefined ? {} : { transport }),
   });

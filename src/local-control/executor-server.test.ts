@@ -1350,3 +1350,45 @@ test("the local-control Executor path is a compatibility facade over the extract
   assert.equal(facade.startConfiguredLocalExecutor, server.startConfiguredLocalExecutor);
   assert.equal(facade.executeLocalAuthorizedExecution, execution.executeLocalAuthorizedExecution);
 });
+
+test("#1223 a Control peer is accepted only as an explicitly configured non-loopback mTLS identity", async () => {
+  const { createLocalExecutorHttpServer } = await import("./executor-server.js");
+  const base = {
+    config: {
+      version: 1 as const,
+      id: "exec_0123456789abcdef",
+      listen: { host: "127.0.0.1" as const, port: 0 },
+      provider: { kind: "github" as const, credentialProfile: "default" },
+    },
+    listenPort: 0,
+    version: "control-guard",
+    executorId: "exec_0123456789abcdef",
+    execute: async () => {
+      throw new Error("not used");
+    },
+  };
+  // Loopback keeps the existing local policy: no Control principal exists there.
+  assert.throws(() => createLocalExecutorHttpServer({ ...base, controlPeerId: "ctl_0123456789abcdef" }), TypeError);
+  const transport = {
+    certificate: Buffer.alloc(0),
+    privateKey: Buffer.alloc(0),
+    caCertificate: Buffer.alloc(0),
+    peerRole: "admission" as const,
+    peerId: "adm_0123456789abcdef",
+  };
+  const nonLoopback = { ...base, config: { ...base.config, listen: { host: "0.0.0.0" as const, port: 0 } }, transport };
+  assert.throws(
+    () => createLocalExecutorHttpServer({ ...nonLoopback, controlPeerId: "adm_0123456789abcdef" }),
+    TypeError,
+  );
+  assert.throws(() => createLocalExecutorHttpServer({ ...nonLoopback, controlPeerId: "ctl_short" }), TypeError);
+  // A Control identity never replaces the Admission execution peer.
+  assert.throws(
+    () =>
+      createLocalExecutorHttpServer({
+        ...nonLoopback,
+        transport: { ...transport, peerRole: "control" as const, peerId: "ctl_0123456789abcdef" },
+      }),
+    TypeError,
+  );
+});
