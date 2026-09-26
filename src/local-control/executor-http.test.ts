@@ -245,6 +245,49 @@ test("Executor request logs correlate executions and redact credentials, provena
   }
 });
 
+test("Executor logs a bounded authorized-execution failure as failure even when HTTP transport succeeds", async () => {
+  const server = createLocalExecutorHttpServer({
+    config: CONFIG,
+    listenPort: 0,
+    version: "0.14.1",
+    executorId: CONFIG.id,
+    execute: async () => ({
+      version: 1,
+      operation: "change.show",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "execution",
+        message: "Session-authorized Change execution failed closed.",
+      },
+    }),
+  });
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const endpoint = `http://127.0.0.1:${address.port}${LOCAL_EXECUTOR_EXECUTIONS_PATH}`;
+  try {
+    const { value: response, output } = await captureStderr(() =>
+      fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(authorizedExecution()),
+      }),
+    );
+    assert.equal(response.status, 200);
+    const events = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const executionCompleted = events.find((event) => event.event === "execution.completed");
+    assert.ok(executionCompleted !== undefined);
+    assert.equal(executionCompleted.status, 200);
+    assert.equal(executionCompleted.outcome, "failure");
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("Executor evidence endpoint is closed, bounded, read-only, and identifies the configured Executor", async () => {
   let reads = 0;
   const server = createLocalExecutorHttpServer({
