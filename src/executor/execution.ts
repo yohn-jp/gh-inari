@@ -51,7 +51,13 @@ import {
   type ExecutorRepositoryBinding,
 } from "./repository-binding-store.js";
 import { LocalExecutorError } from "./errors.js";
-import { issuerKeyMissing, issuerKeyReference, requireLocalExecutorAppId } from "./issuer-input.js";
+import {
+  issuerKeyMissing,
+  issuerKeyReference,
+  localExecutorAppId,
+  localExecutorIssuerKeyStatus,
+  requireLocalExecutorAppId,
+} from "./issuer-input.js";
 
 function issuerKeyInvalid(): LocalExecutorError {
   return new LocalExecutorError(
@@ -117,61 +123,95 @@ function issuerBindingMismatch(): LocalExecutorError {
   );
 }
 
-function sameLocator(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
+function issuerOverrideConflict(): LocalExecutorError {
+  return new LocalExecutorError(
+    "EXECUTOR_ISSUER_BINDING_CONFLICT",
+    "The explicit Issuer App private-key reference contradicts the App-scoped Executor custody bound to this repository.",
+  );
+}
+
+function bindingUnavailable(): LocalExecutorError {
+  return new LocalExecutorError(
+    "EXECUTOR_REPOSITORY_BINDING_UNAVAILABLE",
+    "The repository setup binding could not be read.",
+  );
 }
 
 /**
- * Bind the Issuer App installation credential for one repository (#1182).
+ * Bind the Issuer App installation credential for one repository (#1182, #1199).
  *
- * The Executor's own repository binding (#1199) records the App, installation
- * and exact verified App credential generation the repository acts through;
- * `inari setup next` (executor.bind-repository) writes it through the Executor
- * owner. A binding whose generation is no longer the App's current verified
- * generation is stale and never satisfies execution. A legacy Local Runtime profile written by
- * `inari setup --endpoint` remains a binding source. When both exist they must
- * name the same App, installation and repository; a contradiction or a
- * half-migrated state is a bounded failure, never a silent preference. The App
- * ID and private key are Executor-owned inputs.
+ * The Executor's own repository binding is authoritative: it names the App,
+ * installation and exact verified App credential generation the repository
+ * acts through, and the broker is built from that App-scoped credential's
+ * own key. One Executor process therefore executes each repository with its
+ * own App. A binding whose generation, fingerprint or verification no longer
+ * matches its App's current credential is refused, never replaced by another
+ * route.
+ *
+ * Only when no App-scoped binding exists does the compatibility route apply:
+ * the Executor's configured App ID and key reference plus the legacy Local
+ * Runtime profile written by `inari setup --endpoint`. When a binding and a
+ * profile both exist they must name the same App, installation and
+ * repository; a contradiction is a bounded failure, never a silent
+ * preference. An explicit key reference naming the bound App must be that
+ * App's bound key.
  */
 async function localExecutorIssuerBinding(
   repository: { readonly repositoryHost: string; readonly nameWithOwner: string; readonly repositoryId?: string },
   environment: NodeJS.ProcessEnv,
 ): Promise<LocalExecutorIssuerBinding> {
-  const configuredAppId = requireLocalExecutorAppId(environment);
-  const privateKeyPem = issuerPrivateKey(environment);
   let bound: ExecutorRepositoryBinding | undefined;
   let credential: StoredAppCredential | undefined;
-  let profile: Awaited<ReturnType<LocalRuntimeProfileStore["findForRepository"]>>;
+  let custodyUnreadable = false;
   try {
     bound = new ExecutorRepositoryBindingStore(environment).find(repository.repositoryHost, repository.nameWithOwner);
     credential = bound === undefined ? undefined : new ExecutorAppCredentialStore(environment).current(bound.appId);
+  } catch {
+    custodyUnreadable = true;
+  }
+  let appId: string;
+  let privateKeyPem: string;
+  if (bound === undefined) {
+    // Compatibility route: the configured App ID and single key reference.
+    appId = requireLocalExecutorAppId(environment);
+    privateKeyPem = issuerPrivateKey(environment);
+    if (custodyUnreadable) throw bindingUnavailable();
+  } else {
+    if (credential === undefined || repositoryBindingState(bound, credential) !== "bound")
+      throw issuerBindingMismatch();
+    appId = bound.appId;
+    try {
+      privateKeyPem = new ExecutorAppCredentialStore(environment).readKey(credential).toString("utf8");
+    } catch {
+      throw bindingUnavailable();
+    }
+    if (
+      localExecutorAppId(environment) === bound.appId &&
+      localExecutorIssuerKeyStatus(environment) === "configured" &&
+      issuerKeyFingerprint(Buffer.from(issuerPrivateKey(environment))) !== bound.fingerprint
+    )
+      throw issuerOverrideConflict();
+  }
+  let profile: Awaited<ReturnType<LocalRuntimeProfileStore["findForRepository"]>>;
+  try {
     profile = await new LocalRuntimeProfileStore({ environment }).findForRepository({
       repositoryHost: repository.repositoryHost,
       repositoryNameWithOwner: repository.nameWithOwner,
     });
   } catch {
+    throw bindingUnavailable();
+  }
+  if (
+    bound !== undefined &&
+    profile !== undefined &&
+    (profile.app.appId !== bound.appId ||
+      profile.app.installationId !== bound.installationId ||
+      profile.repository.repositoryId !== bound.repositoryId)
+  )
     throw new LocalExecutorError(
-      "EXECUTOR_REPOSITORY_BINDING_UNAVAILABLE",
-      "The repository setup binding could not be read.",
+      "EXECUTOR_REPOSITORY_BINDING_INCONSISTENT",
+      "The Executor repository binding and the Local Runtime profile name different App installations.",
     );
-  }
-  if (bound !== undefined && repositoryBindingState(bound, credential) !== "bound") bound = undefined;
-  if (bound !== undefined) {
-    if (
-      profile !== undefined &&
-      (profile.app.appId !== bound.appId ||
-        profile.app.installationId !== bound.installationId ||
-        profile.repository.repositoryId !== bound.repositoryId)
-    )
-      throw new LocalExecutorError(
-        "EXECUTOR_REPOSITORY_BINDING_INCONSISTENT",
-        "The Executor repository binding and the Local Runtime profile name different App installations.",
-      );
-    // The Issuer key this Executor runs with must be the exact verified generation the binding names.
-    if (bound.appId === configuredAppId && issuerKeyFingerprint(Buffer.from(privateKeyPem)) !== bound.fingerprint)
-      throw issuerBindingMismatch();
-  }
   const source =
     bound !== undefined
       ? {
@@ -201,7 +241,7 @@ async function localExecutorIssuerBinding(
     );
   }
   if (
-    source.appId !== configuredAppId ||
+    source.appId !== appId ||
     (repository.repositoryId !== undefined && source.repository.repositoryId !== repository.repositoryId)
   ) {
     throw issuerBindingMismatch();
@@ -210,10 +250,10 @@ async function localExecutorIssuerBinding(
   const installationId = source.installationId;
   return Object.freeze({
     repository: identity,
-    appId: configuredAppId,
+    appId,
     broker: (provenance?: GitHubChangeProvenanceSignerOptions) =>
       new GitHubAppInstallationCredentialBroker({
-        appId: configuredAppId,
+        appId,
         installationId,
         privateKeyPem,
         repository: providerRepository(identity),
