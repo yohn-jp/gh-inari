@@ -131,12 +131,24 @@ function actionRequest(
 }
 
 function storedText(w: World): string {
-  const directory = path.join(w.environment.INARI_CONFIG_HOME!, "runtime", "setup");
-  return existsSync(directory)
-    ? readdirSync(directory)
-        .map((file) => readFileSync(path.join(directory, file), "utf8"))
-        .join("\n")
-    : "";
+  const roots = [
+    path.join(w.environment.INARI_CONFIG_HOME!, "runtime", "setup"),
+    path.join(w.environment.INARI_CONFIG_HOME!, "repositories"),
+  ];
+  const texts: string[] = [];
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    const pending = [root];
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        const target = path.join(current, entry.name);
+        if (entry.isDirectory()) pending.push(target);
+        else if (entry.isFile() && entry.name.endsWith(".json")) texts.push(readFileSync(target, "utf8"));
+      }
+    }
+  }
+  return texts.join("\n");
 }
 
 /** A configured repository: enrolled Executor, Authority custody, Admission pin and shared record. */
