@@ -8,6 +8,7 @@ import {
   type SecretEnrollmentReceipt,
 } from "../../runtime-contracts/enrollment.js";
 import { GitHubAppInstallationCredentialBroker } from "../../github/app-installation-credential-broker.js";
+import type { RepositoryIdentity } from "../../github/effect-authorizer.js";
 import { LocalRuntimeProfileStore } from "../../local-runtime-profile.js";
 import { ExecutorCredentialStore, type StoredIssuerKey } from "../credential-store.js";
 
@@ -38,6 +39,32 @@ export interface ExecutorEnrollmentOwnerOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly now?: () => number;
   readonly verifyProvider?: (pem: string, request: SecretEnrollmentRequest) => Promise<boolean>;
+  /** Test seam for `verifyStoredProvider`; production uses the installation broker. */
+  readonly verifyInstallation?: (
+    pem: string,
+    repository: RepositoryIdentity,
+    installationId: string,
+  ) => Promise<boolean>;
+}
+
+/** Public, secret-free projection of Executor Issuer key custody. */
+export type ExecutorIssuerCustodyStatus = Pick<
+  StoredIssuerKey,
+  "configId" | "appId" | "generation" | "fingerprint" | "providerVerified"
+>;
+
+/** Reads the current custody record without exposing key bytes or the key path. */
+export function executorIssuerCustody(environment?: NodeJS.ProcessEnv): ExecutorIssuerCustodyStatus | undefined {
+  const record = new ExecutorCredentialStore(environment).current();
+  return record === undefined
+    ? undefined
+    : Object.freeze({
+        configId: record.configId,
+        appId: record.appId,
+        generation: record.generation,
+        fingerprint: record.fingerprint,
+        providerVerified: record.providerVerified,
+      });
 }
 
 const CAPABILITY_LIFETIME_MS = 60_000;
@@ -231,6 +258,33 @@ export class ExecutorEnrollmentOwner {
     return this.enrollStream(capability, request, read(), signal);
   }
 
+  /**
+   * Verify the already stored Issuer key against an explicitly bound App
+   * installation of `repository` and record the result. Trusted local
+   * composition only; the key never leaves the Executor owner.
+   */
+  async verifyStoredProvider(repository: RepositoryIdentity, installationId: string): Promise<boolean> {
+    if (!/^[1-9][0-9]{0,19}$/u.test(installationId)) throw denied();
+    const commit = this.#pending.then(async () => {
+      const current = this.#store.current();
+      if (current === undefined || current.configId !== this.#options.configId || current.appId !== this.#options.appId)
+        throw denied();
+      if (current.providerVerified) return true;
+      const pem = this.#store.readKey(current).toString("utf8");
+      let verified = false;
+      try {
+        verified = await (this.#options.verifyInstallation?.(pem, repository, installationId) ??
+          this.#installationCheck(pem, repository, installationId));
+      } catch {
+        verified = false;
+      }
+      if (verified) this.#store.markProviderVerified(current.generation);
+      return verified;
+    });
+    this.#pending = commit.catch(() => undefined);
+    return commit;
+  }
+
   async #verifyWithBroker(pem: string, request: SecretEnrollmentRequest): Promise<boolean> {
     const profile = await new LocalRuntimeProfileStore({ environment: this.#options.environment }).findForRepository({
       repositoryHost: request.repository.repositoryHost,
@@ -242,19 +296,23 @@ export class ExecutorEnrollmentOwner {
       profile.repository.repositoryId !== request.repository.repositoryId
     )
       return false;
-    const [owner, name] = request.repository.nameWithOwner.split("/");
+    return this.#installationCheck(pem, request.repository, profile.app.installationId);
+  }
+
+  async #installationCheck(pem: string, repository: RepositoryIdentity, installationId: string): Promise<boolean> {
+    const [owner, name] = repository.nameWithOwner.split("/");
     if (owner === undefined || name === undefined) return false;
     const broker = new GitHubAppInstallationCredentialBroker({
       appId: this.#options.appId,
-      installationId: profile.app.installationId,
+      installationId,
       privateKeyPem: pem,
-      repository: { hostname: request.repository.repositoryHost, owner, name },
+      repository: { hostname: repository.repositoryHost, owner, name },
     });
     return broker.withRepositoryReadCapability(
       {},
       async (capability) =>
         capability.scope.app.appId === this.#options.appId &&
-        capability.scope.repository.repositoryId === request.repository.repositoryId,
+        capability.scope.repository.repositoryId === repository.repositoryId,
     );
   }
 }

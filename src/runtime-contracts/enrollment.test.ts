@@ -33,6 +33,36 @@ test("enrollment requests are secret-free and byte-bounded", () => {
   });
 });
 
+test("enrollment requests may carry bounded, secret-free action inputs", () => {
+  const request = {
+    version: 1,
+    kind: "executor-issuer-private-key",
+    operationId: "op-1",
+    repository,
+    declaredBytes: 1700,
+  };
+  assert.equal("inputs" in validateSecretEnrollmentRequest(request), false);
+  assert.deepEqual(validateSecretEnrollmentRequest({ ...request, inputs: { "app-id": "123" } }).inputs, {
+    "app-id": "123",
+  });
+  assert.throws(
+    () => validateSecretEnrollmentRequest({ ...request, inputs: { "app-id": "-----BEGIN PRIVATE KEY-----" } }),
+    { code: "RUNTIME_CONTRACT_SECRET_MATERIAL" },
+  );
+  assert.throws(() => validateSecretEnrollmentRequest({ ...request, inputs: { privateKey: "x" } }), {
+    code: "RUNTIME_CONTRACT_SECRET_MATERIAL",
+  });
+  assert.throws(() => validateSecretEnrollmentRequest({ ...request, inputs: ["123"] }), /inputs/u);
+  assert.throws(() => validateSecretEnrollmentRequest({ ...request, inputs: { "app-id": 123 } }), /app-id/u);
+  assert.throws(() => validateSecretEnrollmentRequest({ ...request, inputs: { "app-id": "" } }), /app-id/u);
+  assert.throws(
+    () => validateSecretEnrollmentRequest({ ...request, inputs: { "app-id": "1".repeat(481) } }),
+    /app-id/u,
+  );
+  const many = Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`input-${index}`, "x"]));
+  assert.throws(() => validateSecretEnrollmentRequest({ ...request, inputs: many }), /at most 16/u);
+});
+
 test("receipts are public and carry a fingerprint exactly when enrolled", () => {
   const receipt = {
     version: 1,

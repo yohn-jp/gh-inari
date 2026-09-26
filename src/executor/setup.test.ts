@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -84,6 +86,7 @@ test("the public Executor setup and server entries are narrow and explicit", () 
     "LOCAL_EXECUTOR_DEFAULT_PORT",
     "LocalExecutorError",
     "configuredLocalExecutor",
+    "ensureLocalExecutorConfiguration",
     "localExecutorAppId",
     "localExecutorIssuerKeyStatus",
     "setupLocalExecutor",
@@ -93,4 +96,18 @@ test("the public Executor setup and server entries are narrow and explicit", () 
     "createLocalExecutorHttpServer",
     "startConfiguredLocalExecutor",
   ]);
+});
+
+test("managed custody can create the secret-free Executor configuration without an operator key reference", async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "inari-executor-config-"));
+  try {
+    const environment = { INARI_CONFIG_HOME: home };
+    await assert.rejects(setup.setupLocalExecutor(environment), { code: "EXECUTOR_PROVIDER_CONFIGURATION_MISSING" });
+    const first = await setup.ensureLocalExecutorConfiguration(environment);
+    const second = await setup.ensureLocalExecutorConfiguration(environment);
+    assert.equal(second.config.id, first.config.id);
+    assert.deepEqual(Object.keys(first.config).sort(), ["id", "listen", "provider", "version"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

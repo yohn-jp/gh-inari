@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ExecutorCredentialStore } from "../credential-store.js";
-import { ExecutorEnrollmentOwner } from "./owner.js";
+import { ExecutorEnrollmentOwner, executorIssuerCustody } from "./owner.js";
 import { startExecutorEnrollmentProcess } from "./server.js";
 
 const repository = { repositoryHost: "github.com", repositoryId: "123", nameWithOwner: "owner/repo" };
@@ -141,6 +141,48 @@ test("provider verification is a separate persisted readiness state", async () =
     const retry = await owner.enrollStream(owner.issue(), request(bytes.length, "retry"), stream(bytes));
     assert.equal(retry.generation, current.generation);
     assert.equal(retry.providerVerified, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a stored key is verified against an explicit installation only by the Executor owner", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "inari-enrollment-installation-"));
+  try {
+    const environment = { INARI_CONFIG_HOME: root };
+    const seen: string[] = [];
+    let accept = false;
+    const owner = new ExecutorEnrollmentOwner({
+      configId: "exec_1234567890123456",
+      appId: "123",
+      environment,
+      verifyProvider: async () => false,
+      verifyInstallation: async (key, target, installationId) => {
+        assert.match(key, /BEGIN PRIVATE KEY/u);
+        seen.push(`${target.repositoryId}:${installationId}`);
+        return accept;
+      },
+    });
+    await assert.rejects(owner.verifyStoredProvider(repository, "77"), /rejected/u);
+    const bytes = pem();
+    await owner.enrollStream(owner.issue(), request(bytes.length), stream(bytes));
+    await assert.rejects(owner.verifyStoredProvider(repository, "not-an-id"), /rejected/u);
+    assert.equal(await owner.verifyStoredProvider(repository, "77"), false);
+    assert.equal(executorIssuerCustody(environment)?.providerVerified, false);
+    accept = true;
+    assert.equal(await owner.verifyStoredProvider(repository, "77"), true);
+    const status = executorIssuerCustody(environment);
+    assert.equal(status?.providerVerified, true);
+    assert.deepEqual(Object.keys(status ?? {}).sort(), [
+      "appId",
+      "configId",
+      "fingerprint",
+      "generation",
+      "providerVerified",
+    ]);
+    assert.deepEqual(seen, ["123:77", "123:77"]);
+    const other = new ExecutorEnrollmentOwner({ configId: "exec_1234567890123456", appId: "456", environment });
+    await assert.rejects(other.verifyStoredProvider(repository, "77"), /rejected/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -149,6 +149,16 @@ export class ExecutorCredentialStore {
     return localComponentPath("executor", `issuer/${current.file}`, this.#environment);
   }
 
+  /** Key bytes of the current record, for Executor-owned provider verification only. */
+  readKey(record: StoredIssuerKey): Buffer {
+    const current = this.current();
+    if (current === undefined || current.generation !== record.generation || current.fingerprint !== record.fingerprint)
+      throw failure();
+    const pem = secureRead(localComponentPath("executor", `issuer/${current.file}`, this.#environment), MAX_KEY_BYTES);
+    if (issuerKeyFingerprint(pem) !== current.fingerprint) throw failure();
+    return pem;
+  }
+
   markProviderVerified(generation: string): StoredIssuerKey {
     const current = this.current();
     if (current === undefined || current.generation !== generation) throw failure();
