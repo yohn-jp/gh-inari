@@ -16,6 +16,20 @@ import { LocalAdmissionError } from "./setup.js";
 const EXECUTOR_ID = "exec_0123456789abcdef";
 const ADMISSION_ID = "adm_0123456789abcdef";
 
+async function captureStderr<T>(run: () => Promise<T>): Promise<{ readonly value: T; readonly output: string }> {
+  const originalWrite = process.stderr.write;
+  let output = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    output += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { value: await run(), output };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
+
 function authority() {
   return createDelegatorRecord({
     id: "runtime-admission-server-test",
@@ -107,6 +121,41 @@ test("the Admission server never dispatches a denied execution to the Executor",
     assert.ok(denied.status === 400 || denied.status === 403, String(denied.status));
     assert.equal(body.ok, false);
     assert.equal(calls.includes("execute"), false);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("Admission request logs redact Session route IDs and raw request bodies", async () => {
+  const server = createLocalAdmissionHttpServer(config("127.0.0.1"), "1", authority(), executor([]), {
+    environment: { INARI_CONFIG_HOME: "/nonexistent/inari-admission-log-test" },
+  });
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const sessionId = "session-route-secret-value";
+  const bodySecret = "provider-payload-secret-value";
+  try {
+    const { value: response, output } = await captureStderr(() =>
+      fetch(`http://127.0.0.1:${address.port}/v1/sessions/${sessionId}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: 1, binding: { token: bodySecret, signature: bodySecret } }),
+      }),
+    );
+    assert.ok(response.status === 400 || response.status === 403, String(response.status));
+    const events = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.event, "request.received");
+    assert.equal(events[0]?.route, "/v1/sessions/:id");
+    assert.equal(events[1]?.event, "request.completed");
+    assert.equal(events[1]?.route, "/v1/sessions/:id");
+    assert.equal(events[1]?.status, response.status);
+    assert.equal(events[1]?.elapsedMs !== undefined, true);
+    assert.doesNotMatch(output, /session-route-secret-value|provider-payload-secret-value/u);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }

@@ -10,6 +10,11 @@ import {
   type RepositoryBranchTarget,
 } from "../../repository-branch-policy.js";
 import { canonicalJsonString, type CanonicalJsonValue } from "../../agent-authority/codec.js";
+import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "../../contract/issue-reference.js";
+import {
+  validateImplementationSessionAuthorizationBinding,
+  type ImplementationSessionAuthorizationBinding,
+} from "../../implementation-session-binding.js";
 
 export interface LocalBranchObservation {
   readonly version: 1;
@@ -142,8 +147,40 @@ export function validateLocalBranchObservation(value: unknown): LocalBranchObser
   return value as LocalBranchObservation;
 }
 
-/** Owner-supplied branch-policy observation input for one governed Implementation (#1179). */
-export type LocalBranchPolicyInput = Omit<ObserveLocalBranchInput, "observedBranch">;
+/**
+ * Owner-supplied branch-policy observation input for one governed Implementation (#1179).
+ *
+ * #1213: the Executor additionally projects the canonical Source set parsed
+ * from the same Implementation contract, and Admission may attach the signed-
+ * safe projection of the current authorized Implementation that carries that
+ * set. Neither is part of the signed branch observation.
+ */
+export type LocalBranchPolicyInput = Omit<ObserveLocalBranchInput, "observedBranch"> & {
+  readonly sources?: readonly IssueReference[];
+  readonly implementationBinding?: ImplementationSessionAuthorizationBinding;
+};
+
+const MAX_POLICY_SOURCES = 64;
+
+/** Canonical (sorted, unique) Source set, or undefined when any entry is malformed. */
+function canonicalSources(value: unknown): readonly IssueReference[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_POLICY_SOURCES) return undefined;
+  const sources: IssueReference[] = [];
+  const keys = new Set<string>();
+  for (const entry of value) {
+    const result = normalizeIssueReference(entry);
+    if (!result.valid || result.reference === undefined) return undefined;
+    const key = issueReferenceKey(result.reference);
+    if (keys.has(key)) return undefined;
+    keys.add(key);
+    sources.push(result.reference);
+  }
+  return sources.sort((left, right) => {
+    const a = issueReferenceKey(left);
+    const b = issueReferenceKey(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -170,7 +207,17 @@ export function validateLocalBranchPolicyInput(value: unknown): LocalBranchPolic
   if (
     !isPlainRecord(value) ||
     Object.keys(value).some(
-      (key) => !["version", "kind", "policy", "target", "observedGeneration", "binding"].includes(key),
+      (key) =>
+        ![
+          "version",
+          "kind",
+          "policy",
+          "target",
+          "observedGeneration",
+          "binding",
+          "sources",
+          "implementationBinding",
+        ].includes(key),
     ) ||
     value.version !== 1 ||
     value.kind !== "local-branch-policy-input" ||
@@ -229,10 +276,32 @@ export function validateLocalBranchPolicyInput(value: unknown): LocalBranchPolic
       branch: candidate.branch,
     };
   }
+  const sources = value.sources === undefined ? undefined : canonicalSources(value.sources);
+  if (value.sources !== undefined && sources === undefined) return undefined;
+  let implementationBinding: ImplementationSessionAuthorizationBinding | undefined;
+  if (value.implementationBinding !== undefined) {
+    const result = validateImplementationSessionAuthorizationBinding(value.implementationBinding);
+    // The binding is only meaningful for the same Implementation, repository and exact Source set.
+    if (
+      !result.valid ||
+      result.binding === undefined ||
+      sources === undefined ||
+      result.binding.sources === undefined ||
+      result.binding.task.number !== target.implementation ||
+      result.binding.repository.repositoryHost !== repository.repositoryHost ||
+      result.binding.repository.repositoryId !== repository.repositoryId ||
+      canonicalJsonString(result.binding.sources as unknown as CanonicalJsonValue) !==
+        canonicalJsonString(sources as unknown as CanonicalJsonValue)
+    )
+      return undefined;
+    implementationBinding = result.binding;
+  }
   return Object.freeze({
     policy: acquisition.policy,
     target: { repository, implementation: target.implementation as number },
     observedGeneration: { ref: generation.ref, treeSha: generation.treeSha },
     ...(binding === undefined ? {} : { binding }),
+    ...(sources === undefined ? {} : { sources }),
+    ...(implementationBinding === undefined ? {} : { implementationBinding }),
   });
 }

@@ -776,3 +776,75 @@ test("publishes exactly the frozen admission runtime surface", () => {
     assert.equal(obsoleteExport in capabilityAdmissionModule, false, obsoleteExport);
   }
 });
+
+test("#1213 distinguishes Implementation task from Change subject only for current same-repository Sources", async () => {
+  const runtime = runtimeAuthority();
+  const authenticated = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "change.show",
+    { version: 1, issue: 375 },
+    [{ kind: "change.implement", issue: 375 }],
+  );
+  const repository = { repositoryHost: "github.com", repositoryId: REPOSITORY_ID };
+  const sourceBinding: ImplementationSessionAuthorizationBinding = {
+    ...IMPLEMENTATION_BINDING,
+    sources: [
+      { ...repository, number: 378 },
+      { ...repository, number: 379 },
+      { repositoryHost: "github.com", repositoryId: "987654321", number: 7 },
+    ],
+  };
+  const context = (implementationBinding: ImplementationSessionAuthorizationBinding) =>
+    ({
+      ...authenticated,
+      implementationBinding,
+      capabilities: [378, 379, 380, 7].map((issue) => ({ kind: "change.implement", issue })),
+    }) as AuthenticatedSessionContext;
+
+  // Multiple Sources: each exact member is admitted with its own Change identity; the task stays 375.
+  for (const issue of [378, 379]) {
+    const admitted = admission(
+      context(sourceBinding),
+      "change.show",
+      subject("change", issue),
+      projection(issue, "draft"),
+    );
+    assert.deepEqual(admitted.subject, { kind: "change", issue });
+    assert.deepEqual(admitted.task, { kind: "issue", number: 375 });
+    assert.deepEqual(admitted.capability, { kind: "change.implement", issue });
+  }
+  // Unrelated and cross-repository Issues are denied even with a matching claim.
+  assertDenied(
+    () => admission(context(sourceBinding), "change.show", subject("change", 380), projection(380, "draft")),
+    "task",
+  );
+  assertDenied(
+    () => admission(context(sourceBinding), "change.show", subject("change", 7), projection(7, "draft")),
+    "task",
+  );
+  // Without a current Source set the task and subject must still match.
+  assertDenied(
+    () => admission(context(IMPLEMENTATION_BINDING), "change.show", subject("change", 378), projection(378, "draft")),
+    "task",
+  );
+  // Branch subjects stay bound to the Implementation task.
+  const advance = await authenticatedContext(
+    runtime.authority,
+    runtime.key,
+    "branch.advance",
+    { version: 1, issue: 375, branch: CANONICAL_BRANCH },
+    [{ kind: "branch.advance", branch: CANONICAL_BRANCH }],
+  );
+  assertDenied(
+    () =>
+      admission(
+        { ...advance, implementationBinding: sourceBinding } as AuthenticatedSessionContext,
+        "branch.advance",
+        subject("branch", 378),
+        projection(378, "draft"),
+        { changes: [{ operation: "modify", path: "src/implementation.ts" }] },
+      ),
+    "task",
+  );
+});
