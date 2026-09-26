@@ -27,7 +27,7 @@ export class LocalTransportSecurityError extends Error {
   readonly code = "LOCAL_TRANSPORT_MTLS_CONFIGURATION_INVALID" as const;
 
   constructor() {
-    super("Non-loopback local Runtime requires valid owner-only Admission and Executor mTLS identities.");
+    super("Non-loopback local Runtime requires a valid owner-only mTLS identity.");
     this.name = "LocalTransportSecurityError";
   }
 }
