@@ -270,3 +270,129 @@ test("#1213 a Source-bound Session keeps the Implementation task and issues per-
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("#1213 a Session launches with the full Source-bound lifecycle for more than three Sources", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inari-many-sources-launcher-"));
+  try {
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["checkout", "-q", "-b", "fix/1213-source-binding"], { cwd: root });
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/inari.git"], { cwd: root });
+    const environment: NodeJS.ProcessEnv = {
+      INARI_CONFIG_HOME: path.join(root, "config"),
+      PATH: process.env.PATH ?? "",
+    };
+    setupLocalAuthority(environment);
+    const keyPair = loadDelegatorKeyPair(localComponentPath("authority", "private-key.pem", environment));
+    const lifecycle = ["change.implement", "change.ready", "change.abort", "change.merge"] as const;
+    const authority = createDelegatorRecord({
+      id: "launcher-many-sources-test",
+      key: keyPair,
+      notBefore: new Date("2026-08-01T00:00:00.000Z"),
+      maxSessionTtlSeconds: 3600,
+      capabilityCeiling: [...lifecycle, "branch.advance"],
+    });
+    writeLocalJson(
+      "admission",
+      "runtime-authority.json",
+      authority,
+      (value) => {
+        const valid = validateDelegator(value);
+        if (!valid.valid || valid.value === undefined) throw new Error("invalid authority");
+        return valid.value;
+      },
+      environment,
+    );
+    const acquired = createRepositoryBranchPolicy({
+      generation: {
+        authority: "repository-default-branch",
+        repository: {
+          host: "github.com",
+          repositoryId: "123",
+          owner: "acme",
+          name: "inari",
+          nameWithOwner: "acme/inari",
+        },
+        ref: "main",
+        treeSha: "a".repeat(40),
+      },
+    });
+    assert.equal(acquired.status, "available");
+    if (acquired.status !== "available") return;
+    const repository = { repositoryHost: "github.com", repositoryId: "123" };
+    const sameRepository = [1201, 1202, 1203, 1204, 1205];
+    const sources = [
+      ...sameRepository.map((number) => ({ ...repository, number })),
+      { repositoryHost: "github.com", repositoryId: "987", number: 7 },
+    ];
+    const implementationBinding = {
+      version: 1,
+      kind: "implementation-session-binding",
+      authorization: {
+        version: 1,
+        kind: "implementation-authorization",
+        contractVersion: 1,
+        implementation: { ...repository, number: 1213 },
+        governedBodyDigest: "c".repeat(64),
+      },
+      repository,
+      base: { branch: "main", revision: "d".repeat(40), freshness: "d".repeat(40) },
+      task: { kind: "issue", number: 1213 },
+      sources,
+    } as const;
+    const registered: LocalSessionBinding[] = [];
+    const exitCode = await startLocalSession({
+      cwd: root,
+      issue: 1213,
+      command: "true",
+      commandArgs: [],
+      environment,
+      now: new Date("2026-09-01T12:00:00.000Z"),
+      resolveRepository: async () => ({ host: "github.com", repositoryId: "123", nameWithOwner: "acme/inari" }),
+      admission: {
+        resolveRepository: async () => ({
+          host: "github.com" as const,
+          repositoryId: "123",
+          nameWithOwner: "acme/inari",
+        }),
+        registerSession: async (binding: LocalSessionBinding) => {
+          registered.push(binding);
+          return { id: binding.sessionId, status: "active" };
+        },
+        closeSession: async () => ({ id: "unused", status: "closed" }),
+        readBranchPolicy: async () => assert.fail("branch policy is not read by the launcher"),
+        readPullRequestContext: async () => assert.fail("contracts are not read by the launcher"),
+        executeIntent: async () => {
+          throw new Error("unreachable");
+        },
+      },
+      branchObservation: {
+        policy: acquired.policy,
+        target: { repository, implementation: 1213 },
+        observedGeneration: { ref: "main", treeSha: "a".repeat(40) },
+        binding: { repository, implementation: 1213, branch: "fix/1213-source-binding" },
+        sources,
+        implementationBinding,
+      },
+      spawnChild: (() => {
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      }) as unknown as typeof spawn,
+    });
+    assert.equal(exitCode, 0);
+    const binding = registered[0];
+    assert.ok(binding);
+    assert.deepEqual(binding.task, { kind: "issue", number: 1213 });
+    assert.deepEqual(binding.capabilities, [
+      ...sameRepository.flatMap((issue) => lifecycle.map((kind) => ({ kind, issue }))),
+      { kind: "change.implement", issue: 1213 },
+      { kind: "branch.advance", branch: "fix/1213-source-binding" },
+    ]);
+    for (const issue of sameRepository)
+      assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, issue)?.rootIssue, issue);
+    for (const issue of [1213, 7, 4242])
+      assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, issue), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

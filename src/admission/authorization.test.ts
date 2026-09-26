@@ -597,3 +597,105 @@ test("#1213 execution admits Change roots only from the signed and current Sourc
     );
   });
 });
+
+test("#1213 a Session with more than three Sources holds the full Source-bound lifecycle for each", async () => {
+  await withEnvironment(async (environment) => {
+    const keyPair = generateDelegatorKeyPair();
+    const authority = createDelegatorRecord({
+      id: "runtime-admission-many-sources",
+      key: keyPair,
+      notBefore: new Date("2026-08-01T00:00:00.000Z"),
+      maxSessionTtlSeconds: 3_600,
+      capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge", "branch.advance"],
+    });
+    const sameRepository = [1201, 1202, 1203, 1204, 1205];
+    let currentSources = [...sameRepository.map((issue) => sourceReference(issue)), sourceReference(7, "987654321")];
+    const requests: LocalExecutorEvidenceRequest[] = [];
+    const authorization = {
+      ...options(
+        environment,
+        authority,
+        (request) =>
+          request.issue === undefined
+            ? trustEvidence(authority)
+            : sourceEvidence(authority, currentSources, request.issue),
+        requests,
+      ),
+      readBranchPolicy: async () => sourcePolicyInput(currentSources),
+    };
+    const input = await currentBranchPolicyInput(
+      { id: REPOSITORY_ID, name: REPOSITORY_NAME },
+      IMPLEMENTATION,
+      authorization,
+      "session-registration",
+    );
+    const { sources: _sources, implementationBinding, ...policy } = input;
+    const lifecycle = ["change.implement", "change.ready", "change.abort", "change.merge"] as const;
+    const capabilities = [
+      ...sameRepository.flatMap((issue) => lifecycle.map((kind) => ({ kind, issue }))),
+      { kind: "change.implement" as const, issue: IMPLEMENTATION },
+      { kind: "branch.advance" as const, branch: SOURCE_BRANCH },
+    ];
+    // 22 claims: above the Session-wide 16, bounded by the exact signed Source set.
+    assert.equal(capabilities.length, 22);
+    const session = createLocalSessionBinding({
+      sessionId: "session-many-sources",
+      repository: { id: REPOSITORY_ID, name: REPOSITORY_NAME },
+      task: { kind: "issue", number: IMPLEMENTATION },
+      capabilities,
+      ttlSeconds: 120,
+      runtimeAuthority: authority,
+      runtimeKey: keyPair,
+      now: NOW,
+      branchObservation: observeLocalBranch({ ...policy, observedBranch: SOURCE_BRANCH }),
+      ...(implementationBinding === undefined ? {} : { implementationBinding }),
+    });
+    assert.deepEqual(session.capabilities, capabilities);
+    await admitSession(session, authorization);
+    const show = (requestId: string, issue: number) => {
+      const validation = validateExecutionIntent({
+        version: 1,
+        requestId,
+        repository: {
+          repositoryHost: "github.com",
+          repositoryId: REPOSITORY_ID,
+          repositoryNameWithOwner: REPOSITORY_NAME,
+        },
+        operation: "change.show",
+        request: changeReadRequest(issue),
+      });
+      assert.ok(validation.valid && validation.intent !== undefined);
+      return validation.intent as ExecutionIntent;
+    };
+
+    // Every Source, including the fourth and fifth, is an exact member; no primary Source.
+    for (const issue of sameRepository) {
+      requests.length = 0;
+      const execution = await authorizeExecutionIntent(
+        show(`show-${issue}`, issue),
+        "session-many-sources",
+        authorization,
+      );
+      assert.deepEqual(execution.subject, { kind: "change", issue });
+      assert.deepEqual(
+        requests
+          .filter((request) => request.issue !== undefined)
+          .map((request) => [request.issue, request.implementationIssue]),
+        [[issue, IMPLEMENTATION]],
+      );
+    }
+    // Unrelated Issues, the cross-repository Source number and the Implementation itself stay denied.
+    for (const issue of [4242, 7, IMPLEMENTATION]) {
+      await assert.rejects(
+        authorizeExecutionIntent(show(`show-denied-${issue}`, issue), "session-many-sources", authorization),
+        /not a Session Source/u,
+      );
+    }
+    // A Source removed from the current contract is denied although the Session still names it.
+    currentSources = currentSources.filter((source) => source.number !== 1205);
+    await assert.rejects(
+      authorizeExecutionIntent(show("show-removed", 1205), "session-many-sources", authorization),
+      /not a current Implementation Source/u,
+    );
+  });
+});

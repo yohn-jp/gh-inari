@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, sign as edSign, verify as edVerify } from "node:crypto";
 import { test } from "node:test";
 import {
+  MAX_CAPABILITIES,
   SESSION_CERTIFICATE_ALG,
   SESSION_CERTIFICATE_CONTRACT_VERSION,
   SESSION_CERTIFICATE_TYP,
@@ -373,4 +374,57 @@ test("#1213 a signed Implementation Source set bounds change.* claims to its sam
     ).valid,
     false,
   );
+});
+
+test("#1213 Source-rooted change.* claims are bounded by the signed Source set, not the Session-wide limit", () => {
+  const repository = { repositoryHost: "github.com", repositoryId: "123456789" };
+  const sameRepository = [1201, 1202, 1203, 1204, 1205];
+  const implementationBinding = {
+    version: 1,
+    kind: "implementation-session-binding",
+    authorization: {
+      version: 1,
+      kind: "implementation-authorization",
+      contractVersion: 1,
+      implementation: { ...repository, number: 1213 },
+      governedBodyDigest: "a".repeat(64),
+    },
+    repository,
+    base: { branch: "main", revision: "b".repeat(40), freshness: "b".repeat(40) },
+    task: { kind: "issue", number: 1213 },
+    sources: [
+      ...sameRepository.map((number) => ({ ...repository, number })),
+      { repositoryHost: "github.com", repositoryId: "987654321", number: 7 },
+    ],
+  };
+  const lifecycle = ["change.implement", "change.ready", "change.abort", "change.merge"] as const;
+  const sourceClaims = sameRepository.flatMap((issue) => lifecycle.map((kind) => ({ kind, issue })));
+  const certificate = (capabilities: readonly Record<string, unknown>[], binding: unknown = implementationBinding) =>
+    validateSessionCertificatePayload(
+      payload({ task: { kind: "issue", number: 1213 }, implementationBinding: binding, capabilities }),
+    );
+  const invalidCapabilities = (result: ReturnType<typeof validateSessionCertificatePayload>) =>
+    !result.valid && result.diagnostics.some((d) => d.code === "SESSION_CERTIFICATE_INVALID_CAPABILITIES");
+
+  const full = [
+    ...sourceClaims,
+    { kind: "change.implement", issue: 1213 },
+    { kind: "branch.advance", branch: "fix/1213-source-binding" },
+  ];
+  assert.equal(full.length, 22);
+  assert.equal(certificate(full).valid, true);
+  // Without the signed Source set the Session-wide limit is unchanged.
+  const { sources: _sources, ...unsourced } = implementationBinding;
+  assert.ok(invalidCapabilities(certificate(full, unsourced)));
+  // Claims outside the Source set stay bounded by the Session-wide limit.
+  const branches = Array.from({ length: MAX_CAPABILITIES + 1 }, (_, index) => ({
+    kind: "branch.advance",
+    branch: `fix/1213-branch-${index}`,
+  }));
+  assert.ok(invalidCapabilities(certificate([...sourceClaims, ...branches])));
+  assert.equal(certificate([...sourceClaims, ...branches.slice(1)]).valid, true);
+  // Duplicate Source claims are rejected, and unrelated or cross-repository roots stay outside the set.
+  assert.ok(invalidCapabilities(certificate([...sourceClaims, { kind: "change.ready", issue: 1201 }])));
+  for (const issue of [4242, 7])
+    assert.equal(certificate([...sourceClaims, { kind: "change.implement", issue }]).valid, false);
 });
