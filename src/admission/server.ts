@@ -32,6 +32,7 @@ import {
   admitSession,
   authorizeExecutionIntent,
   closeSession,
+  observeRepositoryReadiness,
   type AdmissionAuthorizationOptions,
 } from "./authorization.js";
 import { LOCAL_ADMISSION_DEFAULT_PORT, LocalAdmissionError, readLocalAdmissionConfiguration } from "./setup.js";
@@ -51,6 +52,7 @@ export const LOCAL_ADMISSION_HEALTH_PATH = "/health" as const;
 export const LOCAL_ADMISSION_SESSIONS_PATH = "/v1/sessions" as const;
 export const LOCAL_ADMISSION_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_ADMISSION_EXECUTIONS_PATH = "/v1/executions" as const;
+export const LOCAL_ADMISSION_READINESS_PATH = "/v1/readiness" as const;
 export const LOCAL_ADMISSION_SESSION_ID_HEADER = "x-inari-session-id" as const;
 export const MAX_LOCAL_ADMISSION_BODY_BYTES = 1_048_576;
 
@@ -252,6 +254,51 @@ function createLocalAdmissionHttpHandler(
           "repository-resolution",
           "RUNTIME_OWNER_UNAVAILABLE",
         );
+      }
+    }
+    if (url.pathname === LOCAL_ADMISSION_READINESS_PATH) {
+      if (request.method !== "POST")
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      const parsed = await bodyJson(request);
+      if (parsed.response !== undefined) return parsed.response;
+      const value = parsed.value;
+      const repository = isRecord(value) && isRecord(value.repository) ? value.repository : undefined;
+      const authority = isRecord(value) && isRecord(value.authority) ? value.authority : undefined;
+      if (
+        !isRecord(value) ||
+        !exactKeys(value, ["version", "repository", "authority"]) ||
+        value.version !== LOCAL_ADMISSION_PROTOCOL_VERSION ||
+        repository === undefined ||
+        !exactKeys(repository, ["id", "name"]) ||
+        typeof repository.id !== "string" ||
+        !/^[1-9][0-9]{0,19}$/u.test(repository.id) ||
+        typeof repository.name !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(repository.name) ||
+        authority === undefined ||
+        !exactKeys(authority, ["id", "publicKeyFingerprint"]) ||
+        typeof authority.id !== "string" ||
+        typeof authority.publicKeyFingerprint !== "string" ||
+        !/^sha256:[0-9a-f]{64}$/u.test(authority.publicKeyFingerprint)
+      )
+        return json(400, {
+          ok: false,
+          error: { code: "INVALID_READINESS_REQUEST", message: "Readiness request is invalid." },
+        });
+      try {
+        await observeRepositoryReadiness(
+          { id: repository.id, name: repository.name },
+          { id: authority.id, publicKeyFingerprint: authority.publicKeyFingerprint },
+          authorizationOptions(options),
+        );
+        return json(200, { ok: true, component: "admission", admissionId: options.admissionId, readiness: "ready" });
+      } catch (error: unknown) {
+        return json(200, {
+          ok: true,
+          component: "admission",
+          admissionId: options.admissionId,
+          readiness: "not-ready",
+          failure: runtimeFailureFromError(error, "trust-evidence", "RUNTIME_INTERNAL_FAILURE"),
+        });
       }
     }
     if (url.pathname === LOCAL_ADMISSION_SESSIONS_PATH) {

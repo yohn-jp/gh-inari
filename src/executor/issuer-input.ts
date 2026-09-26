@@ -2,6 +2,7 @@
 // App ID and the private-key file reference, and never opens the key file or
 // parses key material. Setup and status projections depend on this module;
 // the key itself is read only in `./execution.ts`.
+import { readExistingLocalJson } from "../local-control/config.js";
 import { LocalExecutorError } from "./errors.js";
 
 export type LocalExecutorIssuerKeyStatus = "configured" | "missing";
@@ -67,4 +68,42 @@ export function issuerKeyReference(environment: NodeJS.ProcessEnv): NodeJS.Proce
 export function requireIssuerReference(environment: NodeJS.ProcessEnv): void {
   requireLocalExecutorAppId(environment);
   if (localExecutorIssuerKeyStatus(environment) === "missing") throw issuerKeyMissing();
+}
+
+/** Public, secret-free identity of the managed Issuer custody index (#1178). */
+export interface ManagedIssuerCustodyReference {
+  readonly configId: string;
+  readonly appId: string;
+}
+
+function managedIndexReference(value: unknown): ManagedIssuerCustodyReference {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Managed Issuer custody index is invalid.");
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.configId !== "string" ||
+    !/^[A-Za-z0-9_-]{16,64}$/u.test(record.configId) ||
+    typeof record.appId !== "string" ||
+    !/^[1-9][0-9]{0,19}$/u.test(record.appId)
+  )
+    throw new Error("Managed Issuer custody index is invalid.");
+  return { configId: record.configId, appId: record.appId };
+}
+
+/**
+ * Whether managed Executor Issuer custody exists, read from its public index
+ * only. The key file is never opened here; the running Executor alone reads
+ * and verifies the key it references.
+ */
+export function managedIssuerCustodyReference(
+  environment: NodeJS.ProcessEnv = process.env,
+): ManagedIssuerCustodyReference | undefined {
+  try {
+    return readExistingLocalJson("executor", "issuer/issuer-key.json", managedIndexReference, environment);
+  } catch {
+    throw new LocalExecutorError(
+      "EXECUTOR_ISSUER_CUSTODY_UNAVAILABLE",
+      "The managed Executor Issuer custody index could not be read safely.",
+    );
+  }
 }

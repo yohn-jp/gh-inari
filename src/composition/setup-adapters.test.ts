@@ -23,6 +23,7 @@ import {
 } from "../runtime-contracts/index.js";
 import { createExecutorSetupEnrollmentPort, createLocalSetupPorts, createSetupActionPort } from "./setup-adapters.js";
 import { SetupConfigStore, SetupConfigStoreError, setupStateFileKey } from "./setup-config-store.js";
+import { ExecutorCredentialStore } from "../executor/credential-store.js";
 import {
   SetupProviderError,
   readSetupConfigurationEvidence,
@@ -487,6 +488,43 @@ test("bind-repository uses App-user bootstrap scope and Executor-owned key verif
     const after = await app.state(repository);
     assert.equal(after.dimensions.find((item) => item.dimension === "provider-binding")?.status, "bound");
     assert.equal(new SetupConfigStore({ environment: w.environment }).read(repository)?.app?.installationId, "77");
+    // #1182: the binding setup records is the Executor's own owner evidence, the input execution uses.
+    assert.deepEqual(executorIssuerCustody(w.environment)?.bindings, [
+      {
+        repositoryHost: repository.repositoryHost,
+        repositoryId: repository.repositoryId,
+        nameWithOwner: repository.nameWithOwner,
+        installationId: "77",
+      },
+    ]);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test("#1182 a recorded installation without the Executor's own verified binding is never reported bound", async () => {
+  const w = world();
+  try {
+    await configure(w);
+    const app = createSetupApplication(ports(w));
+    const state = await app.state(repository);
+    const record = new SetupConfigStore({ environment: w.environment }).read(repository)!;
+    // The shared record claims an installation and the custody is provider-verified,
+    // but the Executor never verified this repository installation.
+    new SetupConfigStore({ environment: w.environment }).update(repository, record.revision, {
+      app: { ...record.app!, installationId: "77" },
+    });
+    const custody = new ExecutorCredentialStore(w.environment);
+    custody.markProviderVerified(custody.current()!.generation);
+    const claimed = await app.state(repository);
+    assert.notEqual(claimed.generation.configuration, state.generation.configuration);
+    const binding = claimed.dimensions.find((item) => item.dimension === "provider-binding");
+    assert.equal(binding?.status, "unbound");
+    assert.equal(binding?.diagnostics[0]?.code, "SETUP_ISSUER_KEY_UNVERIFIED");
+    assert.equal(
+      claimed.actions.some((item) => item.kind === "executor.bind-repository"),
+      true,
+    );
   } finally {
     w.cleanup();
   }

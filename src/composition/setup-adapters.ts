@@ -604,7 +604,14 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
     } catch (error: unknown) {
       return outcome(request, "failed", [providerDiagnostic(error)]);
     }
-    const comparison = compareCanonicalTrust(records, authority);
+    const comparison = compareCanonicalTrust(records, authority, options.now?.() ?? new Date());
+    if (comparison === "inactive")
+      return outcome(request, "failed", [
+        diagnostic(
+          "SETUP_TRUST_INACTIVE",
+          "The protected-ref Runtime Authority matches but is inactive or outside its validity window.",
+        ),
+      ]);
     if (comparison === "trusted")
       return outcome(request, "succeeded", [
         diagnostic("SETUP_TRUST_CONFIRMED", "Protected-ref trust matches the adopted Runtime Authority."),

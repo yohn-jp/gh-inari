@@ -5,7 +5,7 @@ import path from "node:path";
 import { once } from "node:events";
 import { test } from "node:test";
 import { createDelegatorRecord } from "../agent-authority/delegator-operations.js";
-import { generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
+import { delegatorPublicKeyFingerprint, generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
 import { DelegatorTrustError } from "../agent-authority/delegator-trust.js";
 import { LocalExecutorError } from "../executor/errors.js";
 import { createLocalAdmissionClient, LocalAdmissionClientError } from "../cli/runtime/admission-client.js";
@@ -115,7 +115,8 @@ async function harness(mode: { current: Mode }, clock = { now: NOW }) {
     for (const server of [admission, executor])
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   };
-  return { client, calls, binding, close, trustEvidence, executor };
+  const endpoint = `http://127.0.0.1:${admissionAddress.port}`;
+  return { client, calls, binding, close, trustEvidence, executor, endpoint, authority };
 }
 
 async function failure(
@@ -290,6 +291,43 @@ test("an unreachable Executor is reported as owner unavailability, not an author
     assert.equal(result.details.reason, "EXECUTOR_UNAVAILABLE");
     runtime.executor.listen(0);
     await once(runtime.executor, "listening");
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("#1182 Admission readiness evaluates the repository's current binding and trust, not process health", async () => {
+  const mode: { current: Mode } = { current: {} };
+  const runtime = await harness(mode);
+  try {
+    const readiness = async (authority: { id: string; publicKeyFingerprint: string }) => {
+      const response = await fetch(`${runtime.endpoint}/v1/readiness`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: 1, repository: REPOSITORY, authority }),
+      });
+      assert.equal(response.status, 200);
+      return (await response.json()) as { readiness: string; failure?: { reason: string; stage: string } };
+    };
+    const pinned = {
+      id: runtime.authority.id,
+      publicKeyFingerprint: delegatorPublicKeyFingerprint(runtime.authority.key),
+    };
+    assert.equal((await readiness(pinned)).readiness, "ready");
+    mode.current = { evidence: () => new DelegatorTrustError("RUNTIME_AUTHORITY_NOT_FOUND", SECRET) };
+    const untrusted = await readiness(pinned);
+    assert.equal(untrusted.readiness, "not-ready");
+    assert.equal(untrusted.failure?.reason, "RUNTIME_AUTHORITY_NOT_FOUND");
+    assert.equal(JSON.stringify(untrusted).includes("ghs_"), false);
+    mode.current = { evidence: () => new LocalExecutorError("EXECUTOR_REPOSITORY_BINDING_MISSING", SECRET) };
+    assert.equal((await readiness(pinned)).failure?.reason, "EXECUTOR_REPOSITORY_BINDING_MISSING");
+    mode.current = {};
+    const stale = await readiness({ ...pinned, publicKeyFingerprint: `sha256:${"0".repeat(64)}` });
+    assert.equal(stale.readiness, "not-ready");
+    assert.equal(stale.failure?.reason, "ADMISSION_RUNTIME_AUTHORITY_MISMATCH");
+    const health = await fetch(`${runtime.endpoint}/health`);
+    assert.equal(((await health.json()) as { readiness: string }).readiness, "ready");
+    assert.equal(runtime.calls.execute, 0);
   } finally {
     await runtime.close();
   }

@@ -44,6 +44,10 @@ export const RUNTIME_FAILURE_REASONS = Object.freeze({
   EXECUTOR_PROVIDER_CONFIGURATION_MISSING: reason("configuration", "The Executor Issuer App ID is not configured."),
   EXECUTOR_ISSUER_KEY_MISSING: reason("configuration", "The Executor Issuer App private key is not configured."),
   EXECUTOR_ISSUER_KEY_INVALID: reason("configuration", "The Executor Issuer App private key is not usable."),
+  EXECUTOR_ISSUER_CUSTODY_UNVERIFIED: reason(
+    "configuration",
+    "The managed Executor Issuer key is not verified for an App installation yet.",
+  ),
   EXECUTOR_ISSUER_CUSTODY_UNAVAILABLE: reason("configuration", "The Executor Issuer custody could not be read."),
   EXECUTOR_ISSUER_BINDING_CONFLICT: reason(
     "configuration",

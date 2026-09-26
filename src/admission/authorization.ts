@@ -124,7 +124,7 @@ function pinnedRuntimeAuthority(value: unknown, stage: RuntimeFailureStage): Del
 
 function requirePinnedAuthorityMatch(
   current: Delegator,
-  binding: LocalSessionBinding,
+  binding: Pick<LocalSessionBinding, "authority">,
   pinnedAuthority: Delegator,
   stage: RuntimeFailureStage,
 ): void {
@@ -286,15 +286,19 @@ function validateEvidence(
   };
 }
 
-function validateTrustEvidence(value: unknown, binding: LocalSessionBinding, pinnedAuthority: Delegator): Delegator {
+function validateTrustEvidence(
+  value: unknown,
+  subject: Pick<LocalSessionBinding, "repository" | "authority">,
+  pinnedAuthority: Delegator,
+): Delegator {
   const stage = "trust-evidence";
   if (!isRecord(value) || !exactKeys(value, ["repository", "authority", "runtimeAuthority"]))
     deny(stage, "ADMISSION_EVIDENCE_MALFORMED", "Executor Runtime Authority evidence is malformed.");
-  if (!sameRepository(value.repository, binding.repository))
+  if (!sameRepository(value.repository, subject.repository))
     deny(stage, "ADMISSION_REPOSITORY_MISMATCH", "Executor repository evidence does not match Session.");
   requireAuthorityRef(value.authority, stage);
   const current = pinnedRuntimeAuthority(value.runtimeAuthority, stage);
-  requirePinnedAuthorityMatch(current, binding, pinnedAuthority, stage);
+  requirePinnedAuthorityMatch(current, subject, pinnedAuthority, stage);
   return current;
 }
 
@@ -339,6 +343,39 @@ async function currentTrust(binding: LocalSessionBinding, options: AdmissionAuth
     authorityId: binding.authority.id,
   });
   return validateTrustEvidence(evidence, binding, options.runtimeAuthority);
+}
+
+/**
+ * Repository-bound Session readiness (#1182): the same current Executor
+ * repository binding and protected-ref trust evidence Session registration
+ * requires, for the Authority the caller expects Admission to have pinned. It
+ * admits nothing and stores nothing; every failure throws a bounded denial.
+ */
+export async function observeRepositoryReadiness(
+  repository: SessionCertificateRepository,
+  expectedAuthority: { readonly id: string; readonly publicKeyFingerprint: string },
+  options: AdmissionAuthorizationOptions,
+): Promise<void> {
+  const pinned = options.runtimeAuthority;
+  if (
+    pinned.id !== expectedAuthority.id ||
+    delegatorPublicKeyFingerprint(pinned.key) !== expectedAuthority.publicKeyFingerprint
+  )
+    deny(
+      "trust-evidence",
+      "ADMISSION_RUNTIME_AUTHORITY_MISMATCH",
+      "The Authority Admission pins differs from the configured setup Authority.",
+    );
+  const subject = {
+    repository,
+    authority: { id: pinned.id, publicKeyFingerprint: expectedAuthority.publicKeyFingerprint },
+  } as Pick<LocalSessionBinding, "repository" | "authority">;
+  const evidence = await options.readEvidence({
+    version: 1,
+    repository: evidenceRepository(repository),
+    authorityId: pinned.id,
+  });
+  validateTrustEvidence(evidence, subject, pinned);
 }
 
 /** Admits a validated Session binding against current Executor trust evidence. */

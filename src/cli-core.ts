@@ -1592,18 +1592,31 @@ async function runExecutorCommand(
   const environment = dependencies.environment ?? process.env;
   if (command === "setup") {
     const result = await setupExecutorRole(environment);
+    // #1178: an explicit shell reference is legacy input; its explicit, non-destructive
+    // convergence into managed custody is the existing Executor enrollment action.
+    const enrollment =
+      result.issuerCustody === "external-reference"
+        ? "inari setup next --yes --input app-id=<issuer-app-id> --enrollment-file issuer-key=<issuer-key-path>"
+        : undefined;
     const output = {
       ok: true,
       operation: "executor.setup",
       configPath: result.configPath,
       executorId: result.config.id,
       provider: result.config.provider,
+      ...(result.issuerCustody === undefined ? {} : { issuerCustody: result.issuerCustody }),
+      ...(enrollment === undefined ? {} : { enrollment }),
     };
     if (json) console.log(JSON.stringify(output));
     else {
       console.log("Local Executor identity and configuration are ready.");
       console.log(`Executor id: ${result.config.id}`);
       console.log(`Configuration: ${result.configPath}`);
+      if (result.issuerCustody === "managed") console.log("Issuer key: managed Executor custody.");
+      if (enrollment !== undefined) {
+        console.log("Issuer key: explicit shell reference; every shell that starts the Runtime must export it.");
+        console.log(`Enroll it into managed Executor custody once: ${enrollment}`);
+      }
     }
     return 0;
   }

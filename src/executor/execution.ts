@@ -42,6 +42,7 @@ import { publishPullRequest } from "../pr-publication.js";
 import { LocalRuntimeProfileStore } from "../local-runtime-profile.js";
 import { LocalRuntimeConfigError, readAppPrivateKey } from "../relay/local-runtime-config-credentials.js";
 import type { LocalExecutorEvidenceRequest } from "../local-control/executor-http.js";
+import { ExecutorCredentialStore, type StoredIssuerKey } from "./credential-store.js";
 import { LocalExecutorError } from "./errors.js";
 import { issuerKeyMissing, issuerKeyReference, requireLocalExecutorAppId } from "./issuer-input.js";
 
@@ -105,14 +106,24 @@ interface LocalExecutorIssuerBinding {
 function issuerBindingMismatch(): LocalExecutorError {
   return new LocalExecutorError(
     "EXECUTOR_ISSUER_BINDING_MISMATCH",
-    "The Inari Issuer App, installation, or repository does not match the Local Runtime profile for this repository.",
+    "The Inari Issuer App, installation, or repository does not match the setup binding for this repository.",
   );
 }
 
+function sameLocator(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
 /**
- * Bind the Issuer App installation credential to the canonical Local Runtime
- * profile written by repository setup. The profile supplies the repository id
- * and installation id; the App ID and private key are Executor-owned inputs.
+ * Bind the Issuer App installation credential for one repository (#1182).
+ *
+ * The Executor's own custody records the installation each verified key
+ * generation acts for; `inari setup next` (executor.bind-repository) writes it
+ * through the Executor owner. A legacy Local Runtime profile written by
+ * `inari setup --endpoint` remains a binding source. When both exist they must
+ * name the same App, installation and repository; a contradiction or a
+ * half-migrated state is a bounded failure, never a silent preference. The App
+ * ID and private key are Executor-owned inputs.
  */
 async function localExecutorIssuerBinding(
   repository: { readonly repositoryHost: string; readonly nameWithOwner: string; readonly repositoryId?: string },
@@ -120,8 +131,10 @@ async function localExecutorIssuerBinding(
 ): Promise<LocalExecutorIssuerBinding> {
   const configuredAppId = requireLocalExecutorAppId(environment);
   const privateKeyPem = issuerPrivateKey(environment);
+  let custody: StoredIssuerKey | undefined;
   let profile: Awaited<ReturnType<LocalRuntimeProfileStore["findForRepository"]>>;
   try {
+    custody = new ExecutorCredentialStore(environment).current();
     profile = await new LocalRuntimeProfileStore({ environment }).findForRepository({
       repositoryHost: repository.repositoryHost,
       repositoryNameWithOwner: repository.nameWithOwner,
@@ -129,27 +142,62 @@ async function localExecutorIssuerBinding(
   } catch {
     throw new LocalExecutorError(
       "EXECUTOR_REPOSITORY_BINDING_UNAVAILABLE",
-      "The Local Runtime profile for this repository could not be read.",
+      "The repository setup binding could not be read.",
     );
   }
-  if (profile === undefined) {
+  const bound = custody?.bindings?.find(
+    (item) =>
+      sameLocator(item.repositoryHost, repository.repositoryHost) &&
+      sameLocator(item.nameWithOwner, repository.nameWithOwner),
+  );
+  if (bound !== undefined && custody !== undefined) {
+    if (
+      profile !== undefined &&
+      (profile.app.appId !== custody.appId ||
+        profile.app.installationId !== bound.installationId ||
+        profile.repository.repositoryId !== bound.repositoryId)
+    )
+      throw new LocalExecutorError(
+        "EXECUTOR_REPOSITORY_BINDING_INCONSISTENT",
+        "The Executor repository binding and the Local Runtime profile name different App installations.",
+      );
+  }
+  const source =
+    bound !== undefined && custody !== undefined
+      ? {
+          appId: custody.appId,
+          installationId: bound.installationId,
+          repository: {
+            repositoryHost: bound.repositoryHost,
+            repositoryId: bound.repositoryId,
+            nameWithOwner: bound.nameWithOwner,
+          },
+        }
+      : profile === undefined
+        ? undefined
+        : {
+            appId: profile.app.appId,
+            installationId: profile.app.installationId,
+            repository: {
+              repositoryHost: profile.repository.repositoryHost,
+              repositoryId: profile.repository.repositoryId,
+              nameWithOwner: profile.repository.repositoryNameWithOwner,
+            },
+          };
+  if (source === undefined) {
     throw new LocalExecutorError(
       "EXECUTOR_REPOSITORY_BINDING_MISSING",
-      "No Local Runtime profile binds this repository to an Inari Issuer App installation. Run `inari setup --endpoint <endpoint-url>` in the repository first.",
+      "No setup binding connects this repository to an Inari Issuer App installation. Run `inari setup next` in the repository to bind it.",
     );
   }
   if (
-    profile.app.appId !== configuredAppId ||
-    (repository.repositoryId !== undefined && profile.repository.repositoryId !== repository.repositoryId)
+    source.appId !== configuredAppId ||
+    (repository.repositoryId !== undefined && source.repository.repositoryId !== repository.repositoryId)
   ) {
     throw issuerBindingMismatch();
   }
-  const identity: RepositoryIdentity = Object.freeze({
-    repositoryHost: profile.repository.repositoryHost,
-    repositoryId: profile.repository.repositoryId,
-    nameWithOwner: profile.repository.repositoryNameWithOwner,
-  });
-  const installationId = profile.app.installationId;
+  const identity: RepositoryIdentity = Object.freeze({ ...source.repository });
+  const installationId = source.installationId;
   return Object.freeze({
     repository: identity,
     appId: configuredAppId,

@@ -23,6 +23,8 @@ import { assertTrustedExecution, type RepositoryIdentity } from "../github/effec
 import type { PrPublicationRequest } from "../pr-publication.js";
 import { parsePullRequestTemplate } from "../pull-request-template.js";
 import { saveLocalRuntimeProfile } from "../local-runtime-profile.js";
+import { ExecutorCredentialStore } from "../executor/credential-store.js";
+import { issuerExecutionEnvironment } from "../executor/enrollment/issuer-reference.js";
 import {
   executeLocalAuthorizedExecution,
   LocalExecutorError,
@@ -615,6 +617,34 @@ test("Executor setup provisions stable secret-free identity from Issuer App prer
   }
 });
 
+test("#1178 Executor setup converges on managed custody without App ID or key exports in a fresh shell", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const legacy = { ...environment };
+    await configureIssuer(root, legacy);
+    legacy.INARI_GITHUB_APP_ID = APP.appId;
+    const external = await setupLocalExecutor(legacy);
+    assert.equal(external.issuerCustody, "external-reference");
+    // Explicit, non-destructive enrollment into the existing Executor custody owner.
+    const store = new ExecutorCredentialStore(environment);
+    const { record } = store.save(external.config.id, APP.appId, Buffer.from(ISSUER_PRIVATE_KEY_PEM));
+    store.markProviderVerified(record.generation);
+    const fresh = { INARI_CONFIG_HOME: environment.INARI_CONFIG_HOME };
+    const managed = await setupLocalExecutor(fresh);
+    assert.equal(managed.issuerCustody, "managed");
+    assert.equal(managed.config.id, external.config.id);
+    const input = issuerExecutionEnvironment(managed.config.id, fresh);
+    assert.equal(input.INARI_GITHUB_APP_ID, APP.appId);
+    assert.equal(input.INARI_GITHUB_APP_PRIVATE_KEY_FILE, store.keyPath(record));
+    await assert.rejects(
+      setupLocalExecutor({ ...fresh, INARI_GITHUB_APP_ID: "999" }),
+      (error: unknown) => (error as { code?: unknown }).code === "EXECUTOR_ISSUER_BINDING_CONFLICT",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Executor setup accepts an explicit all-interface bind policy", async () => {
   const { root, environment } = await temporaryEnvironment();
   environment.INARI_LOCAL_RUNTIME_BIND = "0.0.0.0";
@@ -956,6 +986,62 @@ test("Local Executor production composition executes branch.advance through cano
       afterOid: NEW_HEAD,
       force: false,
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("#1182 the Executor executes from its own verified repository binding without a legacy Runtime profile", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  const provider = providerFetch({ change: "absent" });
+  try {
+    const store = new ExecutorCredentialStore(environment);
+    const { record } = store.save("exec_1234567890123456", APP.appId, Buffer.from(ISSUER_PRIVATE_KEY_PEM));
+    store.recordBinding(record.generation, {
+      repositoryHost: REPOSITORY.repositoryHost,
+      repositoryId: REPOSITORY.repositoryId,
+      nameWithOwner: REPOSITORY.nameWithOwner,
+      installationId: APP.installationId,
+    });
+    // The fresh Executor input comes only from managed custody: no App ID or key export.
+    const executionEnvironment = issuerExecutionEnvironment("exec_1234567890123456", environment);
+    const result = await withProviderFetch(provider.fetch, () =>
+      executeLocalAuthorizedExecution(changeExecution("show"), executionEnvironment),
+    );
+    assert.equal(result.status, "succeeded", JSON.stringify(result));
+    assert.ok(
+      provider.calls.some((call) => call.url.pathname === `/app/installations/${APP.installationId}/access_tokens`),
+    );
+
+    // A legacy profile naming another installation is a half-migrated state, never a silent preference.
+    await saveLocalRuntimeProfile(
+      {
+        version: 1,
+        state: "ready",
+        endpoint: "https://endpoint.example.test",
+        relayUrl: "wss://endpoint.example.test/relay",
+        repository: {
+          repositoryHost: REPOSITORY.repositoryHost,
+          repositoryId: REPOSITORY.repositoryId,
+          repositoryNameWithOwner: REPOSITORY.nameWithOwner,
+        },
+        app: { appId: APP.appId, installationId: "999" },
+        authority: {
+          authorityId: "executor-production-test",
+          publicKeyFingerprint: `sha256:${"0".repeat(64)}`,
+          privateKeyPath: path.join(root, "authority.pem"),
+        },
+      },
+      { environment },
+    );
+    const inconsistent = providerFetch();
+    await assert.rejects(
+      withProviderFetch(inconsistent.fetch, () =>
+        executeLocalAuthorizedExecution(branchExecution(), executionEnvironment),
+      ),
+      (error: unknown) => (error as { code?: unknown }).code === "EXECUTOR_REPOSITORY_BINDING_INCONSISTENT",
+    );
+    assert.deepEqual(inconsistent.calls, []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
