@@ -201,6 +201,10 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .layout > * {
+    min-width: 0;
+  }
+
   .context-list {
     flex-direction: column;
   }

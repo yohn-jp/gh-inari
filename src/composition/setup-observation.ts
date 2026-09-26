@@ -23,7 +23,7 @@ import { lstatSync } from "node:fs";
 import path from "node:path";
 import { delegatorPublicKeyFingerprint } from "../agent-authority/delegator-key.js";
 import { canonicalDelegatorJson, validateDelegator, type Delegator } from "../agent-authority/delegator.js";
-import { loadDelegatorTrust } from "../agent-authority/delegator-trust.js";
+import { DelegatorTrustError, loadDelegatorTrust } from "../agent-authority/delegator-trust.js";
 import { executorIssuerCustody, type ExecutorIssuerCustodyStatus } from "../executor/enrollment/owner.js";
 import { GitHubAppDeviceFlowClient, type GitHubAppUserCredential } from "../github/app-user-credential.js";
 import {
@@ -224,17 +224,23 @@ export function createAppUserSetupProvider(options: AppUserSetupProviderOptions 
     async readCanonicalAuthorities(context: SetupProviderContext) {
       try {
         return await broker(context).withRepositoryReadCapability({}, async (capability) => {
-          const snapshot = await loadDelegatorTrust(
-            createReadinessReader(
-              capability,
-              {
-                repositoryHost: context.repository.repositoryHost,
-                repositoryId: context.repository.repositoryId,
-                repositoryNameWithOwner: context.repository.nameWithOwner,
-              },
-              repositoryContext(context.repository),
-            ),
-          );
+          let snapshot;
+          try {
+            snapshot = await loadDelegatorTrust(
+              createReadinessReader(
+                capability,
+                {
+                  repositoryHost: context.repository.repositoryHost,
+                  repositoryId: context.repository.repositoryId,
+                  repositoryNameWithOwner: context.repository.nameWithOwner,
+                },
+                repositoryContext(context.repository),
+              ),
+            );
+          } catch (error: unknown) {
+            if (error instanceof DelegatorTrustError && error.code === "RUNTIME_AUTHORITY_NOT_FOUND") return [];
+            throw error;
+          }
           return snapshot.authorities.map((item) => item.authority);
         });
       } catch (error: unknown) {
