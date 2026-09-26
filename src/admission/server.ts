@@ -22,6 +22,13 @@ import {
 } from "../local-control/executor-http.js";
 import { validateExecutionIntent } from "../local-control/execution-intent.js";
 import {
+  beginLocalRuntimeRequest,
+  localRuntimeFailureForResponse,
+  rememberLocalRuntimeFailure,
+  runtimeCorrelationForRequestId,
+  writeLocalRuntimeLog,
+} from "../local-control/runtime-log.js";
+import {
   clearLocalRuntimeEndpoint,
   publishLocalRuntimeEndpoint,
   requireLocalRuntimeEndpoint,
@@ -122,7 +129,10 @@ function json(status: number, body: unknown): Response {
  * message plus the catalog diagnostic naming the owner stage and reason.
  */
 function denied(code: string, message: string, failure: RuntimeFailure): Response {
-  return json(runtimeFailureHttpStatus(failure), { ok: false, error: { code, message, failure } });
+  return rememberLocalRuntimeFailure(
+    json(runtimeFailureHttpStatus(failure), { ok: false, error: { code, message, failure } }),
+    failure,
+  );
 }
 
 function deniedFrom(
@@ -371,13 +381,17 @@ function createLocalAdmissionHttpHandler(
         );
         return json(200, { ok: true, component: "admission", admissionId: options.admissionId, readiness: "ready" });
       } catch (error: unknown) {
-        return json(200, {
-          ok: true,
-          component: "admission",
-          admissionId: options.admissionId,
-          readiness: "not-ready",
-          failure: runtimeFailureFromError(error, "trust-evidence", "RUNTIME_INTERNAL_FAILURE"),
-        });
+        const failure = runtimeFailureFromError(error, "trust-evidence", "RUNTIME_INTERNAL_FAILURE");
+        return rememberLocalRuntimeFailure(
+          json(200, {
+            ok: true,
+            component: "admission",
+            admissionId: options.admissionId,
+            readiness: "not-ready",
+            failure,
+          }),
+          failure,
+        );
       }
     }
     if (url.pathname === LOCAL_ADMISSION_SESSIONS_PATH) {
@@ -473,6 +487,12 @@ function createLocalAdmissionHttpHandler(
         );
       }
       try {
+        writeLocalRuntimeLog({
+          component: "admission",
+          event: "execution.handoff",
+          operation: execution.operation,
+          correlationId: runtimeCorrelationForRequestId(execution.provenance.request.requestId),
+        });
         const result = await options.executor.execute(execution);
         return json(200, { ok: true, result });
       } catch (error: unknown) {
@@ -538,6 +558,8 @@ export function createLocalAdmissionHttpServer(
   });
   let server: Server;
   server = createServer((incoming, outgoing) => {
+    const requestLog = beginLocalRuntimeRequest("admission", incoming.method ?? "GET", incoming.url ?? "/");
+    let response: Response | undefined;
     void (async () => {
       try {
         const pathname = new URL(incoming.url ?? "/", "http://127.0.0.1").pathname;
@@ -567,7 +589,7 @@ export function createLocalAdmissionHttpServer(
           } catch {
             readiness = "not-ready";
           }
-          const response = createLocalRuntimeStatusPage({
+          response = createLocalRuntimeStatusPage({
             component: "admission",
             id: config.id,
             readiness,
@@ -579,7 +601,7 @@ export function createLocalAdmissionHttpServer(
           outgoing.end(Buffer.from(await response.arrayBuffer()));
           return;
         }
-        const response = await handler(requestFromIncoming(incoming));
+        response = await handler(requestFromIncoming(incoming));
         outgoing.statusCode = response.status;
         response.headers.forEach((value, key) => outgoing.setHeader(key, value));
         outgoing.end(Buffer.from(await response.arrayBuffer()));
@@ -588,6 +610,11 @@ export function createLocalAdmissionHttpServer(
         outgoing.setHeader("content-type", "application/json; charset=utf-8");
         outgoing.end(
           JSON.stringify({ ok: false, error: { code: "MALFORMED_REQUEST", message: "Request could not be handled." } }),
+        );
+      } finally {
+        requestLog.complete(
+          outgoing.statusCode,
+          response === undefined ? undefined : localRuntimeFailureForResponse(response),
         );
       }
     })();
