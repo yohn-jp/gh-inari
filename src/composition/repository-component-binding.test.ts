@@ -184,7 +184,6 @@ test("#1201 one Authority identity serves both repositories by reference, withou
   }
 });
 
-
 test("#1201 incomplete Authority-ID custody is unreadable, not projected as configured identity", async () => {
   const w = world();
   try {
