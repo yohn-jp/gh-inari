@@ -423,43 +423,132 @@ function receivingMachineLabel(value: string | undefined): string {
   return label.length > 0 ? label : "this machine";
 }
 
-function hostInfo(value: unknown, id: string): boolean {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
+function sameSetupRepository(left: RepositoryIdentity, right: RepositoryIdentity): boolean {
   return (
-    record.ok === true &&
-    record.component === "setup" &&
-    record.id === id &&
-    record.protocol === SETUP_HOST_PROTOCOL_VERSION
+    left.repositoryHost.toLowerCase() === right.repositoryHost.toLowerCase() &&
+    left.repositoryId === right.repositoryId &&
+    left.nameWithOwner.toLowerCase() === right.nameWithOwner.toLowerCase()
   );
 }
 
+/** Host identity evidence: component/id/protocol plus the non-secret repository the host is bound to (#1185). */
+function hostInfo(value: unknown, id: string): RepositoryIdentity | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    record.ok !== true ||
+    record.component !== "setup" ||
+    record.id !== id ||
+    record.protocol !== SETUP_HOST_PROTOCOL_VERSION ||
+    record.repository === null ||
+    typeof record.repository !== "object" ||
+    Array.isArray(record.repository)
+  )
+    return undefined;
+  const repository = record.repository as Record<string, unknown>;
+  if (
+    repository.repositoryHost !== "github.com" ||
+    typeof repository.repositoryId !== "string" ||
+    !/^[1-9][0-9]{0,19}$/u.test(repository.repositoryId) ||
+    typeof repository.nameWithOwner !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(repository.nameWithOwner)
+  )
+    return undefined;
+  return Object.freeze({
+    repositoryHost: repository.repositoryHost,
+    repositoryId: repository.repositoryId,
+    nameWithOwner: repository.nameWithOwner,
+  });
+}
+
 /**
- * The live setup host announced for this local configuration, verified by its
- * own identity endpoint. A stale or foreign announcement is not returned.
+ * Observation of the announced setup host (#1185). `absent`/`stale` mean no
+ * live host answers the announcement; `foreign` means a live process answers
+ * without matching setup host identity evidence; `live` carries the verified
+ * repository the host is bound to.
  */
-export async function findLiveSetupHost(
+export type SetupHostObservation =
+  | { readonly status: "absent" }
+  | { readonly status: "stale" }
+  | { readonly status: "foreign"; readonly endpoint: string }
+  | {
+      readonly status: "live";
+      readonly announcement: LocalRuntimeEndpoint;
+      readonly repository: RepositoryIdentity;
+    };
+
+export async function observeSetupHost(
   environment: NodeJS.ProcessEnv = process.env,
   fetcher: typeof globalThis.fetch = globalThis.fetch.bind(globalThis),
-): Promise<LocalRuntimeEndpoint | undefined> {
+): Promise<SetupHostObservation> {
   let announcement: LocalRuntimeEndpoint | undefined;
   try {
     announcement = readLocalRuntimeEndpoint("setup", environment);
   } catch {
-    return undefined;
+    return { status: "stale" };
   }
-  if (announcement === undefined) return undefined;
+  if (announcement === undefined) return { status: "absent" };
+  let response: Response;
   try {
-    const response = await fetcher(new URL(SETUP_HOST_INFO_PATH, announcement.endpoint), {
+    response = await fetcher(new URL(SETUP_HOST_INFO_PATH, announcement.endpoint), {
       method: "GET",
       redirect: "error",
       signal: AbortSignal.timeout(2_000),
     });
-    if (response.status !== 200) return undefined;
-    return hostInfo(await response.json(), announcement.id) ? announcement : undefined;
   } catch {
-    return undefined;
+    return { status: "stale" };
   }
+  let repository: RepositoryIdentity | undefined;
+  try {
+    repository = response.status === 200 ? hostInfo(await response.json(), announcement.id) : undefined;
+  } catch {
+    repository = undefined;
+  }
+  return repository === undefined
+    ? { status: "foreign", endpoint: announcement.endpoint }
+    : { status: "live", announcement, repository };
+}
+
+/**
+ * The live setup host announced for this local configuration, verified by its
+ * own identity endpoint. A stale or foreign announcement is not returned; with
+ * a repository, a host bound to another repository is not returned either.
+ */
+export async function findLiveSetupHost(
+  environment: NodeJS.ProcessEnv = process.env,
+  fetcher: typeof globalThis.fetch = globalThis.fetch.bind(globalThis),
+  repository?: RepositoryIdentity,
+): Promise<LocalRuntimeEndpoint | undefined> {
+  const observation = await observeSetupHost(environment, fetcher);
+  if (observation.status !== "live") return undefined;
+  if (repository !== undefined && !sameSetupRepository(observation.repository, repository)) return undefined;
+  return observation.announcement;
+}
+
+/**
+ * Reuse decision for `setup console` (#1185): only a live host bound to the
+ * same repository is reused. A live host for another repository, or a live
+ * process that does not prove setup host identity, is a bounded conflict; it is
+ * never stopped, re-bound, or replaced by a new announcement.
+ */
+export async function resolveSetupHostReuse(
+  repository: RepositoryIdentity,
+  environment: NodeJS.ProcessEnv = process.env,
+  fetcher: typeof globalThis.fetch = globalThis.fetch.bind(globalThis),
+): Promise<LocalRuntimeEndpoint | undefined> {
+  const observation = await observeSetupHost(environment, fetcher);
+  if (observation.status === "foreign")
+    throw new SetupHostError(
+      "SETUP_HOST_ANNOUNCEMENT_FOREIGN",
+      `A process at ${observation.endpoint} answers the local setup console announcement without setup host identity evidence. Stop that process before starting another setup console.`,
+    );
+  if (observation.status !== "live") return undefined;
+  if (!sameSetupRepository(observation.repository, repository))
+    throw new SetupHostError(
+      "SETUP_HOST_REPOSITORY_CONFLICT",
+      `The local setup console at ${observation.announcement.endpoint}/ is bound to ${observation.repository.nameWithOwner} (repository id ${observation.repository.repositoryId}), not ${repository.nameWithOwner} (repository id ${repository.repositoryId}). Finish or stop that console (Ctrl+C in its terminal), then rerun setup console for ${repository.nameWithOwner}.`,
+    );
+  return observation.announcement;
 }
 
 export interface SetupHostOptions {
@@ -598,6 +687,11 @@ export async function startSetupHost(options: SetupHostOptions): Promise<SetupHo
         component: "setup",
         id,
         protocol: SETUP_HOST_PROTOCOL_VERSION,
+        repository: {
+          repositoryHost: options.repository.repositoryHost,
+          repositoryId: options.repository.repositoryId,
+          nameWithOwner: options.repository.nameWithOwner,
+        },
       });
     }
     if (target === SETUP_HOST_BOOTSTRAP_PATH) return bootstrap(request, out);

@@ -6,6 +6,12 @@ import {
 import { DELEGATOR_ID_PATTERN } from "../agent-authority/delegator.js";
 import type { SessionCertificateRepository } from "../agent-authority/session-certificate.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
+import {
+  runtimeFailureFromError,
+  runtimeFailureHttpStatus,
+  type RuntimeFailureReason,
+  type RuntimeFailureStage,
+} from "../runtime-contracts/runtime-failure.js";
 
 export const LOCAL_EXECUTOR_PROTOCOL_VERSION = 1 as const;
 export const LOCAL_EXECUTOR_EXECUTIONS_PATH = "/v1/executions" as const;
@@ -37,6 +43,18 @@ function json(status: number, body: unknown): Response {
     status,
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
   });
+}
+
+/** Bounded owner failure envelope: fixed code and message plus the catalog diagnostic. */
+function failed(
+  error: unknown,
+  code: string,
+  message: string,
+  stage: RuntimeFailureStage,
+  fallback: RuntimeFailureReason,
+): Response {
+  const failure = runtimeFailureFromError(error, stage, fallback);
+  return json(runtimeFailureHttpStatus(failure), { ok: false, error: { code, message, failure } });
 }
 
 function jsonContentType(value: string | null): boolean {
@@ -231,11 +249,14 @@ export function createLocalExecutorHttpHandler(
             repositoryNameWithOwner: repository.nameWithOwner,
           },
         });
-      } catch {
-        return json(503, {
-          ok: false,
-          error: { code: "REPOSITORY_UNAVAILABLE", message: "Repository identity could not be resolved." },
-        });
+      } catch (error: unknown) {
+        return failed(
+          error,
+          "REPOSITORY_UNAVAILABLE",
+          "Repository identity could not be resolved.",
+          "repository-resolution",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
       }
     }
 
@@ -289,11 +310,14 @@ export function createLocalExecutorHttpHandler(
           protocol: LOCAL_EXECUTOR_PROTOCOL_VERSION,
           evidence: await options.readEvidence(evidence),
         });
-      } catch {
-        return json(503, {
-          ok: false,
-          error: { code: "EVIDENCE_UNAVAILABLE", message: "Current evidence is unavailable." },
-        });
+      } catch (error: unknown) {
+        return failed(
+          error,
+          "EVIDENCE_UNAVAILABLE",
+          "Current evidence is unavailable.",
+          evidence.issue === undefined ? "trust-evidence" : "implementation-admission",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
       }
     }
 
@@ -346,8 +370,14 @@ export function createLocalExecutorHttpHandler(
         protocol: LOCAL_EXECUTOR_PROTOCOL_VERSION,
         result,
       });
-    } catch {
-      return json(500, { ok: false, error: { code: "EXECUTION_FAILED", message: "Authorized execution failed." } });
+    } catch (error: unknown) {
+      return failed(
+        error,
+        "EXECUTION_FAILED",
+        "Authorized execution failed.",
+        "provider-execution",
+        "EXECUTOR_EXECUTION_FAILED",
+      );
     }
   };
 }

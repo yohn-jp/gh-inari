@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { generateKeyPairSync } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -103,6 +104,71 @@ test(
       );
       assert.deepEqual(after.state.generation, status.state.generation);
       assert.equal(after.state.stage, "clean");
+
+      // #1185: one config home, repository A console live, repository B setup
+      // console must report a bounded conflict without stopping, re-binding or
+      // replacing A's host.
+      const consoleA = spawn(
+        process.execPath,
+        [packed.entry, "setup", "console", "--json", "--repository", repository, "--repository-id", repositoryId],
+        { cwd: root, env: environment, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      try {
+        let consoleOutput = "";
+        const startedA = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error(`setup console A timed out: ${consoleOutput}`)), 20_000);
+          consoleA.stdout.setEncoding("utf8").on("data", (chunk) => {
+            consoleOutput += chunk;
+            const line = consoleOutput.split("\n").find((candidate) => candidate.startsWith("{"));
+            if (line === undefined) return;
+            clearTimeout(timer);
+            resolve(JSON.parse(line));
+          });
+          consoleA.once("exit", (code) => {
+            clearTimeout(timer);
+            reject(new Error(`setup console A exited ${code}: ${consoleOutput}`));
+          });
+        });
+        assert.equal(startedA.reused, false);
+        const announcementFile = path.join(configHome, "runtime", "endpoints", "setup.json");
+        const announcementA = await readFile(announcementFile, "utf8");
+        const reusedA = json(
+          command(
+            packed.entry,
+            ["setup", "console", "--json", "--repository", repository, "--repository-id", repositoryId],
+            { cwd: root, env: environment },
+          ),
+          "same-repository setup console reuse",
+        );
+        assert.equal(reusedA.reused, true);
+        assert.equal(reusedA.endpoint, startedA.endpoint);
+        const conflictB = command(
+          packed.entry,
+          ["setup", "console", "--json", "--repository", "example-other/second-project", "--repository-id", "55443322"],
+          { cwd: root, env: environment },
+        );
+        assert.equal(conflictB.status, 2, conflictB.stdout);
+        assert.equal(JSON.parse(conflictB.stdout).error.code, "SETUP_HOST_REPOSITORY_CONFLICT");
+        assert.equal(await readFile(announcementFile, "utf8"), announcementA);
+        const identity = await (await fetch(`${startedA.endpoint}/api/setup/host`)).json();
+        assert.deepEqual(identity.repository, {
+          repositoryHost: "github.com",
+          repositoryId,
+          nameWithOwner: repository,
+        });
+        const stillA = json(
+          command(
+            packed.entry,
+            ["setup", "status", "--json", "--repository", repository, "--repository-id", repositoryId],
+            { cwd: root, env: environment },
+          ),
+          "setup status for A after B conflict",
+        );
+        assert.deepEqual(stillA.state.generation, status.state.generation);
+      } finally {
+        consoleA.kill("SIGTERM");
+        if (consoleA.exitCode === null) await once(consoleA, "exit");
+      }
       console.log(
         `packed package ${packed.identity.name}@${packed.identity.version} (${packed.identity.integrity ?? packed.identity.shasum}): clean setup, alternative repository name, and incomplete-action denial PASS; provider boundary deterministic fixture not used; live GitHub/Cloudflare NOT CHECKED`,
       );

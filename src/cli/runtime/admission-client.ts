@@ -12,6 +12,11 @@ import { validateExecutionIntent, type ExecutionIntent } from "../../local-contr
 import { readLocalJson, validateLocalCliConfig, type LocalAdmissionRoute } from "../../local-control/config.js";
 import { requireLocalRuntimeEndpoint } from "../../local-control/runtime-discovery.js";
 import type { AdmissionRepositoryIdentity, AdmissionSessionPort } from "../../runtime-contracts/index.js";
+import {
+  validateRuntimeFailure,
+  type RuntimeFailure,
+  type RuntimeFailureCategory,
+} from "../../runtime-contracts/runtime-failure.js";
 
 /**
  * Client side of the existing local Admission wire. The CLI must not load the
@@ -29,16 +34,67 @@ const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_SESSION_BINDING_BYTES = 16 * 1024;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 
+export interface LocalAdmissionFailureDetails {
+  readonly endpoint: "repository" | "session" | "execution";
+  readonly status: number;
+  readonly stage?: RuntimeFailure["stage"];
+  readonly reason?: RuntimeFailure["reason"];
+  readonly category?: RuntimeFailureCategory;
+}
+
 export class LocalAdmissionClientError extends Error {
   readonly code: string;
   readonly status?: number;
+  readonly details?: LocalAdmissionFailureDetails;
 
-  constructor(code: string, message: string, status?: number) {
+  constructor(code: string, message: string, status?: number, details?: LocalAdmissionFailureDetails) {
     super(message);
     this.name = "LocalAdmissionClientError";
     this.code = code;
     this.status = status;
+    if (details !== undefined) this.details = details;
   }
+}
+
+/**
+ * CLI result for each bounded failure class (#1180). Only an actual
+ * authorization denial keeps `ADMISSION_REQUEST_DENIED`; missing setup, trust,
+ * Session state and owner availability each surface their own code.
+ */
+const FAILURE_CATEGORY_CODES: Readonly<Record<RuntimeFailureCategory, string>> = Object.freeze({
+  denied: "ADMISSION_REQUEST_DENIED",
+  session: "ADMISSION_SESSION_REJECTED",
+  trust: "ADMISSION_TRUST_UNVERIFIED",
+  configuration: "ADMISSION_RUNTIME_NOT_CONFIGURED",
+  "binding-mismatch": "ADMISSION_RUNTIME_BINDING_MISMATCH",
+  unavailable: "ADMISSION_OWNER_UNAVAILABLE",
+  internal: "ADMISSION_INTERNAL_FAILURE",
+});
+
+function endpointFor(path: string): LocalAdmissionFailureDetails["endpoint"] {
+  if (path === LOCAL_ADMISSION_CLIENT_REPOSITORY_PATH) return "repository";
+  if (path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH) return "execution";
+  return "session";
+}
+
+function failureError(path: string, status: number, parsed: unknown): LocalAdmissionClientError {
+  const error = isRecord(parsed) && isRecord(parsed.error) ? parsed.error : undefined;
+  const failure = validateRuntimeFailure(error?.failure);
+  const endpoint = endpointFor(path);
+  if (failure === undefined) {
+    return new LocalAdmissionClientError(
+      "ADMISSION_REQUEST_DENIED",
+      `Configured Admission denied the ${endpoint} request.`,
+      status,
+      { endpoint, status },
+    );
+  }
+  return new LocalAdmissionClientError(
+    FAILURE_CATEGORY_CODES[failure.category],
+    `${failure.message} (endpoint: ${endpoint}; stage: ${failure.stage}; reason: ${failure.reason})`,
+    status,
+    { endpoint, status, stage: failure.stage, reason: failure.reason, category: failure.category },
+  );
 }
 
 export type LocalAdmissionRepositoryIdentity = AdmissionRepositoryIdentity;
@@ -146,13 +202,7 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
       throw new LocalAdmissionClientError("ADMISSION_TRANSPORT_FAILED", "Configured local Admission is unavailable.");
     }
     const parsed = await responseJson(response);
-    if (!response.ok) {
-      throw new LocalAdmissionClientError(
-        "ADMISSION_REQUEST_DENIED",
-        "Configured Admission denied the request.",
-        response.status,
-      );
-    }
+    if (!response.ok) throw failureError(path, response.status, parsed);
     return requireEnvelope(parsed, response.status);
   }
 

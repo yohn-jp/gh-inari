@@ -14,6 +14,7 @@ import {
   type LocalExecutorEvidenceRequest,
 } from "./executor-http.js";
 import { verifyLocalMtlsPeerIdentity, type LocalMtlsIdentity } from "./transport-security.js";
+import { validateRuntimeFailure, type RuntimeFailure } from "../runtime-contracts/runtime-failure.js";
 
 export interface LocalExecutorClientOptions {
   readonly id: string;
@@ -33,11 +34,14 @@ export interface LocalExecutorHealth {
 
 export class LocalExecutorClientError extends Error {
   readonly code: "EXECUTOR_UNAVAILABLE" | "EXECUTOR_IDENTITY_MISMATCH" | "EXECUTOR_PROTOCOL_INVALID";
+  /** Bounded Executor owner diagnostic, forwarded only when it validates against the catalog. */
+  readonly runtimeFailure?: RuntimeFailure;
 
-  constructor(code: LocalExecutorClientError["code"], message: string) {
+  constructor(code: LocalExecutorClientError["code"], message: string, runtimeFailure?: RuntimeFailure) {
     super(message);
     this.name = "LocalExecutorClientError";
     this.code = code;
+    if (runtimeFailure !== undefined) this.runtimeFailure = runtimeFailure;
   }
 }
 
@@ -140,6 +144,10 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
     if (response.url.length > 0 && new URL(response.url).origin !== this.endpoint.origin)
       throw new LocalExecutorClientError("EXECUTOR_IDENTITY_MISMATCH", "Executor response came from another endpoint.");
     const body = await readJson(response);
+    if (response.status !== 200 && record(body) && body.ok === false && record(body.error)) {
+      const failure = validateRuntimeFailure(body.error.failure);
+      throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Executor refused the request.", failure);
+    }
     return { response, body };
   }
 

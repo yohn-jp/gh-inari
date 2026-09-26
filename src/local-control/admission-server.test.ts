@@ -530,6 +530,20 @@ test("Admission maps active Session, derives bounded branch authorization, and n
       assert.ok(denied.status === 400 || denied.status === 403);
     }
     assert.equal(executorCalls, 2);
+    const capabilityDenied = (await (
+      await execute(branchIntent("request-capability-reason"), unsupported.sessionId)
+    ).json()) as { readonly error: { readonly failure: Record<string, unknown> } };
+    assert.deepEqual(
+      { stage: capabilityDenied.error.failure.stage, reason: capabilityDenied.error.failure.reason },
+      { stage: "implementation-admission", reason: "ADMISSION_CAPABILITY_DENIED" },
+    );
+    const taskDenied = (await (
+      await execute(branchIntent("request-task-reason", ISSUE + 1), original.sessionId)
+    ).json()) as {
+      readonly error: { readonly failure: Record<string, unknown> };
+    };
+    assert.equal(taskDenied.error.failure.reason, "ADMISSION_TASK_MISMATCH");
+    assert.equal(executorCalls, 2);
     assert.equal((await execute(branchIntent("request-no-selector"))).status, 400);
     assert.equal((await execute(branchIntent("request-malformed-selector"), "bad selector")).status, 400);
     assert.equal((await executeRaw("{", original.sessionId)).status, 400);

@@ -231,11 +231,9 @@ export async function resolveLocalExecutorRepository(
     { repositoryHost: "github.com", nameWithOwner: repositoryNameWithOwner },
     environment,
   );
-  try {
-    return await verifyIssuerBinding(binding);
-  } catch {
-    throw new LocalExecutorError("EXECUTOR_REPOSITORY_UNAVAILABLE", "Repository identity could not be resolved.");
-  }
+  // The owner failure (binding mismatch or the Issuer credential stage) is kept
+  // so the bounded wire diagnostic can name it; no provider detail is exposed.
+  return verifyIssuerBinding(binding);
 }
 
 export async function readLocalExecutorEvidence(

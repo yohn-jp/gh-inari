@@ -35,6 +35,14 @@ import {
   type AdmissionAuthorizationOptions,
 } from "./authorization.js";
 import { LOCAL_ADMISSION_DEFAULT_PORT, LocalAdmissionError, readLocalAdmissionConfiguration } from "./setup.js";
+import {
+  runtimeFailure,
+  runtimeFailureFromError,
+  runtimeFailureHttpStatus,
+  type RuntimeFailure,
+  type RuntimeFailureReason,
+  type RuntimeFailureStage,
+} from "../runtime-contracts/runtime-failure.js";
 
 export const LOCAL_ADMISSION_STATUS_PATH = "/status" as const;
 const LOCAL_ADMISSION_HISTORICAL_PORT = 8766;
@@ -89,6 +97,24 @@ function json(status: number, body: unknown): Response {
     status,
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
   });
+}
+
+/**
+ * Bounded denial envelope (#1180): the existing endpoint code and fixed
+ * message plus the catalog diagnostic naming the owner stage and reason.
+ */
+function denied(code: string, message: string, failure: RuntimeFailure): Response {
+  return json(runtimeFailureHttpStatus(failure), { ok: false, error: { code, message, failure } });
+}
+
+function deniedFrom(
+  error: unknown,
+  code: string,
+  message: string,
+  stage: RuntimeFailureStage,
+  fallback: RuntimeFailureReason,
+): Response {
+  return denied(code, message, runtimeFailureFromError(error, stage, fallback));
 }
 
 function jsonContentType(value: string | null): boolean {
@@ -204,7 +230,11 @@ function createLocalAdmissionHttpHandler(
           validation.value.nameWithOwner.toLocaleLowerCase("en-US") !==
             parsed.value.repositoryNameWithOwner.toLocaleLowerCase("en-US")
         ) {
-          throw new Error();
+          return denied(
+            "REPOSITORY_UNAVAILABLE",
+            "Repository identity could not be resolved.",
+            runtimeFailure("repository-resolution", "ADMISSION_REPOSITORY_MISMATCH"),
+          );
         }
         return json(200, {
           ok: true,
@@ -214,11 +244,14 @@ function createLocalAdmissionHttpHandler(
             repositoryNameWithOwner: validation.value.nameWithOwner,
           },
         });
-      } catch {
-        return json(503, {
-          ok: false,
-          error: { code: "REPOSITORY_UNAVAILABLE", message: "Repository identity could not be resolved." },
-        });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "REPOSITORY_UNAVAILABLE",
+          "Repository identity could not be resolved.",
+          "repository-resolution",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
       }
     }
     if (url.pathname === LOCAL_ADMISSION_SESSIONS_PATH) {
@@ -233,12 +266,22 @@ function createLocalAdmissionHttpHandler(
         });
       const validation = validateLocalSessionBinding(parsed.value.binding);
       if (!validation.valid || validation.value === undefined)
-        return json(403, { ok: false, error: { code: "SESSION_DENIED", message: "Session binding was denied." } });
+        return denied(
+          "SESSION_DENIED",
+          "Session binding was denied.",
+          runtimeFailure("session-registration", "ADMISSION_SESSION_BINDING_INVALID"),
+        );
       try {
         const session = await admitSession(validation.value, authorizationOptions(options));
         return json(201, { ok: true, session: { id: session.id, status: session.status, exp: session.exp } });
-      } catch {
-        return json(403, { ok: false, error: { code: "SESSION_DENIED", message: "Session binding was denied." } });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "SESSION_DENIED",
+          "Session binding was denied.",
+          "session-registration",
+          "RUNTIME_INTERNAL_FAILURE",
+        );
       }
     }
     if (url.pathname.startsWith(`${LOCAL_ADMISSION_SESSIONS_PATH}/`)) {
@@ -256,12 +299,22 @@ function createLocalAdmissionHttpHandler(
         });
       const validation = validateLocalSessionBinding(parsed.value.binding);
       if (!validation.valid || validation.value === undefined || validation.value.sessionId !== sessionId)
-        return json(403, { ok: false, error: { code: "SESSION_DENIED", message: "Session close was denied." } });
+        return denied(
+          "SESSION_DENIED",
+          "Session close was denied.",
+          runtimeFailure("session-registration", "ADMISSION_SESSION_BINDING_INVALID"),
+        );
       try {
         const session = await closeSession(validation.value, authorizationOptions(options));
         return json(200, { ok: true, session: { id: session.id, status: session.status } });
-      } catch {
-        return json(403, { ok: false, error: { code: "SESSION_DENIED", message: "Session close was denied." } });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "SESSION_DENIED",
+          "Session close was denied.",
+          "session-registration",
+          "RUNTIME_INTERNAL_FAILURE",
+        );
       }
     }
     if (url.pathname === LOCAL_ADMISSION_EXECUTIONS_PATH) {
@@ -281,12 +334,29 @@ function createLocalAdmissionHttpHandler(
           ok: false,
           error: { code: "INVALID_SESSION_SELECTOR", message: "A bounded Session selector header is required." },
         });
+      let execution: AuthorizedExecution;
       try {
-        const execution = await authorizeExecutionIntent(validation.intent, sessionId, authorizationOptions(options));
+        execution = await authorizeExecutionIntent(validation.intent, sessionId, authorizationOptions(options));
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "ADMISSION_DENIED",
+          "Execution was denied.",
+          "implementation-admission",
+          "RUNTIME_INTERNAL_FAILURE",
+        );
+      }
+      try {
         const result = await options.executor.execute(execution);
         return json(200, { ok: true, result });
-      } catch {
-        return json(403, { ok: false, error: { code: "ADMISSION_DENIED", message: "Execution was denied." } });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "EXECUTION_FAILED",
+          "Authorized execution failed.",
+          "provider-execution",
+          "EXECUTOR_EXECUTION_FAILED",
+        );
       }
     }
     return json(404, { ok: false, error: { code: "NOT_FOUND", message: "The requested path is not implemented." } });

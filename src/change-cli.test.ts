@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
@@ -40,6 +42,15 @@ import { verifyChangeProvenanceRecord } from "./change-provenance-record.js";
 import { createRuntimeAuthorityRecord } from "./agent-authority/runtime-authority-operations.js";
 import { renderRuntimeAuthorityArtifact } from "./agent-authority/runtime-authority-trust.js";
 import { generateRuntimeAuthorityKeyPair } from "./agent-authority/runtime-key.js";
+
+/**
+ * #1183: every CLI invocation in this file owns its Local Runtime config home.
+ * An empty, file-owned `INARI_CONFIG_HOME` keeps the operator's `inari init`
+ * state (for example a local Admission topology) out of these direct/fake
+ * executor tests; Local Admission routes are certified by explicit fixtures in
+ * `cli-core.test.ts`.
+ */
+const isolatedConfigHome = mkdtempSync(path.join(os.tmpdir(), "inari-change-cli-config-"));
 
 const identity = {
   repositoryHost: "github.com",
@@ -198,7 +209,10 @@ async function capture(
   const originalLog = console.log;
   console.log = (line: string) => lines.push(line);
   try {
-    const exitCode = await runCli([...argv], dependencies);
+    const exitCode = await runCli([...argv], {
+      ...dependencies,
+      environment: { INARI_CONFIG_HOME: isolatedConfigHome, ...dependencies.environment },
+    });
     const last = lines.at(-1);
     return { exitCode, output: last === undefined ? undefined : (JSON.parse(last) as Record<string, unknown>) };
   } finally {

@@ -1329,6 +1329,34 @@ test("setup console starts one owned host, reuses it on repeated start and agree
     assert.equal(JSON.parse(repeated.stdout).reused, true);
     assert.equal(JSON.parse(repeated.stdout).endpoint, output.endpoint);
 
+    // #1185: a different repository in the same config home is never reported
+    // as reused; the live host, its announcement and its binding stay intact.
+    const announcementPath = path.join(environment.INARI_CONFIG_HOME as string, "runtime", "endpoints", "setup.json");
+    const announcementBefore = await readFile(announcementPath, "utf8");
+    const conflicting = await capture(
+      ["setup", "console", "--json", "--repository", "example-other/project", "--repository-id", "4242"],
+      environment,
+      {
+        repositoryRoot: root,
+        setupAssetDirectory,
+        onSetupHostStarted: () => assert.fail("a host for another repository must not start"),
+      },
+    );
+    assert.equal(conflicting.exitCode, 2);
+    const conflict = JSON.parse(conflicting.stdout) as { readonly ok: boolean; readonly error: Record<string, string> };
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.error.code, "SETUP_HOST_REPOSITORY_CONFLICT");
+    assert.match(conflict.error.message, /yohn-jp\/gh-inari/u);
+    assert.equal(await readFile(announcementPath, "utf8"), announcementBefore);
+    const hostIdentity = (await (await fetch(`${output.endpoint}/api/setup/host`)).json()) as {
+      readonly repository: Record<string, string>;
+    };
+    assert.deepEqual(hostIdentity.repository, {
+      repositoryHost: "github.com",
+      repositoryId: "1330755860",
+      nameWithOwner: "yohn-jp/gh-inari",
+    });
+
     // A fresh CLI process and the browser API observe the same persisted setup generation.
     const bootstrap = (await (
       await fetch(`${output.endpoint}/api/setup/bootstrap`, {

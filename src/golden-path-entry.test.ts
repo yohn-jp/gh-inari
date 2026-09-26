@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { renderIssueArtifact } from "./artifact.js";
 import { projectChangeFromGitHubEvidence, type ChangeProjectionInput, type ChangeProjectionResult } from "./change.js";
@@ -41,7 +44,10 @@ const cliRuntimeAuthority = createRuntimeAuthorityRecord({
   capabilityCeiling: ["change.implement", "change.ready"],
 });
 const cliRuntimeArtifact = renderRuntimeAuthorityArtifact(cliRuntimeAuthority);
+// #1183: the CLI invocation owns an empty Local Runtime config home so the
+// operator's `inari init` state cannot route it through local Admission.
 const cliRuntimeEnvironment = {
+  INARI_CONFIG_HOME: mkdtempSync(path.join(os.tmpdir(), "inari-golden-path-entry-config-")),
   INARI_RUNTIME_AUTHORITY_ID: cliRuntimeAuthority.id,
   INARI_RUNTIME_AUTHORITY_PRIVATE_KEY: cliRuntimePair.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
 };

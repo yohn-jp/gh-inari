@@ -1871,7 +1871,13 @@ async function runSetupApplicationCommand(
   }
 
   if (subcommand === "console") {
-    const live = await host.findLiveSetupHost(environment);
+    let live: Awaited<ReturnType<typeof host.resolveSetupHostReuse>>;
+    try {
+      live = await host.resolveSetupHostReuse(repository, environment);
+    } catch (error: unknown) {
+      if (error instanceof host.SetupHostError) throw new CliError(error.code, error.message);
+      throw error;
+    }
     if (live !== undefined) {
       const port = new URL(live.endpoint).port;
       if (json)
@@ -1882,12 +1888,13 @@ async function runSetupApplicationCommand(
             endpoint: live.endpoint,
             url: `${live.endpoint}/`,
             sshForward: `-L ${port}:127.0.0.1:${port}`,
+            repository,
             reused: true,
             foreground: false,
           }),
         );
       else {
-        console.log(`The local setup console is already running: ${live.endpoint}/`);
+        console.log(`The local setup console for ${repository.nameWithOwner} is already running: ${live.endpoint}/`);
         console.log("No second host was started.");
       }
       return 0;
@@ -5629,6 +5636,8 @@ function classifyExitCode(error: unknown): number {
   )
     return EXIT_VALIDATION;
   if (isGitHubAdapterError(error)) return EXIT_REMOTE;
+  if (isObjectWithCode(error) && error.code === "ADMISSION_OWNER_UNAVAILABLE") return EXIT_REMOTE;
+  if (isObjectWithCode(error) && error.code === "ADMISSION_INTERNAL_FAILURE") return EXIT_INTERNAL;
   if (
     isObjectWithCode(error) &&
     typeof error.code === "string" &&
@@ -5704,6 +5713,11 @@ function classifyExitCode(error: unknown): number {
   if (isObjectWithCode(error) && error.code.startsWith("RUNTIME_AUTHORITY_LIFECYCLE_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("IMPLEMENTATION_")) return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("REPOSITORY_SETUP_")) return EXIT_VALIDATION;
+  if (
+    isObjectWithCode(error) &&
+    (error.code === "SETUP_HOST_REPOSITORY_CONFLICT" || error.code === "SETUP_HOST_ANNOUNCEMENT_FOREIGN")
+  )
+    return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("GOVERNANCE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && /^(?:ISSUE_FORM|PR_TEMPLATE|IR_|CONTRACT_)/u.test(error.code)) return EXIT_VALIDATION;
   return EXIT_INTERNAL;
