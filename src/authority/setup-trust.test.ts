@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { createDelegatorRecord } from "../agent-authority/delegator-operations.js";
 import { delegatorPublicKeyFingerprint, generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
-import { selectSetupAuthority, SetupTrustSelectionError } from "./setup-trust.js";
+import { localComponentPath } from "../local-control/config.js";
+import { openLocalAuthorityCustody, prepareLocalAuthorityIdentity } from "./authority-store.js";
+import { selectSetupAuthority, setupAuthorityReference, SetupTrustSelectionError } from "./setup-trust.js";
 
 const repository = { repositoryHost: "github.com", repositoryId: "99", repositoryNameWithOwner: "acme/inari" };
 
@@ -89,4 +94,48 @@ test("a profile alone cannot regenerate its registered public envelope", () => {
       }),
     (error: unknown) => error instanceof SetupTrustSelectionError && error.code === "RECORD_UNAVAILABLE",
   );
+});
+
+test("one Authority identity is referenced by several repositories without key duplication", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inari-setup-trust-"));
+  const environment = { INARI_CONFIG_HOME: path.join(root, "config") };
+  try {
+    const { identity } = prepareLocalAuthorityIdentity("runtime-shared", environment);
+    const { key } = openLocalAuthorityCustody({ authorityId: identity.authorityId }, environment);
+    const record = createDelegatorRecord({
+      id: identity.authorityId,
+      key: identity.publicKey,
+      maxSessionTtlSeconds: 120,
+      capabilityCeiling: ["change.implement"],
+    });
+    const repositories = [
+      { repositoryHost: "github.com", repositoryId: "99", repositoryNameWithOwner: "acme/inari" },
+      { repositoryHost: "github.com", repositoryId: "100", repositoryNameWithOwner: "acme/other" },
+    ];
+    const references = repositories.map((target) => {
+      const selected = selectSetupAuthority({
+        repository: target,
+        authorityId: identity.authorityId,
+        key,
+        local: [record],
+        canonical: [record],
+        maxSessionTtlSeconds: 3600,
+      });
+      assert.strictEqual(selected, record);
+      return setupAuthorityReference(identity);
+    });
+    assert.deepEqual(references[0], references[1]);
+    assert.deepEqual(references[0], {
+      authorityId: "runtime-shared",
+      publicKeyFingerprint: delegatorPublicKeyFingerprint(identity.publicKey),
+    });
+    const serialized = JSON.stringify(references);
+    assert.equal(serialized.includes("private"), false);
+    assert.equal(serialized.includes(".pem"), false);
+    assert.equal(serialized.includes(root), false);
+    assert.equal(serialized.includes(identity.publicKey.x), false);
+    assert.deepEqual(await readdir(localComponentPath("authority", "keys", environment)), ["runtime-shared"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

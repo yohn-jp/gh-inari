@@ -2,7 +2,9 @@ import { CAPABILITY_KINDS, type CapabilityKind } from "../agent-authority/capabi
 import { delegatorPublicKeyFingerprint, type DelegatorKeyPair } from "../agent-authority/delegator-key.js";
 import { createDelegatorRecord } from "../agent-authority/delegator-operations.js";
 import { canonicalDelegatorJson, type Delegator } from "../agent-authority/delegator.js";
+import type { SetupConfigAuthority } from "../composition/setup-config-store.js";
 import type { LocalRuntimeProfile } from "../local-runtime-profile.js";
+import type { LocalAuthorityPublicIdentity } from "./authority-store.js";
 
 /** Authority-owned selection request. Generic Setup actions carry no key or grant intent. */
 export interface SetupTrustRequest {
@@ -78,4 +80,13 @@ export function selectSetupAuthority(request: SetupTrustRequest): Delegator {
     maxSessionTtlSeconds: request.maxSessionTtlSeconds,
     capabilityCeiling: request.capabilityIntent,
   });
+}
+
+/**
+ * Repository-bindable reference to one local Authority identity. Repository
+ * setup stores only the Authority ID and public fingerprint; the same identity
+ * may be referenced by any number of repositories without copying its key.
+ */
+export function setupAuthorityReference(identity: LocalAuthorityPublicIdentity): SetupConfigAuthority {
+  return Object.freeze({ authorityId: identity.authorityId, publicKeyFingerprint: identity.publicKeyFingerprint });
 }
