@@ -101,6 +101,7 @@ async function loadModules() {
     import("../src/endpoint-runtime-presence.ts"),
     import("../src/endpoint-reconciliation.ts"),
     import("../src/endpoint-webhook.ts"),
+    import("../src/endpoint-onboarding.ts"),
     import("../src/implementation-contract.ts"),
     import("../apps/dashboard/src/auth.ts"),
     import("../apps/dashboard/src/endpoint-client.ts"),
@@ -116,6 +117,7 @@ async function loadModules() {
       presence,
       reconciliation,
       webhook,
+      onboarding,
       implementation,
       auth,
       client,
@@ -130,6 +132,7 @@ async function loadModules() {
       presence,
       reconciliation,
       webhook,
+      onboarding,
       implementation,
       auth,
       client,
@@ -946,14 +949,33 @@ async function certifyDashboardBoundary(modules) {
     "Dashboard dependency guard found a direct provider/Relay/Session/Change import",
   );
   const dashboardDist = path.join(repoRoot, "apps", "dashboard", "dist");
+  const onboardingAsset = path.join(dashboardDist, ".well-known", "inari");
   if (
     !fs.existsSync(path.join(dashboardDist, "index.html")) ||
-    !fs.existsSync(path.join(dashboardDist, "browser.js"))
+    !fs.existsSync(path.join(dashboardDist, "browser.js")) ||
+    !fs.existsSync(onboardingAsset)
   ) {
-    execFileSync("pnpm", ["--dir", "apps/dashboard", "build"], { cwd: repoRoot, stdio: "inherit" });
+    execFileSync("pnpm", ["run", "hosted-worker:build"], { cwd: repoRoot, stdio: "inherit" });
   }
   const shell = fs.readFileSync(path.join(dashboardDist, "index.html"), "utf8");
   const browser = fs.readFileSync(path.join(dashboardDist, "browser.js"), "utf8");
+  const onboardingDescriptor = modules.onboarding.decodeEndpointOnboardingDescriptor(
+    fs.readFileSync(onboardingAsset, "utf8"),
+  );
+  requireCondition(onboardingDescriptor.appId === "4837577", "built onboarding asset has the wrong App identity");
+  requireCondition(
+    onboardingDescriptor.relayConnectionBase === "wss://mcp-inari.yohn.jp/v1/relay/connect",
+    "built onboarding asset has the wrong Relay origin",
+  );
+  requireCondition(
+    onboardingDescriptor.appCallbackUrl === "https://mcp-inari.yohn.jp/oauth/callback",
+    "built onboarding asset has the wrong OAuth callback",
+  );
+  const staticHeaders = fs.readFileSync(path.join(dashboardDist, "_headers"), "utf8");
+  requireCondition(
+    staticHeaders.includes("/.well-known/inari") && staticHeaders.includes("Content-Type: application/json"),
+    "built onboarding asset is missing its JSON Static Assets header",
+  );
   requireCondition(shell.includes("data-dashboard-shell"), "built Dashboard shell is missing");
   requireCondition(
     browser.includes("code_challenge") && browser.includes("/v1/endpoint"),
@@ -980,7 +1002,12 @@ async function certifyWorkerFirstRouting(modules) {
   };
   const env = createEnvironment(provider, { assets });
   const worker = modules.hostedWorker.default;
-  const paths = ["/mcp", "/v1/unknown", "/.well-known/unknown", "/healthz"];
+  const onboarding = await worker.fetch(new Request("https://hosted.example.test/.well-known/inari"), env);
+  requireCondition(
+    onboarding.status === 200 && (await onboarding.text()) === "SPA_ASSET",
+    "onboarding descriptor was not delegated to Static Assets",
+  );
+  const paths = ["/mcp", "/v1/unknown", "/.well-known", "/.well-known/unknown", "/healthz"];
   for (const pathname of paths) {
     const response = await withProvider(provider, () =>
       worker.fetch(
@@ -1002,8 +1029,8 @@ async function certifyWorkerFirstRouting(modules) {
     "Dashboard asset route was not served by Static Assets",
   );
   requireCondition(
-    assets.calls.length === 1 && assets.calls[0] === "/dashboard",
-    "Worker-first API/MCP/well-known/health routing invoked SPA assets",
+    assets.calls.length === 2 && assets.calls[0] === "/.well-known/inari" && assets.calls[1] === "/dashboard",
+    "Dynamic or unknown well-known routing invoked Static Assets",
   );
 }
 

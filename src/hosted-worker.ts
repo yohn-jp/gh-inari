@@ -34,11 +34,7 @@ import {
   recordRelayTelemetry,
   type RelayTelemetrySink,
 } from "./relay/telemetry.js";
-import {
-  ENDPOINT_ONBOARDING_PATH,
-  createEndpointOnboardingDescriptor,
-  type EndpointOnboardingDescriptorInput,
-} from "./endpoint-onboarding.js";
+import { ENDPOINT_ONBOARDING_PATH } from "./endpoint-onboarding.js";
 import {
   ENDPOINT_WEBHOOK_PATH,
   createEndpointWebhookHandler,
@@ -303,49 +299,6 @@ function healthz(env: Env): Response {
   });
 }
 
-function onboardingUnavailable(): Response {
-  return jsonResponse(503, {
-    version: 1,
-    ok: false,
-    error: { code: "ENDPOINT_ONBOARDING_NOT_CONFIGURED" },
-  });
-}
-
-function onboardingRelayConnectionBase(request: Request): string | undefined {
-  try {
-    const origin = new URL(request.url);
-    if (origin.protocol !== "https:" || origin.username !== "" || origin.password !== "") return undefined;
-    origin.protocol = "wss:";
-    origin.pathname = "/v1/relay/connect";
-    origin.search = "";
-    origin.hash = "";
-    return origin.toString();
-  } catch {
-    return undefined;
-  }
-}
-
-function onboarding(request: Request, env: Env): Response {
-  if (request.method !== "GET") return methodNotAllowed("GET");
-  const relayConnectionBase = onboardingRelayConnectionBase(request);
-  if (relayConnectionBase === undefined) return onboardingUnavailable();
-  const input: EndpointOnboardingDescriptorInput = {
-    githubHost: env.INARI_HOSTED_REPOSITORY_HOST ?? DEFAULT_REPOSITORY_HOST,
-    appId: env.INARI_GITHUB_APP_ID ?? "",
-    appClientId: env.INARI_GITHUB_APP_CLIENT_ID ?? "",
-    appSlug: env.INARI_GITHUB_APP_SLUG ?? "",
-    appInstallationUrl: env.INARI_GITHUB_APP_INSTALLATION_URL ?? "",
-    appUserAuthProfile: env.INARI_GITHUB_APP_USER_AUTH_PROFILE ?? "",
-    relayConnectionBase,
-    ...(env.INARI_GITHUB_APP_CALLBACK_URL === undefined ? {} : { appCallbackUrl: env.INARI_GITHUB_APP_CALLBACK_URL }),
-  };
-  try {
-    return jsonResponse(200, createEndpointOnboardingDescriptor(input));
-  } catch {
-    return onboardingUnavailable();
-  }
-}
-
 function oauthOptions(env: Env): HostedEndpointOAuthOptions | undefined {
   if (env.endpointOAuth !== undefined) return env.endpointOAuth;
   if (
@@ -556,6 +509,7 @@ async function endpoint(request: Request, env: Env): Promise<Response> {
 }
 
 function workerFirstPath(pathname: string): boolean {
+  if (pathname === ENDPOINT_ONBOARDING_PATH) return false;
   return (
     pathname === "/mcp" ||
     pathname.startsWith("/mcp/") ||
@@ -583,7 +537,6 @@ export default {
     const pathname = safePathname(request.url);
     if (pathname === undefined) return jsonResponse(400, { ok: false, error: { code: "MALFORMED_REQUEST" } });
     if (pathname === "/healthz") return request.method === "GET" ? healthz(env) : methodNotAllowed("GET");
-    if (pathname === ENDPOINT_ONBOARDING_PATH) return onboarding(request, env);
     if (pathname === HOSTED_ENDPOINT_OAUTH_EXCHANGE_PATH) return oauthExchange(request, env);
     if (pathname === ENDPOINT_HTTP_PATH) return endpoint(request, env);
     if (pathname === ENDPOINT_WEBHOOK_PATH) return webhook(request, env);

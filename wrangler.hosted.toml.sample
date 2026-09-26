@@ -11,7 +11,7 @@ custom_domain = true
 directory = "apps/dashboard/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/v1/*", "/mcp", "/.well-known/*", "/healthz"]
+run_worker_first = ["/v1/*", "/mcp", "/.well-known/*", "!/.well-known/inari", "/healthz"]
 
 [observability]
 enabled = true

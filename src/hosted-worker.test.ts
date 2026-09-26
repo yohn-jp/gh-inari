@@ -83,42 +83,6 @@ function env(namespace: HostedDurableObjectNamespace): Env {
   return { REPOSITORY_RELAY: namespace };
 }
 
-function onboardingEnv(namespace: HostedDurableObjectNamespace): Env {
-  return {
-    ...env(namespace),
-    INARI_GITHUB_APP_ID: "123456",
-    INARI_GITHUB_APP_CLIENT_ID: "Iv1.public-client",
-    INARI_GITHUB_APP_SLUG: "inari",
-    INARI_GITHUB_APP_INSTALLATION_URL: "https://github.com/apps/inari/installations/new",
-    INARI_GITHUB_APP_USER_AUTH_PROFILE: "device-flow",
-    INARI_GITHUB_APP_CALLBACK_URL: "https://hosted.example/dashboard/oauth/callback",
-  };
-}
-
-test("public onboarding descriptor exposes deployment metadata without authority", async () => {
-  const worker = (await import("./hosted-worker.js")).default;
-  const ids: string[] = [];
-  const response = await worker.fetch(
-    new Request("https://hosted.example/.well-known/inari"),
-    onboardingEnv(relayNamespace({ fetch: async () => new Response("unused") }, ids)),
-  );
-  assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.deepEqual(body, {
-    version: 1,
-    githubHost: "github.com",
-    appId: "123456",
-    appClientId: "Iv1.public-client",
-    appSlug: "inari",
-    appInstallationUrl: "https://github.com/apps/inari/installations/new",
-    appUserAuthProfile: "device-flow",
-    appCallbackUrl: "https://hosted.example/dashboard/oauth/callback",
-    relayConnectionBase: "wss://hosted.example/v1/relay/connect",
-  });
-  assert.deepEqual(ids, []);
-  assert.equal(JSON.stringify(body).includes("repositoryId"), false);
-});
-
 test("internal Relay presence path is not a public Hosted Worker route", async () => {
   const worker = (await import("./hosted-worker.js")).default;
   const ids: string[] = [];
@@ -128,40 +92,6 @@ test("internal Relay presence path is not a public Hosted Worker route", async (
   );
   assert.equal(response.status, 404);
   assert.deepEqual(ids, []);
-});
-
-test("public onboarding descriptor fails closed for missing or malformed metadata", async () => {
-  const worker = (await import("./hosted-worker.js")).default;
-  const ids: string[] = [];
-  const binding = relayNamespace({ fetch: async () => new Response("unused") }, ids);
-  const missing = await worker.fetch(new Request("https://hosted.example/.well-known/inari"), env(binding));
-  assert.equal(missing.status, 503);
-  assert.deepEqual(await missing.json(), {
-    version: 1,
-    ok: false,
-    error: { code: "ENDPOINT_ONBOARDING_NOT_CONFIGURED" },
-  });
-  const malformed = await worker.fetch(new Request("https://hosted.example/.well-known/inari"), {
-    ...onboardingEnv(binding),
-    INARI_GITHUB_APP_ID: "not-numeric",
-  });
-  assert.equal(malformed.status, 503);
-  assert.deepEqual(await malformed.json(), {
-    version: 1,
-    ok: false,
-    error: { code: "ENDPOINT_ONBOARDING_NOT_CONFIGURED" },
-  });
-  assert.deepEqual(ids, []);
-});
-
-test("public onboarding descriptor only accepts GET", async () => {
-  const worker = (await import("./hosted-worker.js")).default;
-  const response = await worker.fetch(
-    new Request("https://hosted.example/.well-known/inari", { method: "POST" }),
-    onboardingEnv(relayNamespace({ fetch: async () => new Response("unused") }, [])),
-  );
-  assert.equal(response.status, 405);
-  assert.equal(response.headers.get("allow"), "GET");
 });
 
 test("healthz is bounded metadata and does not expose repository or credential state", async () => {
@@ -497,15 +427,18 @@ test("hosted Endpoint route delegates to the shared authenticated API compositio
   );
 });
 
-test("hosted Worker serves Dashboard assets while keeping Worker surfaces first", async () => {
+test("hosted Worker delegates the onboarding descriptor to Static Assets and keeps dynamic surfaces first", async () => {
   const worker = (await import("./hosted-worker.js")).default;
   const requests: string[] = [];
   const hostedEnv = {
     ...env(relayNamespace({ fetch: async () => new Response("unused") }, [])),
     ASSETS: {
       async fetch(request: Request) {
-        requests.push(new URL(request.url).pathname);
-        return new Response("dashboard-shell", { status: 200, headers: { "content-type": "text/html" } });
+        const pathname = new URL(request.url).pathname;
+        requests.push(pathname);
+        return new Response(pathname === "/.well-known/inari" ? "static-onboarding" : "dashboard-shell", {
+          status: 200,
+        });
       },
     },
   };
@@ -513,17 +446,22 @@ test("hosted Worker serves Dashboard assets while keeping Worker surfaces first"
   const dashboard = await worker.fetch(new Request("https://hosted.example/"), hostedEnv);
   assert.equal(dashboard.status, 200);
   assert.equal(await dashboard.text(), "dashboard-shell");
-  assert.deepEqual(requests, ["/"]);
+
+  const descriptor = await worker.fetch(new Request("https://hosted.example/.well-known/inari"), hostedEnv);
+  assert.equal(descriptor.status, 200);
+  assert.equal(await descriptor.text(), "static-onboarding");
+  assert.deepEqual(requests, ["/", "/.well-known/inari"]);
 
   const workerFirst = await worker.fetch(new Request("https://hosted.example/v1/unknown"), hostedEnv);
   assert.equal(workerFirst.status, 404);
   const mcpChild = await worker.fetch(new Request("https://hosted.example/mcp/unknown"), hostedEnv);
   assert.equal(mcpChild.status, 404);
+  const descriptorRoot = await worker.fetch(new Request("https://hosted.example/.well-known"), hostedEnv);
+  assert.equal(descriptorRoot.status, 404);
   const descriptorChild = await worker.fetch(new Request("https://hosted.example/.well-known/unknown"), hostedEnv);
   assert.equal(descriptorChild.status, 404);
-  assert.deepEqual(requests, ["/"]);
+  assert.deepEqual(requests, ["/", "/.well-known/inari"]);
 });
-
 test("hosted MCP serves the stable Issue MCP App resource while preserving the native tool", async () => {
   const worker = (await import("./hosted-worker.js")).default;
   const binding = relayNamespace({ fetch: async () => new Response("unused") }, []);
