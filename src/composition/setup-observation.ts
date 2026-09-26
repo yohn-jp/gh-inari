@@ -44,6 +44,7 @@ import {
   readExistingLocalJson,
   validateLocalAdmissionConfig,
   validateLocalAuthorityConfig,
+  validateLocalCliConfig,
   validateLocalExecutorConfig,
 } from "../local-control/config.js";
 import { validateLocalRuntimeEndpoint } from "../local-control/runtime-discovery.js";
@@ -372,6 +373,8 @@ export interface SetupConfigurationEvidence {
   readonly custody?: ExecutorIssuerCustodyStatus;
   readonly authorityDescriptorFingerprint?: string;
   readonly admission?: { readonly id: string; readonly executorId: string };
+  /** Admission instance the local CLI routes Session requests to. */
+  readonly cliAdmissionRouteId?: string;
   /** Adopted public Runtime Authority record pinned by Admission. */
   readonly pin?: Delegator;
   readonly profile?: LocalRuntimeProfile;
@@ -436,6 +439,7 @@ export async function readSetupConfigurationEvidence(
     readExistingLocalJson("admission", "config.json", validateLocalAdmissionConfig, environment),
   );
   const pin = read(() => readExistingLocalJson("admission", "runtime-authority.json", pinValidator, environment));
+  const cli = read(() => readExistingLocalJson("cli", "config.json", validateLocalCliConfig, environment));
   let profile: Read<LocalRuntimeProfile>;
   try {
     const value = await new LocalRuntimeProfileStore({ environment }).findForRepository({
@@ -459,6 +463,7 @@ export async function readSetupConfigurationEvidence(
       ["authority/config.json", descriptor],
       ["admission/config.json", admission],
       ["admission/runtime-authority.json", pin],
+      ["cli/config.json", cli],
       ["runtime-profile", profile],
     ] as const
   )
@@ -477,6 +482,7 @@ export async function readSetupConfigurationEvidence(
       ? {}
       : { admission: { id: value(admission)!.id, executorId: value(admission)!.executor.id } }),
     ...(value(pin) === undefined ? {} : { pin: value(pin) }),
+    ...(value(cli)?.admission === undefined ? {} : { cliAdmissionRouteId: value(cli)!.admission!.id }),
     ...(value(profile) === undefined ? {} : { profile: value(profile) }),
     unreadable,
   };
@@ -490,6 +496,7 @@ export async function readSetupConfigurationEvidence(
     config: evidence.config,
     authority: evidence.authorityDescriptorFingerprint,
     admission: evidence.admission,
+    cliAdmissionRouteId: evidence.cliAdmissionRouteId,
     pin: evidence.pin === undefined ? undefined : canonicalDelegatorJson(evidence.pin),
     profile: evidence.profile,
     unreadable,
@@ -554,6 +561,9 @@ export function missingConfiguration(
     missing.push("authority");
   if (evidence.admission === undefined || evidence.admission.executorId !== evidence.executorConfigId)
     missing.push("admission");
+  // The CLI must route Sessions to exactly this Admission, or setup is not usable.
+  if (evidence.admission === undefined || evidence.cliAdmissionRouteId !== evidence.admission.id)
+    missing.push("cli-route");
   if (
     pin === undefined ||
     authority === undefined ||

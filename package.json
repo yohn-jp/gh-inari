@@ -359,7 +359,7 @@
       ]
     },
     "certify:setup": {
-      "command": "node --test --import tsx test/setup-application-certification.test.mjs test/local-execution-plane-certification.test.mjs test/setup-browser-certification.test.mjs",
+      "command": "node --test --import tsx test/setup-application-certification.test.mjs test/local-execution-plane-certification.test.mjs test/setup-browser-certification.test.mjs test/local-runtime-golden-path-certification.test.mjs",
       "dependencies": [
         "verify:package"
       ]

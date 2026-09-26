@@ -43,6 +43,7 @@ import {
   type ExecutorIssuerCustodyStatus,
 } from "../executor/enrollment/owner.js";
 import { LocalExecutorError, ensureLocalExecutorConfiguration } from "../executor/setup.js";
+import { bindLocalCliAdmissionRoute, ensureLocalCliTopology } from "../local-control/config.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import {
   MAX_SETUP_DIAGNOSTICS,
@@ -446,6 +447,23 @@ export function createSetupActionPort(options: SetupAdapterOptions = {}): SetupA
           diagnostic(
             error instanceof LocalAdmissionError ? error.code : "SETUP_ADMISSION_UNCONFIRMED",
             "Admission could not be configured with the adopted Runtime Authority.",
+          ),
+        ]);
+      }
+    }
+
+    // Route the local CLI to the configured Admission, as `admission setup` does.
+    const routed = await readSetupConfigurationEvidence(repository, environment);
+    if (routed.admission !== undefined && routed.cliAdmissionRouteId !== routed.admission.id) {
+      try {
+        ensureLocalCliTopology(environment);
+        bindLocalCliAdmissionRoute({ id: routed.admission.id }, environment);
+      } catch {
+        return outcome(request, effects.length === 0 ? "failed" : "unknown", [
+          ...effects,
+          diagnostic(
+            "SETUP_CLI_ROUTE_UNBOUND",
+            "The local CLI could not be routed to the configured Admission; its existing route is kept.",
           ),
         ]);
       }

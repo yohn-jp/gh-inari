@@ -199,7 +199,7 @@ const CREDENTIAL_STAGE_REASONS: Readonly<Record<string, RuntimeFailureReason>> =
  * Project an owner failure to the bounded diagnostic. A value that already
  * carries a validated `runtimeFailure` (forwarded from a downstream owner)
  * keeps that owner's stage and reason. Otherwise only the error `code` (and
- * the Issuer credential broker `stage`) is read; the message, cause, details
+ * the Issuer credential broker `stage` and provider-failure `retryable` flag) is read; the message, cause, details
  * and any provider data are never consulted.
  */
 export function runtimeFailureFromError(
@@ -211,6 +211,10 @@ export function runtimeFailureFromError(
     const forwarded = validateRuntimeFailure(error.runtimeFailure);
     if (forwarded !== undefined) return forwarded;
     if (error.code === "GITHUB_APP_CREDENTIAL_BROKER_FAILED" && typeof error.stage === "string") {
+      // A retryable provider failure (5xx, timeout, transport) is an outage at any
+      // credential stage, never evidence of a wrong App or installation binding.
+      if (isRecord(error.providerFailure) && error.providerFailure.retryable === true)
+        return runtimeFailure(stage, "GITHUB_APP_PROVIDER_UNAVAILABLE");
       const mapped = CREDENTIAL_STAGE_REASONS[error.stage];
       if (mapped !== undefined) return runtimeFailure(stage, mapped);
     }

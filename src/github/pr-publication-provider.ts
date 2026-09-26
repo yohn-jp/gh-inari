@@ -31,6 +31,17 @@ function boundedText(value: unknown, allowEmpty = false): string {
   return value;
 }
 
+/** A pull-request body is Markdown: line breaks and tabs are content, other controls are not. */
+function boundedBody(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length > 1_048_576 ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
+  )
+    throw new Error("Provider response invalid.");
+  return value;
+}
+
 function positiveNumber(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
     throw new Error("Provider response invalid.");
@@ -52,7 +63,7 @@ function publicationRecord(value: unknown, repository: PrPublicationRepositoryId
     number: positiveNumber(candidate.number),
     url: boundedText(candidate.html_url ?? candidate.url),
     title: boundedText(candidate.title),
-    body: candidate.body === null ? null : boundedText(candidate.body, true),
+    body: candidate.body === null ? null : boundedBody(candidate.body),
     head: boundedText(head.ref),
     base: boundedText(base.ref),
     ...(optionalSha(head.sha) === undefined ? {} : { headRevision: optionalSha(head.sha) }),
