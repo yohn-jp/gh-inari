@@ -253,7 +253,7 @@
     "templates:check": "node --import tsx src/index.ts template sync --check",
     "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
     "worker:build": "node scripts/build-worker.mjs",
-    "hosted-worker:build": "node scripts/build-hosted-worker.mjs",
+    "hosted-worker:build": "node --import tsx scripts/build-hosted-worker.mjs",
     "dashboard:test": "wireit",
     "dashboard:build": "wireit",
     "worker:deploy": "wrangler deploy",
