@@ -15,8 +15,10 @@ import type { LocalAdmissionConfig } from "../local-control/config.js";
 import { LocalExecutorClient } from "../local-control/executor-client.js";
 import {
   validateLocalExecutorBranchPolicyRequest,
+  validateLocalExecutorGovernedContractRequest,
   type LocalExecutorBranchPolicyRequest,
   type LocalExecutorEvidenceRequest,
+  type LocalExecutorGovernedContractRequest,
 } from "../local-control/executor-http.js";
 import { validateExecutionIntent } from "../local-control/execution-intent.js";
 import {
@@ -37,7 +39,9 @@ import {
   authorizeExecutionIntent,
   closeSession,
   currentBranchPolicyInput,
+  currentSessionChange,
   observeRepositoryReadiness,
+  requireActiveSessionRepository,
   type AdmissionAuthorizationOptions,
 } from "./authorization.js";
 import { LOCAL_ADMISSION_DEFAULT_PORT, LocalAdmissionError, readLocalAdmissionConfiguration } from "./setup.js";
@@ -59,6 +63,7 @@ export const LOCAL_ADMISSION_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_ADMISSION_EXECUTIONS_PATH = "/v1/executions" as const;
 export const LOCAL_ADMISSION_READINESS_PATH = "/v1/readiness" as const;
 export const LOCAL_ADMISSION_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
+export const LOCAL_ADMISSION_PULL_REQUEST_CONTEXT_PATH = "/v1/pull-request-context" as const;
 export const LOCAL_ADMISSION_SESSION_ID_HEADER = "x-inari-session-id" as const;
 export const MAX_LOCAL_ADMISSION_BODY_BYTES = 1_048_576;
 
@@ -72,6 +77,7 @@ export interface AdmissionExecutorClient {
   resolveRepository?(repositoryNameWithOwner: string): Promise<RepositoryIdentity>;
   readEvidence(request: LocalExecutorEvidenceRequest): Promise<unknown>;
   readBranchPolicy?(request: LocalExecutorBranchPolicyRequest): Promise<unknown>;
+  readGovernedContract?(request: LocalExecutorGovernedContractRequest): Promise<unknown>;
   execute(execution: AuthorizedExecution): Promise<unknown>;
 }
 
@@ -127,6 +133,11 @@ function deniedFrom(
   fallback: RuntimeFailureReason,
 ): Response {
   return denied(code, message, runtimeFailureFromError(error, stage, fallback));
+}
+
+/** Executor surface missing in this composition: a bounded owner-unavailable failure. */
+class LocalExecutorUnavailable extends Error {
+  readonly code = "EXECUTOR_UNAVAILABLE";
 }
 
 function jsonContentType(value: string | null): boolean {
@@ -262,6 +273,35 @@ function createLocalAdmissionHttpHandler(
           "REPOSITORY_UNAVAILABLE",
           "Repository identity could not be resolved.",
           "repository-resolution",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
+      }
+    }
+    if (url.pathname === LOCAL_ADMISSION_PULL_REQUEST_CONTEXT_PATH) {
+      if (request.method !== "POST")
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      const parsed = await bodyJson(request);
+      if (parsed.response !== undefined) return parsed.response;
+      const contractRequest = validateLocalExecutorGovernedContractRequest(parsed.value);
+      const sessionId = request.headers.get(LOCAL_ADMISSION_SESSION_ID_HEADER);
+      if (contractRequest === undefined || sessionId === null || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId))
+        return json(400, {
+          ok: false,
+          error: { code: "INVALID_PULL_REQUEST_CONTEXT_REQUEST", message: "Pull request context request is invalid." },
+        });
+      try {
+        const authorization = authorizationOptions(options);
+        const binding = requireActiveSessionRepository(sessionId, contractRequest.repository, authorization);
+        if (options.executor.readGovernedContract === undefined) throw new LocalExecutorUnavailable();
+        const contract = await options.executor.readGovernedContract(contractRequest);
+        const change = await currentSessionChange(binding, authorization);
+        return json(200, { ok: true, contract, change });
+      } catch (error: unknown) {
+        return deniedFrom(
+          error,
+          "PULL_REQUEST_CONTEXT_UNAVAILABLE",
+          "The Session pull request context is unavailable.",
+          "implementation-admission",
           "RUNTIME_OWNER_UNAVAILABLE",
         );
       }
@@ -591,6 +631,7 @@ export async function startConfiguredLocalAdmission(
     resolveRepository: (repositoryNameWithOwner) => discoveredExecutor().resolveRepository(repositoryNameWithOwner),
     readEvidence: (request) => discoveredExecutor().readEvidence(request),
     readBranchPolicy: (request) => discoveredExecutor().readBranchPolicy(request),
+    readGovernedContract: (request) => discoveredExecutor().readGovernedContract(request),
     execute: (execution) => discoveredExecutor().execute(execution),
   };
   try {

@@ -98,6 +98,9 @@ function fakeAdmission() {
     async readBranchPolicy() {
       throw new Error("branch policy is read by the CLI entrypoint, not the launcher");
     },
+    async readPullRequestContext() {
+      throw new Error("contracts are read by PR commands, not the launcher");
+    },
     async resolveRepository(repositoryNameWithOwner) {
       return {
         host: "github.com",

@@ -19,6 +19,7 @@ export const LOCAL_EXECUTOR_EVIDENCE_PATH = "/v1/evidence" as const;
 export const LOCAL_EXECUTOR_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_EXECUTOR_HEALTH_PATH = "/health" as const;
 export const LOCAL_EXECUTOR_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
+export const LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH = "/v1/governed-contract" as const;
 export const MAX_LOCAL_EXECUTOR_BODY_BYTES = 1_048_576;
 
 export interface LocalExecutorEvidenceRequest {
@@ -37,7 +38,51 @@ export interface LocalExecutorHttpHandlerOptions {
   readonly resolveRepository?: (repositoryNameWithOwner: string) => Promise<RepositoryIdentity>;
   readonly readEvidence?: (request: LocalExecutorEvidenceRequest) => Promise<unknown>;
   readonly readBranchPolicy?: (request: LocalExecutorBranchPolicyRequest) => Promise<unknown>;
+  readonly readGovernedContract?: (request: LocalExecutorGovernedContractRequest) => Promise<unknown>;
   readonly maxBodyBytes?: number;
+}
+
+/** Repository-governed pull-request contract request (#1181). */
+export interface LocalExecutorGovernedContractRequest {
+  readonly version: 1;
+  readonly repository: SessionCertificateRepository;
+  readonly domain: "pr";
+  readonly template: string;
+}
+
+export function validateLocalExecutorGovernedContractRequest(
+  value: unknown,
+): LocalExecutorGovernedContractRequest | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.keys(value).some((key) => !["version", "repository", "domain", "template"].includes(key))
+  )
+    return undefined;
+  const record = value as Record<string, unknown>;
+  const repository = record.repository as Record<string, unknown> | null | undefined;
+  if (
+    record.version !== LOCAL_EXECUTOR_PROTOCOL_VERSION ||
+    record.domain !== "pr" ||
+    typeof record.template !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(record.template) ||
+    typeof repository !== "object" ||
+    repository === null ||
+    Array.isArray(repository) ||
+    Object.keys(repository).some((key) => !["id", "name"].includes(key)) ||
+    typeof repository.id !== "string" ||
+    !/^[1-9][0-9]{0,19}$/u.test(repository.id) ||
+    typeof repository.name !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(repository.name)
+  )
+    return undefined;
+  return Object.freeze({
+    version: LOCAL_EXECUTOR_PROTOCOL_VERSION,
+    repository: Object.freeze({ id: repository.id, name: repository.name }),
+    domain: "pr",
+    template: record.template,
+  });
 }
 
 /** Branch-policy observation request for one governed Implementation (#1179). */
@@ -357,6 +402,49 @@ export function createLocalExecutorHttpHandler(
           "EVIDENCE_UNAVAILABLE",
           "Current evidence is unavailable.",
           evidence.issue === undefined ? "trust-evidence" : "implementation-admission",
+          "RUNTIME_OWNER_UNAVAILABLE",
+        );
+      }
+    }
+
+    if (pathname === LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH) {
+      if (request.method !== "POST") {
+        return json(405, { ok: false, error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is supported." } });
+      }
+      if (!jsonContentType(request.headers.get("content-type")) || options.readGovernedContract === undefined) {
+        return json(415, {
+          ok: false,
+          error: { code: "GOVERNED_CONTRACT_UNAVAILABLE", message: "Executor governed contract read is unavailable." },
+        });
+      }
+      const body = await readBoundedBody(request, maxBodyBytes);
+      let value: unknown;
+      try {
+        value = body.kind === "body" ? (JSON.parse(body.text) as unknown) : undefined;
+      } catch {
+        value = undefined;
+      }
+      const contractRequest = validateLocalExecutorGovernedContractRequest(value);
+      if (contractRequest === undefined) {
+        return json(400, {
+          ok: false,
+          error: { code: "INVALID_GOVERNED_CONTRACT_REQUEST", message: "Governed contract request is invalid." },
+        });
+      }
+      try {
+        return json(200, {
+          ok: true,
+          component: "executor",
+          executorId: options.executorId,
+          protocol: LOCAL_EXECUTOR_PROTOCOL_VERSION,
+          contract: await options.readGovernedContract(contractRequest),
+        });
+      } catch (error: unknown) {
+        return failed(
+          error,
+          "GOVERNED_CONTRACT_UNAVAILABLE",
+          "Repository-governed contract is unavailable.",
+          "implementation-admission",
           "RUNTIME_OWNER_UNAVAILABLE",
         );
       }

@@ -26,6 +26,7 @@ import {
   executeLocalAuthorizedExecution,
   readLocalExecutorBranchPolicy,
   readLocalExecutorEvidence,
+  readLocalExecutorGovernedContract,
   requireLocalExecutorIssuerCredential,
   resolveLocalExecutorRepository,
 } from "./execution.js";
@@ -201,6 +202,7 @@ export async function startConfiguredLocalExecutor(
       resolveLocalExecutorRepository(repositoryNameWithOwner, executionEnvironment),
     readEvidence: (request) => readLocalExecutorEvidence(request, executionEnvironment),
     readBranchPolicy: (request) => readLocalExecutorBranchPolicy(request, executionEnvironment),
+    readGovernedContract: (request) => readLocalExecutorGovernedContract(request, executionEnvironment),
     ready: () => true,
     ...(transport === undefined ? {} : { transport }),
   });

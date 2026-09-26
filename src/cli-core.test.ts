@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createRepositoryBranchPolicy } from "./repository-branch-policy.js";
+import { compileRepositoryGovernedContract } from "./governance.js";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
@@ -1088,6 +1089,251 @@ test("local Change commands use the production Admission authority and its exact
     await proxy.close();
     await closeHttpServer(admissionServer);
     await closeHttpServer(executorServer);
+    await rm(configRoot, { recursive: true, force: true });
+  }
+});
+
+/** A repository-governed PR contract compiled from provider-shaped default-branch evidence (trusted provenance). */
+async function governedPullRequestContract(): Promise<unknown> {
+  const template = "## Summary\n\nSummarize the change.\n";
+  const context = {
+    hostname: "github.com",
+    host: "github.com",
+    owner: "acme",
+    name: "inari",
+    nameWithOwner: "acme/inari",
+    url: "https://github.com/acme/inari",
+    repositoryId: "123456789",
+  };
+  return compileRepositoryGovernedContract(
+    {
+      resolveRepositoryContext: async () => context,
+      getRepositoryContext: async () => context,
+      getRepositoryDefaultBranch: async () => "main",
+      findBranch: async (name: string) => ({ name, ref: `refs/heads/${name}`, sha: "7".repeat(40) }),
+      getRepositoryTree: async () => ({
+        sha: "8".repeat(40),
+        entries: [{ path: ".github/PULL_REQUEST_TEMPLATE.md", type: "blob" as const, sha: "6".repeat(40) }],
+      }),
+      getRepositoryBlob: async () => template,
+    } as never,
+    "pr",
+    "default",
+  );
+}
+
+test("#1181 local pr publish and pr create go through the selected Admission Session, never a user credential", async () => {
+  const { root: configRoot, environment } = await temporaryEnvironment();
+  const repositoryRoot = path.join(configRoot, "repository");
+  await mkdir(repositoryRoot);
+  const { baseHead, head } = await gitRepository(repositoryRoot);
+  const issue = 1029;
+  const branch = "feat/1029-local-cli-admission-path";
+  const sessionId = "sess_cli-pr-1029";
+  const local = localAuthority(environment);
+  const contract = await governedPullRequestContract();
+  const executions: { readonly operation: string; readonly request: unknown }[] = [];
+  const contractReads: unknown[] = [];
+  const projection = projectChangeFromGitHubEvidence({
+    change: { repositoryHost: "github.com", repositoryId: "123456789", rootIssue: issue },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "feat", slug: "local-cli-admission-path" },
+    baseBranch: "main",
+    evidence: {
+      issue: { status: "available", value: { number: issue, state: "open" } },
+      branches: { status: "available", value: [{ name: branch, sha: head, rootIssue: issue }] },
+      pullRequests: { status: "absent" },
+    },
+  });
+  // A published Implementation branch without a pull request: the canonical branch-only partial state.
+  assert.equal(projection.status, "partial");
+  const executorServer = createLocalExecutorHttpServer({
+    config: {
+      version: 1,
+      id: "exec_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 8765 },
+      provider: { kind: "github", credentialProfile: "default" },
+    },
+    listenPort: 0,
+    version: "0.17.0-test",
+    executorId: "exec_0123456789abcdef",
+    readEvidence: async (request) => {
+      const trust = localTrustEvidence(local.authority);
+      if (request.issue === undefined) return trust;
+      return {
+        ...trust,
+        change: projection,
+        implementation: localImplementationEvidence(issue, "123456789", branch, baseHead, projection),
+      };
+    },
+    readGovernedContract: async (request) => {
+      contractReads.push(request);
+      return contract;
+    },
+    execute: async (execution): Promise<AuthorizedExecutionResult> => {
+      executions.push({ operation: execution.operation, request: execution.request });
+      if (execution.operation === "change.show")
+        return { version: 1, operation: "change.show", status: "succeeded", projection };
+      assert.equal(execution.operation, "pullRequest.publish");
+      const request = execution.request as { readonly title: string; readonly body: string };
+      return {
+        version: 1,
+        operation: "pullRequest.publish",
+        status: "succeeded",
+        publication: {
+          version: 1,
+          kind: "pr-publication",
+          ok: true,
+          classification: "created",
+          outcome: "created",
+          pullRequest: {
+            number: 2029,
+            url: "https://github.com/acme/inari/pull/2029",
+            title: request.title,
+            body: request.body,
+            head: branch,
+            base: "main",
+          },
+          diagnostics: [],
+          effects: [{ kind: "CREATE_PULL_REQUEST", status: "succeeded" }],
+        },
+      } as unknown as AuthorizedExecutionResult;
+    },
+  });
+  await once(executorServer, "listening");
+  const executorEndpoint = `http://127.0.0.1:${(executorServer.address() as AddressInfo).port}`;
+  const admissionServer = createLocalAdmissionHttpServer(
+    {
+      version: 1,
+      id: "adm_0123456789abcdef",
+      listen: { host: "127.0.0.1", port: 0 },
+      executor: { id: "exec_0123456789abcdef", endpoint: executorEndpoint },
+    },
+    "0.17.0-test",
+    local.authority,
+    new LocalExecutorClient({ id: "exec_0123456789abcdef", endpoint: executorEndpoint }),
+    { environment },
+  );
+  await once(admissionServer, "listening");
+  const admissionEndpoint = `http://127.0.0.1:${(admissionServer.address() as AddressInfo).port}`;
+  try {
+    writeAdmissionRoute(environment, admissionEndpoint);
+    const binding = localSessionBinding(sessionId, issue, "123456789", "acme/inari", {
+      authority: local.authority,
+      keyPair: local.keyPair,
+      branch,
+    });
+    storeLocalSessionBinding(binding, environment);
+    await createLocalAdmissionClient({ endpoint: admissionEndpoint }).registerSession(binding);
+    let userCredentialUsed = false;
+    const dependencies = {
+      repositoryRoot,
+      createAdapter: (() => {
+        userCredentialUsed = true;
+        throw new Error("the local Session PR route must not construct a user-credential adapter");
+      }) as never,
+    };
+    const implementation = {
+      repositoryHost: "github.com",
+      repositoryId: "123456789",
+      repository: "acme/inari",
+      number: issue,
+    };
+    const requestPath = path.join(configRoot, "publication.json");
+    await writeFile(
+      requestPath,
+      JSON.stringify({
+        version: 1,
+        kind: "pr-publication",
+        repository: { repositoryHost: "github.com", repositoryId: "123456789", repository: "acme/inari" },
+        workIdentity: { implementation },
+        routing: {
+          version: 1,
+          kind: "integration-routing",
+          mode: "standalone",
+          role: "implementation",
+          implementation,
+          branches: { default: "main", implementation: branch },
+        },
+        expectedHead: branch,
+        expectedBase: "main",
+        headRevision: head,
+        title: "feat: local admission PR",
+        body: `Closes #${issue}`,
+        draft: true,
+      }),
+    );
+
+    // No Session selector: bounded denial before any Admission execution or provider adapter.
+    const noSelector = { ...environment };
+    delete noSelector.INARI_SESSION_ID;
+    const denied = await capture(["pr", "publish", "--from", requestPath, "--json"], noSelector, dependencies);
+    assert.notEqual(denied.exitCode, 0);
+    assert.equal(JSON.parse(denied.stdout).error.code, "ADMISSION_SESSION_SELECTOR_REQUIRED");
+    assert.equal(executions.length, 0);
+
+    const selected = { ...environment, INARI_SESSION_ID: sessionId };
+    const published = await capture(["pr", "publish", "--from", requestPath, "--json"], selected, dependencies);
+    assert.equal(published.exitCode, 0, published.stdout);
+    const publishedOutput = JSON.parse(published.stdout) as Record<string, unknown>;
+    assert.equal(publishedOutput.route, "local-admission");
+    assert.equal(publishedOutput.classification, "created");
+    assert.equal(publishedOutput.mutation, true);
+    assert.equal(executions.at(-1)?.operation, "pullRequest.publish");
+
+    executions.length = 0;
+    const created = await capture(
+      [
+        "pr",
+        "create",
+        "--field",
+        "summary=Implement the local admission route.",
+        "--title",
+        "feat: local admission PR",
+        "--head",
+        branch,
+        "--base",
+        "main",
+        "--json",
+      ],
+      selected,
+      dependencies,
+    );
+    assert.equal(created.exitCode, 0, created.stdout);
+    assert.equal(JSON.parse(created.stdout).route, "local-admission");
+    assert.deepEqual(contractReads.at(-1), {
+      version: 1,
+      repository: { id: "123456789", name: "acme/inari" },
+      domain: "pr",
+      template: "default",
+    });
+    const publication = executions.find((entry) => entry.operation === "pullRequest.publish")?.request as {
+      readonly expectedHead: string;
+      readonly expectedBase: string;
+      readonly headRevision: string;
+      readonly body: string;
+    };
+    assert.equal(publication.expectedHead, branch);
+    assert.equal(publication.expectedBase, "main");
+    assert.equal(publication.headRevision, head);
+    assert.match(publication.body, /Implement the local admission route\./u);
+
+    // A head other than the governed Implementation branch is refused before any publication.
+    executions.length = 0;
+    const wrongHead = await capture(
+      ["pr", "create", "--field", "summary=x", "--title", "t", "--head", "feat/1029-other", "--base", "main", "--json"],
+      selected,
+      dependencies,
+    );
+    assert.notEqual(wrongHead.exitCode, 0);
+    assert.equal(
+      executions.some((entry) => entry.operation === "pullRequest.publish"),
+      false,
+    );
+    assert.equal(userCredentialUsed, false);
+  } finally {
+    for (const server of [admissionServer, executorServer])
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     await rm(configRoot, { recursive: true, force: true });
   }
 });

@@ -56,6 +56,16 @@ export interface AdmissionSessionPort {
     repository: { readonly id: string; readonly name: string },
     implementation: number,
   ): Promise<unknown>;
+  /**
+   * Pull-request context read on behalf of the active Session (#1181): the
+   * repository-governed PR contract the owner compiles from the protected
+   * default branch and the Session Implementation's current Change projection.
+   */
+  readPullRequestContext(
+    repository: { readonly id: string; readonly name: string },
+    template: string,
+    sessionId: string,
+  ): Promise<{ readonly contract: unknown; readonly change: unknown }>;
 }
 
 /**

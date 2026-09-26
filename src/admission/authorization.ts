@@ -403,6 +403,55 @@ export async function observeRepositoryReadiness(
   validateTrustEvidence(evidence, subject, pinned);
 }
 
+/**
+ * A read on behalf of an active Session (#1181): the Session exists, is active
+ * and is bound to exactly the requested repository. It authorizes no effect.
+ */
+export function requireActiveSessionRepository(
+  sessionId: string,
+  repository: SessionCertificateRepository,
+  options: AdmissionAuthorizationOptions,
+): LocalSessionBinding {
+  const stored = readAdmissionSession(sessionId, options.runtimeAuthority, {
+    environment: options.environment,
+    now: options.now?.(),
+  });
+  if (stored === undefined || stored.status !== "active")
+    deny("implementation-admission", "ADMISSION_SESSION_UNAVAILABLE", "Session is unavailable.");
+  const binding = stored.record.binding;
+  if (
+    binding.repository.id !== repository.id ||
+    binding.repository.name.toLocaleLowerCase("en-US") !== repository.name.toLocaleLowerCase("en-US")
+  )
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "The read repository does not match the Session.");
+  return binding;
+}
+
+/**
+ * The current Change projection of the Session's Implementation (#1181), from
+ * the same Executor evidence and Authority/repository checks every execution
+ * uses. Read-only; it authorizes nothing.
+ */
+export async function currentSessionChange(
+  binding: LocalSessionBinding,
+  options: AdmissionAuthorizationOptions,
+): Promise<ChangeProjectionResult> {
+  if (binding.task.kind !== "issue")
+    deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "The Session has no Implementation task.");
+  const evidence = validateEvidence(
+    await options.readEvidence({
+      version: 1,
+      repository: evidenceRepository(binding.repository),
+      authorityId: binding.authority.id,
+      issue: binding.task.number,
+      implementationIssue: binding.task.number,
+    }),
+    binding,
+    options.runtimeAuthority,
+  );
+  return evidence.change;
+}
+
 /** Admits a validated Session binding against current Executor trust evidence. */
 export async function admitSession(
   binding: LocalSessionBinding,

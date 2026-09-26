@@ -39,7 +39,7 @@ import {
   readCurrentImplementationAdmissionEvidence,
 } from "../implementation-frontier-composition.js";
 import { publishPullRequest } from "../pr-publication.js";
-import { acquireRepositoryBranchPolicy } from "../governance.js";
+import { acquireRepositoryBranchPolicy, compileRepositoryGovernedContract } from "../governance.js";
 import { parseImplementationIssueBody } from "../implementation-contract.js";
 import { LocalRuntimeProfileStore } from "../local-runtime-profile.js";
 import { LocalRuntimeConfigError, readAppPrivateKey } from "../relay/local-runtime-config-credentials.js";
@@ -471,6 +471,51 @@ export async function readLocalExecutorBranchPolicy(
       }),
     ),
   );
+}
+
+/** Request for the repository-governed pull-request contract (#1181). */
+export interface LocalExecutorGovernedContractRequest {
+  readonly version: 1;
+  readonly repository: { readonly id: string; readonly name: string };
+  readonly domain: "pr";
+  readonly template: string;
+}
+
+/**
+ * Compile the repository-governed pull-request contract from the protected
+ * default branch through the Issuer read capability (#1181), so template
+ * discovery, materialization and validation need no CLI provider credential.
+ * The result is the public canonical contract only.
+ */
+export async function readLocalExecutorGovernedContract(
+  request: LocalExecutorGovernedContractRequest,
+  environment: NodeJS.ProcessEnv,
+): Promise<unknown> {
+  const identity: RepositoryIdentity = {
+    repositoryHost: "github.com",
+    repositoryId: request.repository.id,
+    nameWithOwner: request.repository.name,
+  };
+  const binding = await localExecutorIssuerBinding(identity, environment);
+  await verifyIssuerBinding(binding);
+  return binding.broker().withRepositoryReadCapability({}, async (capability) => {
+    const adapter = new GitHubAdapter({
+      repository: identity.nameWithOwner,
+      hostname: identity.repositoryHost,
+      transport: {
+        request: async (providerRequest) => {
+          if (providerRequest.method !== "GET") throw new Error("Executor contract reads cannot perform mutation.");
+          const response = await capability.transport.request({
+            hostname: providerRequest.hostname,
+            method: "GET",
+            path: providerRequest.path,
+          });
+          return { ...response, body: response.body ?? null };
+        },
+      },
+    });
+    return compileRepositoryGovernedContract(adapter, request.domain, request.template);
+  });
 }
 
 function createDelegates(

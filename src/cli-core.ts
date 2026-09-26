@@ -29,6 +29,7 @@ import {
   type CanonicalContract,
   SemanticValidationError,
 } from "./contract/index.js";
+import { validateCanonicalContract } from "./contract/ir.js";
 import { tryMaterializeSemanticArtifact } from "./contract/semantic-artifact.js";
 import {
   createActionsChangeExecutionAdapter,
@@ -130,6 +131,7 @@ import {
   type ChangeMutation,
 } from "./change-execution-port.js";
 import { tryProjectImplementationHandoff, type ImplementationHandoffProjectionOptions } from "./change-handoff.js";
+import { validateChangeProjectionResult } from "./change.js";
 import { tryProjectGoldenPathEntry } from "./golden-path-entry.js";
 import { tryProjectGoldenPathImplementation } from "./golden-path-implementation.js";
 import { projectGoldenPathRecovery } from "./golden-path-recovery.js";
@@ -149,7 +151,7 @@ import {
 } from "./semantic-issue-projection.js";
 import { tryProjectSemanticBranch } from "./semantic-branch-projection.js";
 import { tryAdaptIntegrationRouting } from "./integration-routing-adapters.js";
-import { publishPullRequest } from "./pr-publication.js";
+import { publishPullRequest, tryValidatePrPublicationRequest } from "./pr-publication.js";
 import {
   canonicalDelegatorPublicKeyJson,
   defaultDelegatorPrivateKeyPath,
@@ -2524,6 +2526,156 @@ async function runLocalAdmissionChangeCommand(
 }
 
 /**
+ * #1181: an ordinary Issue-bound PR publication selected by the local Runtime
+ * goes CLI -> Admission -> Executor -> Issuer installation credential through
+ * the existing `pullRequest.publish` ExecutionIntent. The CLI never constructs
+ * a provider adapter or asks for a user credential on this route, and a
+ * missing or invalid Session is a denial, never a fallback.
+ */
+async function publishPullRequestThroughLocalAdmission(
+  input: unknown,
+  context: LocalAdmissionSessionContext,
+): Promise<number> {
+  const validation = tryValidatePrPublicationRequest(input);
+  if (!validation.valid || validation.request === undefined) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        operation: "pr.publish",
+        route: "local-admission",
+        classification: "failed",
+        diagnostics: validation.diagnostics,
+        mutation: false,
+      }),
+    );
+    return EXIT_VALIDATION;
+  }
+  if (
+    validation.request.repository.repositoryHost !== "github.com" ||
+    validation.request.repository.repositoryId !== context.binding.repository.id
+  )
+    throw new CliError(
+      "ADMISSION_SESSION_REPOSITORY_MISMATCH",
+      "The PR publication repository does not match the selected Session.",
+    );
+  const intent = createSessionExecutionIntent(context.binding, "pullRequest.publish", input);
+  const raw = await context.client.executeIntent(intent, context.sessionId);
+  if (
+    typeof raw !== "object" ||
+    raw === null ||
+    Array.isArray(raw) ||
+    (raw as Record<string, unknown>).operation !== "pullRequest.publish"
+  )
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid PR publication result.");
+  const result = raw as {
+    readonly status?: unknown;
+    readonly publication?: { readonly ok?: boolean; readonly classification?: string };
+    readonly provenance?: { readonly app?: unknown };
+  };
+  const publication = result.publication;
+  console.log(
+    JSON.stringify({
+      ...(typeof publication === "object" && publication !== null ? publication : {}),
+      ok: result.status === "succeeded" && publication?.ok === true,
+      operation: "pr.publish",
+      route: "local-admission",
+      session: context.sessionId,
+      mutation: publication?.classification === "created",
+    }),
+  );
+  if (result.status === "succeeded" && publication?.ok === true) return 0;
+  return publication === undefined ? EXIT_VALIDATION : EXIT_REMOTE;
+}
+
+/**
+ * #1181: `pr create` on the local Runtime. The repository-governed PR contract
+ * is compiled by the Executor from the protected default branch (read on
+ * behalf of the active Session), rendered by the existing artifact kernel, and
+ * published through the Session's `pullRequest.publish` route for the governed
+ * Implementation's exact branch and provider head revision.
+ */
+async function createPullRequestThroughLocalAdmission(
+  parsed: ParsedArgs,
+  positional: string | undefined,
+  context: LocalAdmissionSessionContext,
+): Promise<number> {
+  const issue = context.binding.task.number;
+  const owned = await context.client.readPullRequestContext(
+    { id: context.binding.repository.id, name: context.binding.repository.name },
+    templateSelector(parsed, positional, "pr") ?? "default",
+    context.sessionId,
+  );
+  if (!validateCanonicalContract(owned.contract).valid)
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid governed PR contract.");
+  const current = validateChangeProjectionResult(owned.change);
+  if (current.projection === undefined)
+    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid Change projection.");
+  const contract = owned.contract as CanonicalContract;
+  const document = mergeOptionMetadata(await resolveArtifactInputDocument(parsed, contract), parsed.options);
+  const prepared = preparePullRequestArtifact(contract, document);
+  const projection = current.projection;
+  const branch = projection.canonicalBranch;
+  const headRevision = projection.candidates.branches.find((candidate) => candidate.candidate.name === branch)
+    ?.candidate.sha;
+  if (branch === undefined || headRevision === undefined)
+    throw new CliError(
+      "CHANGE_PUBLISH_HEAD_UNAVAILABLE",
+      `Implementation #${issue} has no published canonical branch head to open a pull request from.`,
+    );
+  if (prepared.artifact.head !== branch)
+    throw new CliError(
+      "ADMISSION_SESSION_BRANCH_MISMATCH",
+      `The PR head "${prepared.artifact.head}" is not the governed Implementation branch "${branch}".`,
+    );
+  const implementation = {
+    repositoryHost: "github.com",
+    repositoryId: context.binding.repository.id,
+    repository: context.binding.repository.name,
+    number: issue,
+  };
+  return publishPullRequestThroughLocalAdmission(
+    {
+      version: 1,
+      kind: "pr-publication",
+      repository: {
+        repositoryHost: "github.com",
+        repositoryId: context.binding.repository.id,
+        repository: context.binding.repository.name,
+      },
+      workIdentity: { implementation },
+      routing: {
+        version: 1,
+        kind: "integration-routing",
+        mode: "standalone",
+        role: "implementation",
+        implementation,
+        branches: { default: prepared.artifact.base, implementation: branch },
+      },
+      expectedHead: branch,
+      expectedBase: prepared.artifact.base,
+      headRevision,
+      title: prepared.artifact.title,
+      body: prepared.artifact.body,
+      draft: true,
+    },
+    context,
+  );
+}
+
+/** Whether a PR publication request is an ordinary Issue-bound Implementation publication. */
+function implementationPublication(input: unknown): boolean {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return false;
+  const identity = (input as Record<string, unknown>).workIdentity;
+  return (
+    typeof identity === "object" &&
+    identity !== null &&
+    !Array.isArray(identity) &&
+    Object.hasOwn(identity, "implementation") &&
+    !Object.hasOwn(identity, "release")
+  );
+}
+
+/**
  * `change publish` derives the bounded tree delta from a local commit and
  * submits the exact canonical #466 `branch.advance` request through the
  * Session/App path (#467). It never performs a raw `git push` and never
@@ -3567,6 +3719,13 @@ async function runArtifactCommand(
     }
 
     rejectGovernedPolicyOverride(parsed.options.policy);
+    const localEnvironment = dependencies.environment ?? process.env;
+    if (domain === "pr" && configuredLocalAdmissionTopology(localEnvironment))
+      return createPullRequestThroughLocalAdmission(
+        parsed,
+        rest[0],
+        requireLocalAdmissionSessionContext(root, parsed, localEnvironment),
+      );
     const adapter = createAdapter(dependencies, root, parsed.options.repository);
     await adapter.resolveRepositoryContext();
     const contract = await compileRepositoryGovernedContract(
@@ -3738,6 +3897,14 @@ async function runPrPublicationCommand(
   if (typeof parsed.options.from !== "string")
     throw new CliError("INPUT_REQUIRED", "PR publication requires --from <path>.", "--from");
   const input = await readJsonValue(parsed.options.from, "--from");
+  const environment = dependencies.environment ?? process.env;
+  // #1181: the local Runtime owns ordinary Issue-bound publication; release/operator
+  // publications keep their existing direct contract.
+  if (configuredLocalAdmissionTopology(environment) && implementationPublication(input))
+    return publishPullRequestThroughLocalAdmission(
+      input,
+      requireLocalAdmissionSessionContext(root, parsed, environment),
+    );
   const adapter = createAdapter(dependencies, root, parsed.options.repository);
   const result = await publishPullRequest(input, new GitHubPrPublicationAdapter(adapter));
   console.log(JSON.stringify({ ...result, operation: "pr.publish", mutation: result.classification === "created" }));

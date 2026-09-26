@@ -29,6 +29,7 @@ export const LOCAL_ADMISSION_CLIENT_SESSIONS_PATH = "/v1/sessions" as const;
 export const LOCAL_ADMISSION_CLIENT_REPOSITORY_PATH = "/v1/repository" as const;
 export const LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH = "/v1/executions" as const;
 export const LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH = "/v1/branch-policy" as const;
+export const LOCAL_ADMISSION_CLIENT_PULL_REQUEST_CONTEXT_PATH = "/v1/pull-request-context" as const;
 export const LOCAL_ADMISSION_CLIENT_SESSION_ID_HEADER = "x-inari-session-id" as const;
 
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -36,7 +37,7 @@ const MAX_SESSION_BINDING_BYTES = 16 * 1024;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 
 export interface LocalAdmissionFailureDetails {
-  readonly endpoint: "repository" | "branch-policy" | "session" | "execution";
+  readonly endpoint: "repository" | "branch-policy" | "pull-request-context" | "session" | "execution";
   readonly status: number;
   readonly stage?: RuntimeFailure["stage"];
   readonly reason?: RuntimeFailure["reason"];
@@ -75,6 +76,7 @@ const FAILURE_CATEGORY_CODES: Readonly<Record<RuntimeFailureCategory, string>> =
 function endpointFor(path: string): LocalAdmissionFailureDetails["endpoint"] {
   if (path === LOCAL_ADMISSION_CLIENT_REPOSITORY_PATH) return "repository";
   if (path === LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH) return "branch-policy";
+  if (path === LOCAL_ADMISSION_CLIENT_PULL_REQUEST_CONTEXT_PATH) return "pull-request-context";
   if (path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH) return "execution";
   return "session";
 }
@@ -283,6 +285,33 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
         );
       }
       return envelope.branchPolicy;
+    },
+    async readPullRequestContext(
+      repository: { readonly id: string; readonly name: string },
+      template: string,
+      sessionId: string,
+    ) {
+      if (!SESSION_ID_PATTERN.test(sessionId)) {
+        throw new LocalAdmissionClientError("ADMISSION_SESSION_SELECTOR_INVALID", "Session selector is invalid.");
+      }
+      const envelope = await request(
+        LOCAL_ADMISSION_CLIENT_PULL_REQUEST_CONTEXT_PATH,
+        "POST",
+        {
+          version: LOCAL_ADMISSION_CLIENT_PROTOCOL_VERSION,
+          repository: { id: repository.id, name: repository.name },
+          domain: "pr",
+          template,
+        },
+        sessionId,
+      );
+      if (!isRecord(envelope.contract) || !isRecord(envelope.change)) {
+        throw new LocalAdmissionClientError(
+          "ADMISSION_RESPONSE_INVALID",
+          "Admission returned an invalid pull request context.",
+        );
+      }
+      return { contract: envelope.contract, change: envelope.change };
     },
     async executeIntent(intent: ExecutionIntent, sessionId: string) {
       if (!SESSION_ID_PATTERN.test(sessionId)) {
