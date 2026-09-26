@@ -1,6 +1,6 @@
 {
   "name": "gh-inari",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "description": "Deterministic GitHub governance for repository-governed Issues, Changes, pull requests, and agent workflows.",
   "type": "module",
   "bin": {
