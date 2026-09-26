@@ -29,6 +29,7 @@ import {
 } from "./codec.js";
 import { validateEd25519PublicJwk, type Ed25519PublicJwk } from "./ed25519-jwk.js";
 import {
+  CAPABILITY_KINDS,
   MAX_ISSUE_NUMBER,
   capabilityClaimIssueNumber,
   capabilityClaimWithinCeiling,
@@ -56,6 +57,8 @@ const MAX_REPOSITORY_NAME_LENGTH = 255 as const;
 const REPOSITORY_NAME_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 
 export const MAX_CAPABILITIES = 16 as const;
+/** change.* kinds a Session may hold per same-repository Source of a signed Implementation (#1213). */
+const CHANGE_CAPABILITY_KIND_COUNT = CAPABILITY_KINDS.filter((kind) => kind.startsWith("change.")).length;
 
 /** 2100-01-01T00:00:00Z; a sanity ceiling against absurd/overflowing Unix-time claims, not a policy default. */
 export const MAX_UNIX_TIME_SECONDS = 4_102_444_800 as const;
@@ -429,15 +432,42 @@ export function validateSessionCertificatePayload(
     }
   }
 
+  // #1213: a signed Implementation binding that carries the current contract
+  // Source set bounds change.* claims to its same-repository Sources plus the
+  // Implementation task itself (the compatibility authority for the
+  // Implementation's own PR publication and branch-side fallback, never a
+  // Change root). Without that set a change.* claim must target the task.
+  const sources = implementationBinding?.sources;
+  const sourceIssues =
+    sources === undefined || implementationBinding === undefined
+      ? undefined
+      : new Set(
+          sources
+            .filter(
+              (source) =>
+                source.repositoryHost.toLowerCase() === implementationBinding.repository.repositoryHost.toLowerCase() &&
+                source.repositoryId === implementationBinding.repository.repositoryId,
+            )
+            .map((source) => source.number),
+        );
+  // Source-rooted change.* claims are bounded by the exact signed Source set
+  // (one claim per change.* kind and Source, duplicates rejected), not by the
+  // Session-wide MAX_CAPABILITIES, which bounds every other claim.
+  const isSourceClaim = (claim: CapabilityClaim): boolean => {
+    const issue = capabilityClaimIssueNumber(claim);
+    return issue !== undefined && sourceIssues?.has(issue) === true;
+  };
+  const maxCapabilities = MAX_CAPABILITIES + CHANGE_CAPABILITY_KIND_COUNT * (sourceIssues?.size ?? 0);
+
   let capabilities: readonly CapabilityClaim[] | undefined;
   if (requireProperty(input, "capabilities", path, diagnostics)) {
     const value = input.capabilities;
-    if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CAPABILITIES) {
+    if (!Array.isArray(value) || value.length === 0 || value.length > maxCapabilities) {
       diagnostics.push(
         createDiagnostic(
           "SESSION_CERTIFICATE_INVALID_CAPABILITIES",
           `${path}.capabilities`,
-          `capabilities must contain 1-${MAX_CAPABILITIES} capability claims.`,
+          `capabilities must contain 1-${maxCapabilities} capability claims.`,
         ),
       );
     } else {
@@ -468,6 +498,16 @@ export function validateSessionCertificatePayload(
         seen.add(fingerprint);
         normalized.push(claimResult.value);
       });
+      if (ok && normalized.filter((claim) => !isSourceClaim(claim)).length > MAX_CAPABILITIES) {
+        diagnostics.push(
+          createDiagnostic(
+            "SESSION_CERTIFICATE_INVALID_CAPABILITIES",
+            `${path}.capabilities`,
+            `capabilities must contain at most ${MAX_CAPABILITIES} claims outside the signed Implementation Source set.`,
+          ),
+        );
+        ok = false;
+      }
       if (ok) capabilities = Object.freeze(normalized);
     }
   }
@@ -475,6 +515,18 @@ export function validateSessionCertificatePayload(
   if (task !== undefined && capabilities !== undefined) {
     capabilities.forEach((claim, index) => {
       const issue = capabilityClaimIssueNumber(claim);
+      if (sourceIssues !== undefined) {
+        if (issue !== undefined && issue !== task.number && !sourceIssues.has(issue)) {
+          diagnostics.push(
+            createDiagnostic(
+              "SESSION_CERTIFICATE_TASK_SCOPE_MISMATCH",
+              `${path}.capabilities[${index}].issue`,
+              "A change.* capability's issue must be the task or a same-repository Source of the bound Implementation.",
+            ),
+          );
+        }
+        return;
+      }
       if (issue !== undefined && issue !== task.number) {
         diagnostics.push(
           createDiagnostic(
