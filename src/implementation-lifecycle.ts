@@ -8,7 +8,7 @@
  * assertion.
  */
 
-import { issueReferenceKey } from "./contract/issue-reference.js";
+import { issueReferenceKey, type IssueReference } from "./contract/issue-reference.js";
 import {
   inspectImplementationLifecycle,
   tryVerifyImplementationAuthorization,
@@ -25,14 +25,17 @@ import {
   tryProjectImplementationChangeIdentity,
   type ImplementationChangeIdentity,
 } from "./implementation-change-identity.js";
+import { observeImplementationTaskTermination } from "./implementation-task-termination.js";
 
 export const IMPLEMENTATION_LIFECYCLE_TERMINAL_STATUSES = Object.freeze(["completed", "aborted"] as const);
 export type ImplementationLifecycleTerminalStatus = (typeof IMPLEMENTATION_LIFECYCLE_TERMINAL_STATUSES)[number];
 
 /** The evidence accepted by the lifecycle composition seam. */
 export interface ImplementationLifecycleInput extends ImplementationConformanceInput {
-  /** Raw #679 identity inputs, with the bound Change state reread as ABORTED. */
+  /** Raw #679 identity inputs, read only as historical Implementation-root Change evidence. */
   readonly changeIdentity?: unknown;
+  /** Raw current repository-owned task-termination read, when available. */
+  readonly taskTermination?: unknown;
 }
 
 export interface ImplementationLifecycleViolation {
@@ -41,6 +44,13 @@ export interface ImplementationLifecycleViolation {
   readonly message: string;
   readonly expected?: unknown;
   readonly actual?: unknown;
+}
+
+export interface ImplementationLifecycleHistoricalTermination {
+  readonly classification: "historical-only";
+  readonly source: "implementation-root-change";
+  readonly implementation: IssueReference;
+  readonly authorizationDigest: string;
 }
 
 /**
@@ -57,6 +67,7 @@ export interface ImplementationLifecycleResult {
   readonly readiness?: ImplementationAuthorizationInspectionResult["readiness"];
   readonly authorized: boolean;
   readonly current: boolean;
+  readonly historicalTermination?: ImplementationLifecycleHistoricalTermination;
   readonly violations: readonly ImplementationLifecycleViolation[];
 }
 
@@ -76,6 +87,7 @@ const INPUT_KEYS = new Set([
   "pullRequest",
   "executionEvidence",
   "changeIdentity",
+  "taskTermination",
 ]);
 
 const AUTHORIZATION_KEYS = new Set([
@@ -142,6 +154,7 @@ function fromAuthorization(
     readonly authorized?: boolean;
     readonly current?: boolean;
     readonly valid?: boolean;
+    readonly historicalTermination?: ImplementationLifecycleHistoricalTermination;
   } = {},
 ): ImplementationLifecycleResult {
   const violations = sortedViolations([...result.violations, ...extraViolations]);
@@ -158,6 +171,9 @@ function fromAuthorization(
     ...(result.readiness === undefined ? {} : { readiness: result.readiness }),
     authorized: overrides.authorized ?? result.authorized,
     current: overrides.current ?? result.current,
+    ...(overrides.historicalTermination === undefined
+      ? {}
+      : { historicalTermination: overrides.historicalTermination }),
     violations,
   };
 }
@@ -210,13 +226,16 @@ function changeAbortBinding(
   value: RecordValue,
   authorization: ImplementationAuthorizationRecord,
   violations: ImplementationLifecycleViolation[],
-): "absent" | "valid" | "invalid" {
-  if (!hasOwn(value, "changeIdentity")) return "absent";
+):
+  | { readonly status: "absent" }
+  | { readonly status: "historical"; readonly evidence: ImplementationLifecycleHistoricalTermination }
+  | { readonly status: "invalid" } {
+  if (!hasOwn(value, "changeIdentity")) return { status: "absent" };
   const projected = tryProjectImplementationChangeIdentity(value.changeIdentity);
   if (!projected.valid || projected.identity === undefined) {
     for (const diagnostic of projected.diagnostics)
       addViolation(violations, "IMPLEMENTATION_LIFECYCLE_TERMINATION_INVALID", diagnostic.path, diagnostic.message);
-    return "invalid";
+    return { status: "invalid" };
   }
   const identity: ImplementationChangeIdentity = projected.identity;
   let bound = true;
@@ -256,7 +275,17 @@ function changeAbortBinding(
       "Aborted Session identity does not match the current authorization digest.",
     );
   }
-  return bound ? "valid" : "invalid";
+  return bound
+    ? {
+        status: "historical",
+        evidence: {
+          classification: "historical-only",
+          source: "implementation-root-change",
+          implementation: identity.implementation,
+          authorizationDigest: authorization.governedBodyDigest,
+        },
+      }
+    : { status: "invalid" };
 }
 
 /**
@@ -296,23 +325,63 @@ export function tryProjectImplementationLifecycle(input: unknown): Implementatio
     return fromAuthorization(authorization, diagnostics);
 
   // Precedence is deliberate: stale/superseded authorization is resolved
-  // above; a valid bound abort terminates current authority next; completion
-  // is the last and most demanding outcome.
+  // above; only the current repository-owned termination record can abort a
+  // task; completion is the last and most demanding outcome.
   const terminalViolations: ImplementationLifecycleViolation[] = [...diagnostics];
-  const abortBinding = changeAbortBinding(input, authorization.authorization, terminalViolations);
-  if (abortBinding === "valid" && terminalViolations.length === 0)
+  const changeBinding = changeAbortBinding(input, authorization.authorization, terminalViolations);
+  const historicalTermination = changeBinding.status === "historical" ? changeBinding.evidence : undefined;
+  if (changeBinding.status === "invalid") return fromAuthorization(authorization, terminalViolations, { valid: false });
+
+  let taskTerminationStatus: "absent" | "present" | "unavailable" | "invalid" = "absent";
+  if (hasOwn(input, "taskTermination")) {
+    const observation = observeImplementationTaskTermination(input.taskTermination, authorization.authorization);
+    taskTerminationStatus = observation.status;
+    if (observation.status === "unavailable" || observation.status === "invalid") {
+      for (const violation of observation.status === "invalid" ? observation.violations : [])
+        addViolation(
+          terminalViolations,
+          "IMPLEMENTATION_LIFECYCLE_TERMINATION_INVALID",
+          violation.path,
+          violation.message,
+        );
+      if (observation.status === "unavailable")
+        addViolation(
+          terminalViolations,
+          "IMPLEMENTATION_LIFECYCLE_TERMINATION_UNAVAILABLE",
+          "$.taskTermination",
+          "Current task-termination evidence is unavailable.",
+        );
+      return fromAuthorization(authorization, terminalViolations, {
+        valid: false,
+        ...(historicalTermination === undefined ? {} : { historicalTermination }),
+      });
+    }
+  }
+  if (taskTerminationStatus === "present" && terminalViolations.length === 0)
     return fromAuthorization(authorization, terminalViolations, {
       status: "aborted",
       authorized: false,
       current: false,
       valid: true,
+      ...(historicalTermination === undefined ? {} : { historicalTermination }),
     });
-  if (abortBinding === "invalid") return fromAuthorization(authorization, terminalViolations, { valid: false });
+
+  // A historical Implementation-root abort cannot revive that old execution
+  // authority. A current authoritative task read can re-establish that the
+  // task has no termination record; the historical Change alone cannot.
+  const historicalAuthorityOverrides =
+    historicalTermination !== undefined && !hasOwn(input, "taskTermination")
+      ? { authorized: false, current: false }
+      : {};
 
   // A lifecycle query may legitimately ask only whether authorization is
   // current. Completion is considered only when the complete conformance
   // reread is present; partial evidence never becomes a terminal assertion.
-  if (!hasCompleteConformanceInput(input)) return fromAuthorization(authorization, terminalViolations);
+  if (!hasCompleteConformanceInput(input))
+    return fromAuthorization(authorization, terminalViolations, {
+      ...historicalAuthorityOverrides,
+      ...(historicalTermination === undefined ? {} : { historicalTermination }),
+    });
 
   const conformance = tryVerifyImplementationConformance(conformanceInput(input));
   const conformanceViolations = conformance.diagnostics.map((diagnostic) => ({
@@ -337,6 +406,7 @@ export function tryProjectImplementationLifecycle(input: unknown): Implementatio
       authorized: true,
       current: true,
       valid: true,
+      ...(historicalTermination === undefined ? {} : { historicalTermination }),
     });
 
   if (conformance.status === "stale-invalid-authorization")
@@ -345,10 +415,12 @@ export function tryProjectImplementationLifecycle(input: unknown): Implementatio
       authorized: false,
       current: false,
       valid: false,
+      ...(historicalTermination === undefined ? {} : { historicalTermination }),
     });
 
   return fromAuthorization(authorization, [...terminalViolations, ...conformanceViolations], {
     valid: false,
+    ...(historicalTermination === undefined ? {} : { historicalTermination }),
   });
 }
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { IssueReference } from "./contract/issue-reference.js";
 import {
   IMPLEMENTATION_CONTRACT_VERSION,
   IMPLEMENTATION_KIND,
@@ -12,6 +13,10 @@ import {
   IMPLEMENTATION_EXECUTION_EVIDENCE_VERSION,
 } from "./implementation-execution-evidence.js";
 import { tryProjectImplementationLifecycle } from "./implementation-lifecycle.js";
+import {
+  IMPLEMENTATION_TASK_TERMINATION_KIND,
+  IMPLEMENTATION_TASK_TERMINATION_VERSION,
+} from "./implementation-task-termination.js";
 
 const repository = {
   repositoryHost: "github.com",
@@ -68,9 +73,9 @@ function contract(overrides: Record<string, unknown> = {}): Record<string, unkno
 
 const body = renderImplementationIssueBody(parseImplementationContract(contract()));
 
-function authorization(): ImplementationAuthorizationRecord {
+function authorization(target: IssueReference = implementation): ImplementationAuthorizationRecord {
   return authorizeImplementation({
-    implementation,
+    implementation: target,
     body,
     repository,
     base,
@@ -144,6 +149,37 @@ function executionEvidence(record: ImplementationAuthorizationRecord, overrides:
     headRevision: "head-revision",
     targetedTests: [],
     ...overrides,
+  };
+}
+
+function taskTerminationRecord(
+  record: ImplementationAuthorizationRecord,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    version: IMPLEMENTATION_TASK_TERMINATION_VERSION,
+    kind: IMPLEMENTATION_TASK_TERMINATION_KIND,
+    repository: record.repository,
+    implementation: record.implementation,
+    authorizationDigest: record.governedBodyDigest,
+    base: record.base,
+    ...overrides,
+  };
+}
+
+function taskTerminationRead(
+  record: ImplementationAuthorizationRecord,
+  terminationOverrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    status: "authoritative",
+    provenance: { source: "lifecycle-test" },
+    records: [
+      {
+        record: taskTerminationRecord(record, terminationOverrides),
+        provenance: { source: "lifecycle-test-record" },
+      },
+    ],
   };
 }
 
@@ -248,7 +284,7 @@ test("explicit supersession outranks completion and preserves the historical aut
   assert.deepEqual(result.authorization, record);
 });
 
-test("a bound Change/session abort deterministically removes current execution authority", () => {
+test("a bound Implementation-root Change abort is classified as historical only", () => {
   const record = authorization();
   const result = tryProjectImplementationLifecycle({
     authorization: record,
@@ -258,10 +294,116 @@ test("a bound Change/session abort deterministically removes current execution a
     changeIdentity: abortedChangeIdentity(record),
   });
   assert.equal(result.valid, true);
+  assert.equal(result.status, "authorized");
+  assert.equal(result.authorized, false);
+  assert.equal(result.current, false);
+  assert.deepEqual(result.historicalTermination, {
+    classification: "historical-only",
+    source: "implementation-root-change",
+    implementation,
+    authorizationDigest: record.governedBodyDigest,
+  });
+  assert.deepEqual(result.authorization, record);
+
+  const currentRead = tryProjectImplementationLifecycle({
+    authorization: record,
+    issue: { reference: implementation, body },
+    repository,
+    base,
+    changeIdentity: abortedChangeIdentity(record),
+    taskTermination: {
+      status: "authoritative",
+      provenance: { source: "lifecycle-test" },
+      records: [],
+    },
+  });
+  assert.equal(currentRead.valid, true);
+  assert.equal(currentRead.status, "authorized");
+  assert.equal(currentRead.authorized, true);
+  assert.equal(currentRead.current, true);
+  assert.equal(currentRead.historicalTermination?.classification, "historical-only");
+});
+
+test("only a valid current bound task-termination record projects Implementation aborted", () => {
+  const record = authorization();
+  const result = tryProjectImplementationLifecycle(
+    lifecycleInput(record, { taskTermination: taskTerminationRead(record) }),
+  );
+  assert.equal(result.valid, true);
   assert.equal(result.status, "aborted");
   assert.equal(result.authorized, false);
   assert.equal(result.current, false);
-  assert.deepEqual(result.authorization, record);
+
+  const authoritativeAbsence = tryProjectImplementationLifecycle({
+    authorization: record,
+    issue: { reference: implementation, body },
+    repository,
+    base,
+    taskTermination: {
+      status: "authoritative",
+      provenance: { source: "lifecycle-test" },
+      records: [],
+    },
+  });
+  assert.equal(authoritativeAbsence.valid, true);
+  assert.equal(authoritativeAbsence.status, "authorized");
+});
+
+test("unavailable or mismatched task-termination evidence cannot project aborted", () => {
+  const record = authorization();
+  const unavailable = tryProjectImplementationLifecycle({
+    authorization: record,
+    issue: { reference: implementation, body },
+    repository,
+    base,
+    taskTermination: { status: "unavailable", provenance: { source: "lifecycle-test" } },
+  });
+  assert.equal(unavailable.valid, false);
+  assert.notEqual(unavailable.status, "aborted");
+  assert.ok(
+    unavailable.violations.some((violation) => violation.code === "IMPLEMENTATION_LIFECYCLE_TERMINATION_UNAVAILABLE"),
+  );
+
+  const mismatched = tryProjectImplementationLifecycle(
+    lifecycleInput(record, {
+      taskTermination: taskTerminationRead(record, { authorizationDigest: "a".repeat(64) }),
+    }),
+  );
+  assert.equal(mismatched.valid, false);
+  assert.notEqual(mismatched.status, "aborted");
+  assert.ok(
+    mismatched.violations.some((violation) => violation.code === "IMPLEMENTATION_LIFECYCLE_TERMINATION_INVALID"),
+  );
+});
+
+test("one Implementation task termination does not terminate a sibling task", () => {
+  const terminated = authorization(implementation);
+  const sibling = { ...repository, number: 687 } as const;
+  const siblingAuthorization = authorization(sibling);
+  const siblingBody = renderImplementationIssueBody(parseImplementationContract(contract()));
+  const siblingWithUnrelatedTermination = tryProjectImplementationLifecycle({
+    authorization: siblingAuthorization,
+    issue: { reference: sibling, body: siblingBody },
+    repository,
+    base,
+    taskTermination: taskTerminationRead(terminated),
+  });
+  assert.equal(siblingWithUnrelatedTermination.valid, false);
+  assert.notEqual(siblingWithUnrelatedTermination.status, "aborted");
+
+  const siblingWithoutTermination = tryProjectImplementationLifecycle({
+    authorization: siblingAuthorization,
+    issue: { reference: sibling, body: siblingBody },
+    repository,
+    base,
+    taskTermination: {
+      status: "authoritative",
+      provenance: { source: "lifecycle-test" },
+      records: [],
+    },
+  });
+  assert.equal(siblingWithoutTermination.valid, true);
+  assert.equal(siblingWithoutTermination.status, "authorized");
 });
 
 test("completion assertions and abort replays cannot manufacture terminal authority", () => {
@@ -285,6 +427,10 @@ test("completion assertions and abort replays cannot manufacture terminal author
     changeIdentity: abortedChangeIdentity(record),
   });
   assert.deepEqual(replay, first);
+  assert.equal(first.status, "authorized");
+  assert.equal(first.authorized, false);
+  assert.equal(first.current, false);
+  assert.equal(first.historicalTermination?.classification, "historical-only");
 });
 
 test("contradictory abort evidence cannot be bypassed by otherwise conformant evidence", () => {
