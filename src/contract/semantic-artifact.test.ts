@@ -7,7 +7,7 @@ import {
   tryMaterializeSemanticArtifact,
   SemanticArtifactMaterializationError,
 } from "./semantic-artifact.js";
-import type { ArtifactContractProvenance } from "./ir.js";
+import { JSON_SCHEMA_DIALECT, type ArtifactContractProvenance } from "./ir.js";
 
 const provenance: ArtifactContractProvenance = {
   authority: "repository-default-branch",
@@ -94,6 +94,47 @@ const issueRelationContract = {
   properties: {
     implements: { presence: "optional", authority: { kind: "supplied" } },
     labels: { presence: "unused" },
+  },
+} satisfies Record<string, unknown>;
+
+const schemaNativeMaterializationContract = {
+  version: "2",
+  kind: "issue",
+  id: "schema-native-materialization",
+  schema: {
+    $schema: JSON_SCHEMA_DIALECT,
+    type: "object",
+    properties: {
+      payload: {
+        type: "object",
+        properties: {
+          headline: { type: "string", minLength: 3 },
+          checks: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              properties: { label: { type: "string", minLength: 2 } },
+              required: ["label"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["headline", "checks"],
+        additionalProperties: false,
+      },
+      title: { type: "string", minLength: 1 },
+      derivedTitle: { type: "string", const: "Title: Artifact" },
+      fixed: { type: "object", const: { mode: "main" } },
+    },
+    required: ["payload", "title", "derivedTitle", "fixed"],
+    additionalProperties: false,
+  },
+  bindings: {
+    "/payload": { authority: { kind: "supplied" } },
+    "/title": { authority: { kind: "supplied" } },
+    "/derivedTitle": { authority: { kind: "derived", derive: { op: "format", template: "Title: {title}" } } },
+    "/fixed": { authority: { kind: "fixed", value: { mode: "main" } } },
   },
 } satisfies Record<string, unknown>;
 
@@ -371,4 +412,145 @@ test("throws a structured error on failed materialization", () => {
       return true;
     },
   );
+});
+
+test("materializes nested schema-native values and validates fixed and derived values against the source schema", () => {
+  const contract = effective(schemaNativeMaterializationContract);
+  const input = {
+    payload: { headline: "Stable output", checks: [{ label: "CI" }] },
+    title: "Artifact",
+  };
+  const artifact = materializeSemanticArtifact(contract, input);
+
+  assert.deepEqual(artifact.values, {
+    derivedTitle: "Title: Artifact",
+    fixed: { mode: "main" },
+    payload: { headline: "Stable output", checks: [{ label: "CI" }] },
+    title: "Artifact",
+  });
+  assert.deepEqual(artifact.fields, {});
+
+  const invalidDerived = effective({
+    ...schemaNativeMaterializationContract,
+    id: "schema-native-invalid-derived",
+    bindings: {
+      ...schemaNativeMaterializationContract.bindings,
+      "/derivedTitle": { authority: { kind: "derived", derive: { op: "format", template: "Other: {title}" } } },
+    },
+  });
+  const derivedFailure = tryMaterializeSemanticArtifact(invalidDerived, input);
+  assert.deepEqual(
+    derivedFailure.violations.map(({ code, path }) => ({ code, path })),
+    [{ code: "OUTPUT_INVALID", path: "/derivedTitle" }],
+  );
+
+  const invalidFixed = effective({
+    ...schemaNativeMaterializationContract,
+    id: "schema-native-invalid-fixed",
+    bindings: {
+      ...schemaNativeMaterializationContract.bindings,
+      "/fixed": { authority: { kind: "fixed", value: { mode: "wrong" } } },
+    },
+  });
+  const fixedFailure = tryMaterializeSemanticArtifact(invalidFixed, input);
+  assert.deepEqual(
+    fixedFailure.violations.map(({ code, path }) => ({ code, path })),
+    [{ code: "OUTPUT_INVALID", path: "/fixed" }],
+  );
+
+  const authorityFailure = tryMaterializeSemanticArtifact(contract, { ...input, fixed: "wrong shape" });
+  assert.deepEqual(
+    authorityFailure.violations.map(({ code }) => code),
+    ["INPUT_AUTHORITY"],
+  );
+});
+
+test("bounds schema-native nested-value diagnostics from the shared runtime", () => {
+  const contract = effective(schemaNativeMaterializationContract);
+  const checks = Array.from({ length: 24 }, () => ({ label: "x" }));
+  const result = tryMaterializeSemanticArtifact(contract, {
+    payload: { headline: "Stable output", checks },
+    title: "Artifact",
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations.length, 16);
+  assert.ok(result.violations.every((violation) => violation.code === "INPUT_TYPE"));
+  assert.ok(result.violations.every((violation) => violation.path.length <= 256));
+  assert.ok(result.violations.every((violation) => !violation.message.includes('"x"')));
+
+  const unknown = tryMaterializeSemanticArtifact(contract, { ["x".repeat(10_000)]: "untrusted key" });
+  assert.equal(unknown.violations.length, 1);
+  assert.equal(unknown.violations[0]?.code, "INPUT_UNKNOWN_FIELD");
+  assert.ok((unknown.violations[0]?.path.length ?? 0) <= 256);
+  assert.ok((unknown.violations[0]?.message.length ?? 0) <= 256);
+});
+
+test("schema-native materialization preserves unresolved platform-owned values", () => {
+  const contract = effective({
+    version: "2",
+    kind: "issue",
+    id: "schema-native-platform",
+    schema: {
+      $schema: JSON_SCHEMA_DIALECT,
+      type: "object",
+      properties: { labels: { type: "array", items: { type: "string" } } },
+      required: ["labels"],
+      additionalProperties: false,
+    },
+    bindings: { "/labels": { authority: { kind: "platform" } } },
+  });
+
+  assert.deepEqual(materializeSemanticArtifact(contract, {}).values, {});
+  assert.deepEqual(
+    tryMaterializeSemanticArtifact(contract, { labels: ["override"] }).violations.map(({ code }) => code),
+    ["INPUT_AUTHORITY"],
+  );
+});
+
+test("schema-native relation values retain IssueReference normalization and identity checks", () => {
+  const referenceSchema = {
+    type: "object",
+    properties: {
+      repositoryHost: { type: "string", minLength: 1, pattern: "^[^\\s/]+$" },
+      repositoryId: { type: "string", pattern: "^[1-9][0-9]{0,19}$" },
+      repository: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$" },
+      number: { type: "integer", minimum: 1 },
+    },
+    required: ["repositoryHost", "repositoryId", "number"],
+    additionalProperties: false,
+  };
+  const contract = effective({
+    version: "2",
+    kind: "pull_request",
+    id: "schema-native-relation",
+    schema: {
+      $schema: JSON_SCHEMA_DIALECT,
+      type: "object",
+      properties: { implements: { type: "array", items: referenceSchema, uniqueItems: true } },
+      additionalProperties: false,
+    },
+    bindings: { "/implements": { authority: { kind: "supplied" } } },
+  });
+  const rawReference = {
+    repositoryHost: "GITHUB.COM",
+    repositoryId: "1234",
+    repository: "YOHN-JP/GH-INARI",
+    number: 283,
+  };
+  const artifact = materializeSemanticArtifact(contract, { implements: [rawReference] });
+  assert.deepEqual(artifact.relations?.implements, [
+    { repositoryHost: "github.com", repositoryId: "1234", repository: "yohn-jp/gh-inari", number: 283 },
+  ]);
+
+  for (const duplicateValues of [
+    [rawReference, rawReference],
+    [rawReference, { ...rawReference, repositoryHost: "github.com", repository: "yohn-jp/gh-inari" }],
+  ]) {
+    const duplicate = tryMaterializeSemanticArtifact(contract, { implements: duplicateValues });
+    assert.deepEqual(
+      duplicate.violations.map(({ code }) => code),
+      ["INPUT_DUPLICATE"],
+    );
+  }
 });
