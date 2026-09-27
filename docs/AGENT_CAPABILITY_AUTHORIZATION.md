@@ -393,6 +393,29 @@ identifies the operator; it does not by itself grant Source or Epic
 integration publication authority, and the local path does not require GitHub
 OAuth.
 
+The local operator subject is the immutable key ID of an operator public key
+enrolled in the Runtime owner's versioned operator-key registry. The Runtime
+owner controls enrollment and revocation. A local CLI or browser proves
+possession of the matching operator-held private key by signing a fresh
+Runtime challenge. The challenge binds the Runtime audience, a nonce, time,
+and the requested authentication context. The Runtime owner authentication
+seam verifies the signature against the enrolled public key and rejects
+expired, replayed, wrong-audience, or context-mismatched proofs. It passes
+Admission bounded authenticated subject evidence for the verified key ID and
+challenge context, not the operator private key or a reusable credential. The
+private key remains with the operator; Console may relay the challenge and
+signed response but does not own or persist the key or other operator
+credentials.
+
+Authentication proves the enrolled subject only. Before every privileged
+operation, Runtime admission rereads current enrollment and revocation state
+and separately evaluates the current exact operation-to-target grant and
+repository policy. Missing, stale, revoked, or mismatched evidence denies.
+Loopback, an operating-system username, a process label, an anonymous
+Setup/Console bearer, and GitHub visibility do not establish the local
+operator subject. This proof creates no Source/Epic delegation claim and does
+not change the separate provider App credential boundary.
+
 ## 9. Session Certificate V1 reference
 
 This section preserves the existing representation contract for bounded

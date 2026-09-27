@@ -46,6 +46,11 @@ limits, replay, ambiguous effects, provenance, and the detailed threat model.
 It distinguishes LocalSessionBinding, the new remote assertion profile, and
 bounded historical certificate readers. It removes the requirement for cloud
 clients to receive new Session keys and reach an independent Direct App engine.
+Privileged local operator identity uses the Runtime owner-enrolled public-key
+registry and fresh signed challenge contract. The Runtime owner authentication
+seam verifies proof and supplies bounded subject evidence to Admission, which
+rechecks current enrollment; authentication remains separate from local
+publication grants and repository policy.
 
 REPOSITORY_ACCESS_ASSERTION owns issuer trust, exact request/Relay/repository/
 App binding, ephemeral OAuth handling, replay, remote subject authority,
@@ -182,7 +187,9 @@ particular candidate contains them.
 
 Audit all producers/consumers of Change root, task authorization, Source set,
 leaf publication, Source integration, standalone routing, termination, and
-conformance. #1213 is an important Local correction, not proof that all
+conformance. Local integration publication authenticates the Runtime
+owner-enrolled operator key subject before evaluating its separate exact
+operation grant. #1213 is an important Local correction, not proof that all
 historical Implementation-root joins have been removed.
 
 ### Remote authentication and admission

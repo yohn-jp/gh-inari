@@ -406,7 +406,8 @@ head/base, relationships, and provenance come from canonical semantic plans.
 The provider adapter does not invent omitted values.
 
 Local Source or Epic integration branch and Draft PR publication requires an
-authenticated local operator and a separate current Runtime-owned exact grant
+authenticated local operator, identified through the Runtime owner-enrolled
+operator-key proof contract, and a separate current Runtime-owned exact grant
 for each operation: `branch.create` for the integration branch and
 `pullRequest.create` for the Draft PR. Each grant binds the immutable
 repository, the `source-integration` or `epic-integration` role, the exact
@@ -417,9 +418,9 @@ intersects them before effect. Authentication, App permission, branch
 spelling, and task Session identity do not authorize either operation.
 Unavailable, stale, revoked, or mismatched evidence denies before provider
 effects. Executor performs admitted effects as Inari Access, not with
-operator credentials. See [Caller
-Authentication and Capability Authorization](./AGENT_CAPABILITY_AUTHORIZATION.md)
-for caller and grant boundaries.
+operator credentials. See [Caller Authentication and Capability
+Authorization](./AGENT_CAPABILITY_AUTHORIZATION.md) for the local operator
+subject, challenge, caller, and grant boundaries.
 
 ### 11.2 Noncanonical PRs
 
