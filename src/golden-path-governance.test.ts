@@ -12,6 +12,7 @@ import {
   type FixtureCommandTransport,
   type FixtureCommandOptions,
 } from "./github/test-native-transport.test.js";
+import { parseSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
 
 class StubTransport implements FixtureCommandTransport {
   readonly calls: readonly string[][];
@@ -261,4 +262,39 @@ test("Artifact Contract governance honors the shared configured default", async 
     ".github/inari/issues/feature.json",
   );
   assert.equal(result.nextAction.action, "direct-governed-create");
+});
+
+test("public Artifact Contract acquisition resolves a repository-backed numeric-v1 semantic source", async () => {
+  const sourcePath = ".github/inari/issues/bug.json";
+  const generatedPath = ".github/ISSUE_TEMPLATE/bug.yml";
+  const semanticSource = JSON.stringify({
+    version: 1,
+    kind: "issue",
+    id: "bug",
+    name: "Bug report",
+    description: "Report a bug.",
+    sections: [{ id: "summary", kind: "input", type: "string", label: "Summary", required: true }],
+  });
+  const nativeSource = renderSemanticNative(parseSemanticTemplate(semanticSource, sourcePath), generatedPath);
+  const result = assertResolved(
+    await discoverGoldenPathGovernance(
+      nativeAdapter(
+        [
+          { path: sourcePath, sha: "semantic-sha" },
+          { path: generatedPath, sha: "native-sha" },
+        ],
+        [
+          { sha: "semantic-sha", source: semanticSource },
+          { sha: "native-sha", source: nativeSource },
+        ],
+        "semantic-tree",
+      ),
+      { domain: "issue", source: "artifact-contract", selector: "bug" },
+    ),
+  );
+
+  assert.equal(result.source, "artifact-contract");
+  assert.equal("artifactContractVersion" in result.contract ? result.contract.artifactContractVersion : undefined, "2");
+  assert.equal(result.generation.treeSha, "semantic-tree");
+  assert.equal("source" in result.provenance ? result.provenance.source.path : undefined, sourcePath);
 });
