@@ -164,7 +164,7 @@ export interface RepositoryAccessAssertionPayload {
   readonly assertionId: string;
   readonly requestId: string;
   readonly operation: string;
-  readonly target: CanonicalJsonValue;
+  /** SHA-256 over the full canonical request, including target and input. */
   readonly requestDigest: string;
 }
 
@@ -384,6 +384,8 @@ function normalizeSigningInput(input: RepositoryAccessAssertionSigningInput): Re
   assertUnixSeconds(input.expiresAt);
   if (
     input.notBefore > input.issuedAt ||
+    input.eligibilityObservedAt > input.issuedAt ||
+    input.expiresAt <= input.issuedAt ||
     input.expiresAt <= input.notBefore ||
     input.expiresAt - input.notBefore > REPOSITORY_ACCESS_ASSERTION_MAX_VALIDITY_SECONDS
   ) {
@@ -391,7 +393,6 @@ function normalizeSigningInput(input: RepositoryAccessAssertionSigningInput): Re
   }
   assertOpaqueIdentifier(input.assertionId);
   assertOpaqueIdentifier(input.requestId);
-  const target = canonicalValue(request.target, REPOSITORY_ACCESS_ASSERTION_MAX_BYTES / 2);
   return Object.freeze({
     version: REPOSITORY_ACCESS_ASSERTION_VERSION,
     issuer: input.issuer,
@@ -408,7 +409,6 @@ function normalizeSigningInput(input: RepositoryAccessAssertionSigningInput): Re
     assertionId: input.assertionId,
     requestId: input.requestId,
     operation: request.operation,
-    target,
     requestDigest: repositoryAccessRequestDigest(request),
   });
 }
@@ -546,7 +546,6 @@ function validatePayload(value: unknown): RepositoryAccessAssertionPayload {
     "assertionId",
     "requestId",
     "operation",
-    "target",
     "requestDigest",
   ]);
   if (value.version !== REPOSITORY_ACCESS_ASSERTION_VERSION) fail("INVALID_ASSERTION");
@@ -579,6 +578,8 @@ function validatePayload(value: unknown): RepositoryAccessAssertionPayload {
     assertUnixSeconds(value.expiresAt);
     if (
       value.notBefore > value.issuedAt ||
+      value.eligibility.observedAt > value.issuedAt ||
+      value.expiresAt <= value.issuedAt ||
       value.expiresAt <= value.notBefore ||
       value.expiresAt - value.notBefore > REPOSITORY_ACCESS_ASSERTION_MAX_VALIDITY_SECONDS
     ) {
@@ -587,7 +588,6 @@ function validatePayload(value: unknown): RepositoryAccessAssertionPayload {
     if (typeof value.requestDigest !== "string" || !SHA256_PATTERN.test(value.requestDigest)) {
       fail("INVALID_ASSERTION");
     }
-    const target = canonicalValue(value.target, REPOSITORY_ACCESS_ASSERTION_MAX_BYTES / 2);
     return Object.freeze({
       version: REPOSITORY_ACCESS_ASSERTION_VERSION,
       issuer: value.issuer,
@@ -608,7 +608,6 @@ function validatePayload(value: unknown): RepositoryAccessAssertionPayload {
       assertionId: value.assertionId,
       requestId: value.requestId,
       operation: value.operation,
-      target,
       requestDigest: value.requestDigest,
     });
   } catch (error) {
@@ -660,7 +659,6 @@ function assertExpected(
     payload.app.id !== expected.appId ||
     payload.installation.id !== expected.installationId ||
     payload.operation !== request.operation ||
-    canonicalJsonString(payload.target) !== canonicalJsonString(request.target) ||
     request.repository.host !== repository.host ||
     request.repository.id !== repository.id ||
     request.appId !== expected.appId ||
@@ -682,7 +680,7 @@ function assertTime(payload: RepositoryAccessAssertionPayload, now: number): voi
 }
 
 /** Verify a supplied assertion against explicit key material and exact caller bindings. */
-export function verifyRepositoryAccessAssertion(
+function verifyRepositoryAccessAssertionUnsafe(
   compact: unknown,
   options: VerifyRepositoryAccessAssertionOptions,
 ): VerifiedRepositoryAccessCallerEvidence {
@@ -742,4 +740,17 @@ export function verifyRepositoryAccessAssertion(
     operation: payload.operation,
     requestDigest: payload.requestDigest,
   });
+}
+
+/** Verify caller evidence while keeping unexpected option/key errors bounded. */
+export function verifyRepositoryAccessAssertion(
+  compact: unknown,
+  options: VerifyRepositoryAccessAssertionOptions,
+): VerifiedRepositoryAccessCallerEvidence {
+  try {
+    return verifyRepositoryAccessAssertionUnsafe(compact, options);
+  } catch (error) {
+    if (error instanceof RepositoryAccessAssertionError) throw error;
+    fail("INVALID_ASSERTION");
+  }
 }

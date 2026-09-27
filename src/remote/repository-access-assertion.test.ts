@@ -25,7 +25,7 @@ const issuerPublicKey = createPublicKey(issuerPrivateKey);
 const issuerKeyId = "hosted-key-2026-09";
 const now = 2_000_000_000;
 const DETERMINISTIC_V1_VECTOR =
-  "eyJhbGciOiJFZERTQSIsImtpZCI6Imhvc3RlZC1rZXktMjAyNi0wOSIsInR5cCI6ImluYXJpLXJlcG9zaXRvcnktYWNjZXNzLWFzc2VydGlvbiIsInZlcnNpb24iOjF9.eyJhcHAiOnsiaWQiOiI5ODc2NTQifSwiYXNzZXJ0aW9uSWQiOiJhc3NlcnRpb246MDFqN3M3aDdtOSIsImF1ZGllbmNlIjoicnVudGltZTo0ZWMxNTU4ZS0xMDE1LTRlYTUtYjVlYS1lZjk0MWU2ZTEyYWMiLCJlbGlnaWJpbGl0eSI6eyJmYWN0IjoicmVwb3NpdG9yeS1hY2Nlc3MiLCJvYnNlcnZlZEF0IjoxOTk5OTk5OTkwfSwiZXhwaXJlc0F0IjoyMDAwMDAwMTIwLCJpbnN0YWxsYXRpb24iOnsiaWQiOiIxMjM0NSJ9LCJpc3N1ZWRBdCI6MjAwMDAwMDAwMCwiaXNzdWVyIjoiaHR0cHM6Ly9ob3N0ZWQuZXhhbXBsZS9pc3N1ZXIvcHJpbWFyeSIsIm5vdEJlZm9yZSI6MjAwMDAwMDAwMCwib3BlcmF0aW9uIjoicHVsbFJlcXVlc3QuY3JlYXRlIiwicmVsYXlJZCI6InJlbGF5OnJ1bnRpbWUtN2U5ZiIsInJlcG9zaXRvcnkiOnsiaG9zdCI6ImdpdGh1Yi5jb20iLCJpZCI6IjEzMzA3NTU4NjAifSwicmVxdWVzdERpZ2VzdCI6InNoYTI1NjoxYmYyMjAxMzQ0ODQ1MjFkODRmMjE2ZDg2ZjFkYzk3NWQzYjg2MWVjZmI1ZGZjNzVjZDQ4MzcxNWYwYTVhMDYxIiwicmVxdWVzdElkIjoicmVxdWVzdDowMWo3czdoN204Iiwic3ViamVjdCI6eyJob3N0IjoiZ2l0aHViLmNvbSIsInByb3ZpZGVyIjoiZ2l0aHViIiwidXNlcklkIjoiNDI0MiJ9LCJ0YXJnZXQiOnsiYmFzZSI6ImVwaWMvYXJjaGl0ZWN0dXJlLWNvbnZlcmdlbmNlIiwiYnJhbmNoIjoiZmVhdC8xMzE2LXJlcG9zaXRvcnktYWNjZXNzLWFzc2VydGlvbi13aXJlIiwiaGVhZCI6IjEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIzNDU2NzgiLCJpc3N1ZSI6MTMxNiwia2luZCI6ImltcGxlbWVudGF0aW9uIn0sInZlcnNpb24iOjF9.1ONB6MTHpqHyNv6caP1_Wo9DgmwxUBbdoWZ-CThjl5rGiZlk-mT9p0ja6lQTF-OWJKy16jsD0I_xgNFX_wbODA";
+  "eyJhbGciOiJFZERTQSIsImtpZCI6Imhvc3RlZC1rZXktMjAyNi0wOSIsInR5cCI6ImluYXJpLXJlcG9zaXRvcnktYWNjZXNzLWFzc2VydGlvbiIsInZlcnNpb24iOjF9.eyJhcHAiOnsiaWQiOiI5ODc2NTQifSwiYXNzZXJ0aW9uSWQiOiJhc3NlcnRpb246MDFqN3M3aDdtOSIsImF1ZGllbmNlIjoicnVudGltZTo0ZWMxNTU4ZS0xMDE1LTRlYTUtYjVlYS1lZjk0MWU2ZTEyYWMiLCJlbGlnaWJpbGl0eSI6eyJmYWN0IjoicmVwb3NpdG9yeS1hY2Nlc3MiLCJvYnNlcnZlZEF0IjoxOTk5OTk5OTkwfSwiZXhwaXJlc0F0IjoyMDAwMDAwMTIwLCJpbnN0YWxsYXRpb24iOnsiaWQiOiIxMjM0NSJ9LCJpc3N1ZWRBdCI6MjAwMDAwMDAwMCwiaXNzdWVyIjoiaHR0cHM6Ly9ob3N0ZWQuZXhhbXBsZS9pc3N1ZXIvcHJpbWFyeSIsIm5vdEJlZm9yZSI6MjAwMDAwMDAwMCwib3BlcmF0aW9uIjoicHVsbFJlcXVlc3QuY3JlYXRlIiwicmVsYXlJZCI6InJlbGF5OnJ1bnRpbWUtN2U5ZiIsInJlcG9zaXRvcnkiOnsiaG9zdCI6ImdpdGh1Yi5jb20iLCJpZCI6IjEzMzA3NTU4NjAifSwicmVxdWVzdERpZ2VzdCI6InNoYTI1NjoxYmYyMjAxMzQ0ODQ1MjFkODRmMjE2ZDg2ZjFkYzk3NWQzYjg2MWVjZmI1ZGZjNzVjZDQ4MzcxNWYwYTVhMDYxIiwicmVxdWVzdElkIjoicmVxdWVzdDowMWo3czdoN204Iiwic3ViamVjdCI6eyJob3N0IjoiZ2l0aHViLmNvbSIsInByb3ZpZGVyIjoiZ2l0aHViIiwidXNlcklkIjoiNDI0MiJ9LCJ2ZXJzaW9uIjoxfQ.eTDfXaL0R9NVWoyEDJl91zT4Tn0wjnFhz57Nw6JzZNtYTlDMqkKNZhjRhGKnesP0__eHkrFSUmMTVMh05adWCA";
 
 function semanticRequest(overrides: Record<string, unknown> = {}) {
   return {
@@ -109,7 +109,6 @@ function signedCustom(
     assertionId: input.assertionId,
     requestId: input.requestId,
     operation: input.request.operation,
-    target: input.request.target,
     requestDigest: repositoryAccessRequestDigest(input.request),
     ...payloadOverrides,
   };
@@ -177,6 +176,7 @@ test("omits raw request secrets from the signed body and verified caller evidenc
   const credential = "gho_inari-user-access-secret";
   const input = signingInput({
     request: semanticRequest({
+      target: { kind: "repository-target", selector: credential },
       input: { content: "request", accessToken: credential },
     }) as RepositoryAccessAssertionSigningInput["request"],
   });
@@ -409,6 +409,31 @@ test("rejects future, expired, overlong, and stale-eligibility proofs", () => {
     () => signRepositoryAccessAssertion(signingInput({ expiresAt: now + 121 }), issuerPrivateKey),
     "INVALID_INPUT",
   );
+  assertDenied(
+    () => signRepositoryAccessAssertion(signingInput({ eligibilityObservedAt: now + 1 }), issuerPrivateKey),
+    "INVALID_INPUT",
+  );
+  assertDenied(
+    () => signRepositoryAccessAssertion(signingInput({ expiresAt: now }), issuerPrivateKey),
+    "INVALID_INPUT",
+  );
+  assertDenied(
+    () =>
+      verifyRepositoryAccessAssertion(
+        signedCustom({ eligibility: { fact: "repository-access", observedAt: now + 1 } }),
+        { publicKey: issuerPublicKey, expected: expectedBindings(), now },
+      ),
+    "INVALID_ASSERTION",
+  );
+  assertDenied(
+    () =>
+      verifyRepositoryAccessAssertion(signedCustom({ expiresAt: now }), {
+        publicKey: issuerPublicKey,
+        expected: expectedBindings(),
+        now,
+      }),
+    "INVALID_ASSERTION",
+  );
 
   const stale = signInput({ eligibilityObservedAt: now - 121 });
   assertDenied(
@@ -442,4 +467,13 @@ test("accepts a validated public JWK and rejects a private or non-Ed25519 verifi
       }),
     "INVALID_KEY",
   );
+  const malformedOptions = new Proxy(
+    {},
+    {
+      ownKeys() {
+        throw new Error("untrusted option secret");
+      },
+    },
+  );
+  assertDenied(() => verifyRepositoryAccessAssertion(compact, malformedOptions as never), "INVALID_ASSERTION");
 });
