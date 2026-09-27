@@ -549,6 +549,7 @@ test("pr publish exposes the same stable classification as Core", async () => {
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["pr", "publish", "--from", inputPath, "--json"], {
+      environment: isolatedEnvironment,
       createAdapter: () => new PublicationAdapter(),
     });
     assert.equal(exitCode, 0, lines[0]);
@@ -1785,6 +1786,7 @@ test("PR create rejects a missing title before mutation", async () => {
       ["pr", "create", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
+        environment: isolatedEnvironment,
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
@@ -1989,6 +1991,7 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
       ["pr", "create", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
+        environment: isolatedEnvironment,
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
@@ -2062,6 +2065,7 @@ test("PR create preflights the actual resolved head branch, not the --from docum
       ],
       {
         repositoryRoot,
+        environment: isolatedEnvironment,
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
@@ -2116,6 +2120,7 @@ test("PR create fails closed before mutation when the actual resolved head branc
       ],
       {
         repositoryRoot,
+        environment: isolatedEnvironment,
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
