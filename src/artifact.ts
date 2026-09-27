@@ -41,6 +41,20 @@ import {
   createValidatedRenderedIssueArtifact,
   createValidatedRenderedPullRequestArtifact,
 } from "./github/capability.js";
+import {
+  assertSchemaNativeIssueFormCapability,
+  assertSchemaNativePullRequestMarkdownCapability,
+  NativeTemplateProjectionError,
+  schemaNativeMarkdownFieldHeading,
+} from "./contract/native-template-projection.js";
+import {
+  parseArtifactContract,
+  serializeArtifactContract,
+  SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+  type SchemaNativeArtifactContract,
+} from "./contract/artifact-contract.js";
+import { buildSchemaNativeInputSchema } from "./contract/effective-artifact-contract.js";
+import { compileJsonSchema } from "./contract/json-schema-runtime.js";
 
 // v1 artifact APIs remain available during migration. Their explicit
 // convergence adapter is re-exported here so callers do not need a second
@@ -746,7 +760,607 @@ export function repairPartialArtifactInput(
 /** Terminology alias for callers that describe targeted repair as a merge. */
 export const mergePartialArtifactInput = repairPartialArtifactInput;
 
+const MAX_SCHEMA_NATIVE_MARKDOWN_BYTES = 256 * 1024;
+const MAX_SCHEMA_NATIVE_VALUE_BYTES = 16 * 1024;
+const MAX_SCHEMA_NATIVE_RENDERED_NODES = 4096;
+
+type SchemaNativeRecord = Record<string, unknown>;
+
+function isSchemaNativeInput(input: unknown): boolean {
+  return isRecord(input) && input.version === SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION;
+}
+
+function parseSchemaNativeContract(input: unknown): SchemaNativeArtifactContract {
+  const source =
+    isRecord(input) && Array.isArray(input.derivations)
+      ? (JSON.parse(serializeArtifactContract(input as unknown as SchemaNativeArtifactContract)) as unknown)
+      : input;
+  return parseArtifactContract(source) as SchemaNativeArtifactContract;
+}
+
+function schemaNativeProjectionError(path: string, message: string): never {
+  throw new NativeTemplateProjectionError([
+    { code: "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY", path, message },
+  ]);
+}
+
+function schemaNativeBinding(contract: SchemaNativeArtifactContract, name: string) {
+  return contract.bindings[`/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`];
+}
+
+function schemaNativeSuppliedNames(contract: SchemaNativeArtifactContract): readonly string[] {
+  return Object.keys(contract.schema.properties as Record<string, unknown>)
+    .filter((name) => schemaNativeBinding(contract, name)?.authority.kind === "supplied")
+    .sort(compareStrings);
+}
+
+function schemaNativeTemplateMarker(contract: SchemaNativeArtifactContract): string {
+  if (contract.kind === "branch")
+    schemaNativeProjectionError("$.kind", "Branches have no body template identity marker.");
+  const directory = contract.kind === "issue" ? "issues" : "pull-requests";
+  const marker: TemplateIdentityMarker = {
+    version: TEMPLATE_IDENTITY_MARKER_VERSION,
+    kind: contract.kind,
+    path: `.github/inari/${directory}/${contract.id}.json`,
+  };
+  return `${TEMPLATE_IDENTITY_MARKER_PREFIX}${JSON.stringify(marker)}${TEMPLATE_IDENTITY_MARKER_SUFFIX}`;
+}
+
+function stripSchemaNativeTemplateMarker(
+  contract: SchemaNativeArtifactContract,
+  body: string,
+): {
+  readonly source: string;
+  readonly exactSource: string;
+  readonly hasMarker: boolean;
+  readonly diagnostic?: ExistingArtifactDiagnostic;
+} {
+  const marker = extractTemplateIdentityMarker(body);
+  if (marker.status === "malformed" || marker.status === "unsupported-version") {
+    return {
+      source: marker.body,
+      exactSource: marker.body,
+      hasMarker: false,
+      diagnostic: {
+        code: "EXISTING_TEMPLATE_MARKER_INVALID",
+        path: "$.template",
+        message:
+          marker.status === "unsupported-version"
+            ? "Template identity marker uses an unsupported version."
+            : "Template identity marker is malformed.",
+      },
+    };
+  }
+  if (
+    marker.status === "valid" &&
+    (marker.marker?.kind !== contract.kind ||
+      marker.marker.path !==
+        `.github/inari/${contract.kind === "issue" ? "issues" : "pull-requests"}/${contract.id}.json`)
+  ) {
+    return {
+      source: marker.body,
+      exactSource: marker.body,
+      hasMarker: false,
+      diagnostic: {
+        code: "EXISTING_WRONG_TEMPLATE",
+        path: "$.template",
+        message: "Template identity marker does not match the schema-native contract.",
+      },
+    };
+  }
+  return {
+    source: marker.body,
+    exactSource: marker.status === "valid" ? schemaNativeBodyBeforeIdentityMarker(body) : marker.body,
+    hasMarker: marker.status === "valid",
+  };
+}
+
+function schemaNativeBodyBeforeIdentityMarker(body: string): string {
+  const lines = normalizeSource(body).split("\n");
+  while (lines.at(-1)?.trim() === "") lines.pop();
+  lines.pop();
+  return lines.join("\n");
+}
+
+function schemaNativeValues(contract: SchemaNativeArtifactContract, input: unknown): SchemaNativeRecord {
+  if (!isRecord(input))
+    throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "Schema-native values must be an object.");
+  const properties = contract.schema.properties as Record<string, unknown>;
+  const supplied = new Set(schemaNativeSuppliedNames(contract));
+  for (const name of Object.keys(input)) {
+    if (!Object.hasOwn(properties, name) || !supplied.has(name)) {
+      throw new ArtifactInputError(
+        "INPUT_DOCUMENT_INVALID",
+        `Caller cannot supply schema-native value "${name}".`,
+        `$.${name}`,
+      );
+    }
+  }
+  let validation;
+  try {
+    validation = compileJsonSchema(buildSchemaNativeInputSchema(contract)).validate(input);
+  } catch {
+    schemaNativeProjectionError("$.schema", "Canonical schema-native caller input could not be compiled.");
+  }
+  if (!validation.valid) {
+    throw new ArtifactInputError(
+      "INPUT_DOCUMENT_INVALID",
+      "Schema-native caller values do not satisfy the projected authoritative JSON Schema.",
+    );
+  }
+  return input;
+}
+
+function schemaNativeObservationDiagnostic(
+  contract: SchemaNativeArtifactContract,
+  values: SchemaNativeRecord,
+): ExistingArtifactDiagnostic | undefined {
+  try {
+    schemaNativeValues(contract, values);
+    return undefined;
+  } catch (error: unknown) {
+    return {
+      code: "EXISTING_UNPARSEABLE",
+      path: "$",
+      message: error instanceof Error ? error.message : "Observed values do not satisfy the schema-native contract.",
+    };
+  }
+}
+
+function encodeSchemaNativeMarkdownToken(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/gu,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+function decodeSchemaNativeMarkdownToken(value: string): string | undefined {
+  try {
+    const decoded = decodeURIComponent(value);
+    return encodeSchemaNativeMarkdownToken(decoded) === value ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function schemaNativeMarkdownTask(label: string, depth: number): string {
+  return `${"  ".repeat(depth)}- [ ] ${label}`;
+}
+
+function renderSchemaNativeMarkdownNode(
+  schema: Record<string, unknown>,
+  value: unknown,
+  depth: number,
+  budget: { nodes: number },
+  path: string,
+): readonly string[] {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_SCHEMA_NATIVE_RENDERED_NODES)
+    schemaNativeProjectionError(path, "Structured Markdown value exceeds its bounded node count.");
+  const type = schema.type;
+  if (type === "object") {
+    if (!isRecord(value)) throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected an object at ${path}.`);
+    const lines = [schemaNativeMarkdownTask("object", depth)];
+    const properties = schema.properties as Record<string, unknown>;
+    for (const name of Object.keys(properties)
+      .filter((key) => Object.hasOwn(value, key))
+      .sort(compareStrings)) {
+      lines.push(schemaNativeMarkdownTask(`property:${encodeSchemaNativeMarkdownToken(name)}`, depth + 1));
+      lines.push(
+        ...renderSchemaNativeMarkdownNode(
+          properties[name] as Record<string, unknown>,
+          value[name],
+          depth + 2,
+          budget,
+          `${path}.${name}`,
+        ),
+      );
+    }
+    return lines;
+  }
+  if (type === "array") {
+    if (!Array.isArray(value)) throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected an array at ${path}.`);
+    const lines = [schemaNativeMarkdownTask("array", depth)];
+    value.forEach((entry, index) => {
+      lines.push(schemaNativeMarkdownTask("item", depth + 1));
+      lines.push(
+        ...renderSchemaNativeMarkdownNode(
+          schema.items as Record<string, unknown>,
+          entry,
+          depth + 2,
+          budget,
+          `${path}[${index}]`,
+        ),
+      );
+    });
+    return lines;
+  }
+  if (type === "string") {
+    if (typeof value !== "string") throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected text at ${path}.`);
+    if (new TextEncoder().encode(value).length > MAX_SCHEMA_NATIVE_VALUE_BYTES)
+      schemaNativeProjectionError(path, "Structured Markdown scalar exceeds its bounded byte length.");
+    return [schemaNativeMarkdownTask(`string:${encodeSchemaNativeMarkdownToken(value)}`, depth)];
+  }
+  if (type === "number" || type === "integer") {
+    if (typeof value !== "number" || !Number.isFinite(value))
+      throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected a finite number at ${path}.`);
+    const token = Object.is(value, -0) ? "-0" : String(value);
+    return [schemaNativeMarkdownTask(`${type}:${token}`, depth)];
+  }
+  if (type === "boolean") {
+    if (typeof value !== "boolean")
+      throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected a boolean at ${path}.`);
+    return [schemaNativeMarkdownTask(`boolean:${value ? "true" : "false"}`, depth)];
+  }
+  if (type === "null") {
+    if (value !== null) throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected null at ${path}.`);
+    return [schemaNativeMarkdownTask("null", depth)];
+  }
+  return schemaNativeProjectionError(path, "Structured Markdown encountered an unsupported JSON Schema node.");
+}
+
+function renderSchemaNativeIssueBody(contract: SchemaNativeArtifactContract, rawValues: unknown): string {
+  const formContract = assertSchemaNativeIssueFormCapability(contract);
+  const values = schemaNativeValues(formContract, rawValues);
+  const properties = formContract.schema.properties as Record<string, Record<string, unknown>>;
+  const required = new Set(
+    Array.isArray(formContract.schema.required) ? (formContract.schema.required as string[]) : [],
+  );
+  const blocks = schemaNativeSuppliedNames(formContract).map((name) => {
+    const binding = schemaNativeBinding(formContract, name);
+    const propertySchema = properties[name] as Record<string, unknown>;
+    const enumValues = Array.isArray(propertySchema.enum) ? (propertySchema.enum as string[]) : undefined;
+    const raw = values[name];
+    let answer = raw === undefined ? GITHUB_NO_RESPONSE : String(raw);
+    if (raw !== undefined && enumValues !== undefined) {
+      const labels = binding?.presentation?.options;
+      answer = labels?.[raw as string] ?? (raw as string);
+    }
+    if (raw === undefined && required.has(name))
+      throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Required schema-native value "${name}" is missing.`);
+    const renderedAnswer = raw === undefined ? answer : encodeSchemaNativeIssueSentinel(answer);
+    return [`### ${escapeHeading(name)}`, escapeMarkdownValue(renderedAnswer)].join("\n\n");
+  });
+  return `${blocks.join("\n\n")}\n${schemaNativeTemplateMarker(formContract)}\n`;
+}
+
+function parseSchemaNativeIssueBody(contract: SchemaNativeArtifactContract, body: string): ExistingArtifactParseResult {
+  const values: SchemaNativeRecord = {};
+  const diagnostics: ExistingArtifactDiagnostic[] = [];
+  try {
+    assertSchemaNativeIssueFormCapability(contract);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Issue Form capability is unsupported.";
+    return { parsed: false, values: {}, diagnostics: [{ code: "EXISTING_UNPARSEABLE", path: "$.schema", message }] };
+  }
+  const marker = stripSchemaNativeTemplateMarker(contract, body);
+  if (marker.diagnostic !== undefined) return { parsed: false, values: {}, diagnostics: [marker.diagnostic] };
+  const rawSource = normalizeSource(marker.exactSource);
+  const source = stripMarkdownHtmlComments(rawSource, parseMarkdownStructure(rawSource));
+  if (source.length > MAX_SCHEMA_NATIVE_MARKDOWN_BYTES) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        {
+          code: "EXISTING_UNPARSEABLE",
+          path: "$",
+          message: "Schema-native Issue body exceeds its bounded observation size.",
+        },
+      ],
+    };
+  }
+  const structure = parseMarkdownStructure(source);
+  const properties = contract.schema.properties as Record<string, Record<string, unknown>>;
+  const names = schemaNativeSuppliedNames(contract);
+  const lines = source.split("\n");
+  if (
+    structure.headings.length !== names.length ||
+    structure.headings.some(
+      (heading, index) => heading.depth !== 3 || heading.indented || heading.title.trim() !== names[index],
+    ) ||
+    hasMaterialSourceLines(lines, 1, (structure.headings[0]?.startLine ?? 1) - 1)
+  ) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        { code: "EXISTING_UNPARSEABLE", path: "$", message: "Issue headings do not match the schema-native template." },
+      ],
+    };
+  }
+  for (const [index, name] of names.entries()) {
+    const heading = structure.headings[index];
+    if (heading === undefined) {
+      diagnostics.push({
+        code: "EXISTING_UNPARSEABLE",
+        path: `$.${name}`,
+        message: `Expected Issue Form response heading "### ${name}".`,
+      });
+      break;
+    }
+    const nextHeading = structure.headings[index + 1];
+    const endLine = (nextHeading?.startLine ?? source.split("\n").length + 1) - 1;
+    const response = schemaNativeIssueResponse(
+      sourceRangeSlice(structure, heading.endLine + 1, endLine),
+      index < names.length - 1 || !marker.hasMarker,
+    );
+    const schema = properties[name] as Record<string, unknown>;
+    const binding = schemaNativeBinding(contract, name);
+    if (response === undefined || response === GITHUB_NO_RESPONSE) {
+      if (Array.isArray(contract.schema.required) && contract.schema.required.includes(name)) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path: `$.${name}`,
+          message: "Required Issue Form response is empty.",
+        });
+        break;
+      }
+      continue;
+    }
+    let value = decodeSchemaNativeIssueSentinel(response);
+    if (value === undefined) value = unescapeMarkdownValue(response);
+    if (Array.isArray(schema.enum)) {
+      const enumValues = schema.enum.filter((entry): entry is string => typeof entry === "string");
+      const options = binding?.presentation?.options;
+      const semantic =
+        options === undefined
+          ? enumValues.find((entry) => entry === value)
+          : enumValues.find((entry) => options[entry] === value);
+      if (semantic === undefined) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path: `$.${name}`,
+          message: "Issue Form response is not one of the schema's reversible choices.",
+        });
+        break;
+      }
+      value = semantic;
+    }
+    values[name] = value;
+  }
+  if (diagnostics.length > 0) return { parsed: false, values: {}, diagnostics: diagnostics.slice(0, 16) };
+  const schemaDiagnostic = schemaNativeObservationDiagnostic(contract, values);
+  if (schemaDiagnostic !== undefined) diagnostics.push(schemaDiagnostic);
+  if (diagnostics.length > 0) return { parsed: false, values: {}, diagnostics: diagnostics.slice(0, 16) };
+  return { parsed: true, values, diagnostics: [] };
+}
+
+function schemaNativeIssueResponse(source: string, trimTrailingSeparator: boolean): string | undefined {
+  const lines = normalizeSource(source).split("\n");
+  if (lines[0]?.trim() === "") lines.shift();
+  if (trimTrailingSeparator && lines.at(-1)?.trim() === "") lines.pop();
+  const response = lines.join("\n");
+  return response.length === 0 ? undefined : response;
+}
+
+function encodeSchemaNativeIssueSentinel(value: string): string {
+  const match = /^(\\*)_No response_$/u.exec(value);
+  if (match === null) return value;
+  return `${"\\".repeat(Math.max(1, (match[1]?.length ?? 0) * 2))}_No response_`;
+}
+
+function decodeSchemaNativeIssueSentinel(value: string): string | undefined {
+  const match = /^(\\+)_No response_$/u.exec(value);
+  const slashCount = match?.[1]?.length;
+  if (slashCount === 1) return GITHUB_NO_RESPONSE;
+  if (slashCount !== undefined && slashCount % 2 === 0) return `${"\\".repeat(slashCount / 2)}_No response_`;
+  return undefined;
+}
+
+function renderSchemaNativePullRequestBody(contract: SchemaNativeArtifactContract, rawValues: unknown): string {
+  const markdownContract = assertSchemaNativePullRequestMarkdownCapability(contract);
+  const values = schemaNativeValues(markdownContract, rawValues);
+  const properties = markdownContract.schema.properties as Record<string, Record<string, unknown>>;
+  const sections = schemaNativeSuppliedNames(markdownContract).map((name) => {
+    const heading = `## ${schemaNativeMarkdownFieldHeading(name)}`;
+    if (!Object.hasOwn(values, name)) return heading;
+    const lines = renderSchemaNativeMarkdownNode(
+      properties[name] as Record<string, unknown>,
+      values[name],
+      0,
+      { nodes: 0 },
+      `$.${name}`,
+    );
+    return `${heading}\n\n${lines.join("\n")}`;
+  });
+  const body = `${sections.join("\n\n")}\n`;
+  if (new TextEncoder().encode(body).length > MAX_SCHEMA_NATIVE_MARKDOWN_BYTES)
+    schemaNativeProjectionError("$", "Structured Markdown artifact exceeds its bounded byte length.");
+  return `${body}\n${schemaNativeTemplateMarker(markdownContract)}\n`;
+}
+
+function parseSchemaNativeMarkdownNode(
+  schema: Record<string, unknown>,
+  items: readonly import("./markdown-ast.js").MarkdownListItem[],
+  cursor: { value: number },
+  depth: number,
+  budget: { nodes: number },
+): unknown {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_SCHEMA_NATIVE_RENDERED_NODES) throw new TypeError("Structured Markdown node limit exceeded.");
+  const item = items[cursor.value];
+  if (item === undefined || item.depth !== depth || item.checked !== false || item.blockquoted)
+    throw new TypeError("Expected one bounded task-list value node.");
+  cursor.value += 1;
+  const type = schema.type;
+  if (type === "object") {
+    if (item.label !== "object") throw new TypeError("Object marker is missing.");
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+    const value: SchemaNativeRecord = {};
+    while (items[cursor.value] !== undefined && (items[cursor.value]?.depth ?? 0) > depth) {
+      const property = items[cursor.value];
+      if (property?.depth !== depth + 1 || !property.label.startsWith("property:"))
+        throw new TypeError("Object property marker is invalid.");
+      const name = decodeSchemaNativeMarkdownToken(property.label.slice("property:".length));
+      if (name === undefined || !Object.hasOwn(properties, name) || Object.hasOwn(value, name))
+        throw new TypeError("Object property marker is undeclared or duplicated.");
+      cursor.value += 1;
+      value[name] = parseSchemaNativeMarkdownNode(
+        properties[name] as Record<string, unknown>,
+        items,
+        cursor,
+        depth + 2,
+        budget,
+      );
+    }
+    return value;
+  }
+  if (type === "array") {
+    if (item.label !== "array") throw new TypeError("Array marker is missing.");
+    const values: unknown[] = [];
+    const itemSchema = schema.items as Record<string, unknown>;
+    while (items[cursor.value] !== undefined && (items[cursor.value]?.depth ?? 0) > depth) {
+      const wrapper = items[cursor.value];
+      if (wrapper?.depth !== depth + 1 || wrapper.label !== "item")
+        throw new TypeError("Array item marker is invalid.");
+      cursor.value += 1;
+      values.push(parseSchemaNativeMarkdownNode(itemSchema, items, cursor, depth + 2, budget));
+    }
+    return values;
+  }
+  if (items[cursor.value] !== undefined && (items[cursor.value]?.depth ?? 0) > depth)
+    throw new TypeError("Scalar value node cannot contain children.");
+  if (type === "string" && item.label.startsWith("string:")) {
+    const value = decodeSchemaNativeMarkdownToken(item.label.slice("string:".length));
+    if (value === undefined || new TextEncoder().encode(value).length > MAX_SCHEMA_NATIVE_VALUE_BYTES)
+      throw new TypeError("String value token is invalid or over the bounded byte length.");
+    return value;
+  }
+  if ((type === "number" || type === "integer") && item.label.startsWith(`${type}:`)) {
+    const token = item.label.slice(type.length + 1);
+    const value = token === "-0" ? -0 : Number(token);
+    if (!Number.isFinite(value) || (String(value) !== token && !(Object.is(value, -0) && token === "-0")))
+      throw new TypeError("Number value token is not canonical.");
+    if (type === "integer" && !Number.isInteger(value)) throw new TypeError("Integer value token is invalid.");
+    return value;
+  }
+  if (type === "boolean" && (item.label === "boolean:true" || item.label === "boolean:false"))
+    return item.label === "boolean:true";
+  if (type === "null" && item.label === "null") return null;
+  throw new TypeError("Scalar value token does not match its schema type.");
+}
+
+function parseSchemaNativePullRequestBody(
+  contract: SchemaNativeArtifactContract,
+  rawBody: string,
+): ExistingArtifactParseResult {
+  const values: SchemaNativeRecord = {};
+  const diagnostics: ExistingArtifactDiagnostic[] = [];
+  try {
+    assertSchemaNativePullRequestMarkdownCapability(contract);
+  } catch (error: unknown) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        {
+          code: "EXISTING_UNPARSEABLE",
+          path: "$.schema",
+          message: error instanceof Error ? error.message : "Markdown capability is unsupported.",
+        },
+      ],
+    };
+  }
+  const marker = stripSchemaNativeTemplateMarker(contract, rawBody);
+  if (marker.diagnostic !== undefined) return { parsed: false, values: {}, diagnostics: [marker.diagnostic] };
+  const rawSource = normalizeSource(marker.source);
+  const source = stripMarkdownHtmlComments(rawSource, parseMarkdownStructure(rawSource));
+  if (new TextEncoder().encode(source).length > MAX_SCHEMA_NATIVE_MARKDOWN_BYTES) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        { code: "EXISTING_UNPARSEABLE", path: "$", message: "Markdown artifact exceeds its bounded size." },
+      ],
+    };
+  }
+  const structure = parseMarkdownStructure(source);
+  const properties = contract.schema.properties as Record<string, Record<string, unknown>>;
+  const names = schemaNativeSuppliedNames(contract);
+  const expectedHeadings = names.map((name) => schemaNativeMarkdownFieldHeading(name));
+  const lines = source.split("\n");
+  if (
+    structure.headings.length !== expectedHeadings.length ||
+    structure.headings.some(
+      (heading, index) => heading.depth !== 2 || heading.indented || heading.title !== expectedHeadings[index],
+    ) ||
+    hasMaterialSourceLines(lines, 1, (structure.headings[0]?.startLine ?? 1) - 1)
+  ) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        {
+          code: "EXISTING_UNPARSEABLE",
+          path: "$",
+          message: "Markdown headings do not match the schema-native template.",
+        },
+      ],
+    };
+  }
+  for (let sectionIndex = 0; sectionIndex < names.length; sectionIndex += 1) {
+    const name = names[sectionIndex] as string;
+    const heading = structure.headings[sectionIndex] as MarkdownHeading;
+    const next = structure.headings[sectionIndex + 1];
+    const endLine = (next?.startLine ?? lines.length + 1) - 1;
+    const sectionItems = structure.listItems.filter(
+      (item) => item.startLine > heading.endLine && item.startLine < endLine,
+    );
+    const itemStartLines = new Set(sectionItems.map((item) => item.startLine));
+    for (let line = heading.endLine + 1; line <= endLine; line += 1) {
+      if ((lines[line - 1] ?? "").trim().length > 0 && !itemStartLines.has(line)) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path: `$.${name}`,
+          message: "Structured Markdown section contains text outside parsed task-list nodes.",
+        });
+        break;
+      }
+    }
+    if (diagnostics.length > 0) break;
+    if (sectionItems.some((item) => item.checked !== false || item.blockquoted)) {
+      diagnostics.push({
+        code: "EXISTING_UNPARSEABLE",
+        path: `$.${name}`,
+        message: "Structured Markdown values must use unquoted task-list nodes.",
+      });
+      break;
+    }
+    if (sectionItems.length === 0) continue;
+    const cursor = { value: 0 };
+    try {
+      const value = parseSchemaNativeMarkdownNode(
+        properties[name] as Record<string, unknown>,
+        sectionItems,
+        cursor,
+        0,
+        { nodes: 0 },
+      );
+      if (cursor.value !== sectionItems.length)
+        throw new TypeError("Structured Markdown section has unconsumed list nodes.");
+      // Validate once against the canonical effective input schema below so root-local references remain resolvable.
+      values[name] = value;
+    } catch (error: unknown) {
+      diagnostics.push({
+        code: "EXISTING_UNPARSEABLE",
+        path: `$.${name}`,
+        message: error instanceof Error ? error.message : "Structured Markdown value is invalid.",
+      });
+      break;
+    }
+  }
+  if (diagnostics.length === 0) {
+    const schemaDiagnostic = schemaNativeObservationDiagnostic(contract, values);
+    if (schemaDiagnostic !== undefined) diagnostics.push(schemaDiagnostic);
+  }
+  if (diagnostics.length > 0) return { parsed: false, values: {}, diagnostics: diagnostics.slice(0, 16) };
+  return { parsed: true, values, diagnostics: [] };
+}
+
 export function renderIssueArtifact(contractInput: unknown, input: unknown): string {
+  if (isSchemaNativeInput(contractInput))
+    return renderSchemaNativeIssueBody(parseSchemaNativeContract(contractInput), input);
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "issue")
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
@@ -756,6 +1370,8 @@ export function renderIssueArtifact(contractInput: unknown, input: unknown): str
 }
 
 export function renderPullRequestArtifact(contractInput: unknown, input: unknown): string {
+  if (isSchemaNativeInput(contractInput))
+    return renderSchemaNativePullRequestBody(parseSchemaNativeContract(contractInput), input);
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "pull_request") {
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "A pull request contract is required.");
@@ -830,6 +1446,8 @@ export function parseExistingIssueArtifact(
   contractInput: unknown,
   body: string | null | undefined,
 ): ExistingArtifactParseResult {
+  if (isSchemaNativeInput(contractInput))
+    return parseSchemaNativeIssueBody(parseSchemaNativeContract(contractInput), body ?? "");
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "issue")
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
@@ -840,6 +1458,8 @@ export function parseExistingPullRequestArtifact(
   contractInput: unknown,
   body: string | null | undefined,
 ): ExistingArtifactParseResult {
+  if (isSchemaNativeInput(contractInput))
+    return parseSchemaNativePullRequestBody(parseSchemaNativeContract(contractInput), body ?? "");
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "pull_request") {
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "A pull request contract is required.");
