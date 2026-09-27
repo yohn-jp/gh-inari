@@ -43,9 +43,12 @@
  */
 
 import { normalizeIssueReference, type IssueReference } from "./issue-reference.js";
+import { compileJsonSchema } from "./json-schema-runtime.js";
+import { JSON_SCHEMA_DIALECT } from "./ir.js";
 
 export const ARTIFACT_CONTRACT_VERSION = "1" as const;
-export type ArtifactContractVersion = typeof ARTIFACT_CONTRACT_VERSION;
+export const SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION = "2" as const;
+export type ArtifactContractVersion = typeof ARTIFACT_CONTRACT_VERSION | typeof SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION;
 
 export const ARTIFACT_CONTRACT_KINDS = ["issue", "branch", "pull_request"] as const;
 export type ArtifactContractKind = (typeof ARTIFACT_CONTRACT_KINDS)[number];
@@ -116,6 +119,31 @@ export type ValueAuthority =
   | { readonly kind: "derived"; readonly derive: DerivationSpec }
   | { readonly kind: "fixed"; readonly value: FixedValue };
 
+/** Authority for a schema-native property; fixed values use the property's JSON Schema for shape. */
+export type SchemaNativeValueAuthority =
+  | { readonly kind: "supplied" }
+  | { readonly kind: "platform" }
+  | { readonly kind: "derived"; readonly derive: DerivationSpec }
+  | { readonly kind: "fixed"; readonly value: unknown };
+
+/** Bounded, target-neutral presentation intent adjacent to (and separate from) JSON Schema. */
+export interface ArtifactContractPresentation {
+  readonly control: string;
+  readonly options?: Readonly<Record<string, string>>;
+}
+
+const MAX_PRESENTATION_CONTROL_LENGTH = 64;
+const MAX_PRESENTATION_OPTION_COUNT = 32;
+const MAX_PRESENTATION_OPTION_KEY_LENGTH = 64;
+const MAX_PRESENTATION_OPTION_LABEL_LENGTH = 128;
+
+export interface ArtifactContractBinding {
+  readonly authority: SchemaNativeValueAuthority;
+  readonly presentation?: ArtifactContractPresentation;
+}
+
+export type ArtifactContractRootSchema = Readonly<Record<string, unknown>>;
+
 export interface PropertyConstraints {
   /** Closed value set for `classification` (required) and `label` (optional). */
   readonly values?: readonly string[];
@@ -172,16 +200,33 @@ export type FieldDeclaration =
       readonly constraints?: FieldContentConstraints;
     };
 
-export interface ArtifactContract {
-  readonly version: ArtifactContractVersion;
+interface ArtifactContractBase {
   readonly kind: ArtifactContractKind;
   readonly id: string;
-  readonly properties: Readonly<Record<string, PropertyValueDeclaration>>;
-  /** Only present for `issue` and `pull_request`; `branch` has no body fields. */
-  readonly fields?: readonly FieldDeclaration[];
   /** Parsed once from the bounded derivation declarations; never authoring input. */
   readonly derivations: readonly ArtifactContractDerivation[];
 }
+
+export interface LegacyArtifactContract extends ArtifactContractBase {
+  readonly version: typeof ARTIFACT_CONTRACT_VERSION;
+  readonly properties: Readonly<Record<string, PropertyValueDeclaration>>;
+  /** Only present for `issue` and `pull_request`; `branch` has no body fields. */
+  readonly fields?: readonly FieldDeclaration[];
+  readonly schema?: never;
+  readonly bindings?: never;
+}
+
+export interface SchemaNativeArtifactContract extends ArtifactContractBase {
+  readonly version: typeof SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION;
+  /** Legacy semantic consumers see no primitive declarations on this format. */
+  readonly properties: Readonly<Record<string, never>>;
+  readonly fields?: never;
+  readonly schema: ArtifactContractRootSchema;
+  /** Direct-root-property bindings keyed by RFC 6901 JSON Pointer. */
+  readonly bindings: Readonly<Record<string, ArtifactContractBinding>>;
+}
+
+export type ArtifactContract = LegacyArtifactContract | SchemaNativeArtifactContract;
 
 export type ArtifactContractViolationCode =
   | "ARTIFACT_CONTRACT_INVALID_JSON"
@@ -200,7 +245,9 @@ export type ArtifactContractViolationCode =
   | "ARTIFACT_CONTRACT_INVALID_FIXED_VALUE"
   | "ARTIFACT_CONTRACT_INVALID_DERIVATION"
   | "ARTIFACT_CONTRACT_UNDECLARED_DEPENDENCY"
-  | "ARTIFACT_CONTRACT_DERIVATION_CYCLE";
+  | "ARTIFACT_CONTRACT_DERIVATION_CYCLE"
+  | "ARTIFACT_CONTRACT_INVALID_SCHEMA"
+  | "ARTIFACT_CONTRACT_INVALID_BINDING_PATH";
 
 export interface ArtifactContractViolation {
   readonly code: ArtifactContractViolationCode;
@@ -1157,6 +1204,434 @@ function detectDerivationCycles(
   for (const name of dependenciesByName.keys()) visit(name);
 }
 
+function cloneJsonValue(value: unknown, ancestors = new WeakSet<object>()): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) {
+    if (ancestors.has(value)) throw new TypeError("JSON values cannot be cyclic.");
+    ancestors.add(value);
+    const clone = value.map((entry) => cloneJsonValue(entry, ancestors));
+    ancestors.delete(value);
+    return clone;
+  }
+  if (isRecord(value)) {
+    const prototype = Object.getPrototypeOf(value);
+    if ((prototype !== Object.prototype && prototype !== null) || Object.getOwnPropertySymbols(value).length > 0) {
+      throw new TypeError("Contract values must use JSON object types.");
+    }
+    if (ancestors.has(value)) throw new TypeError("JSON values cannot be cyclic.");
+    ancestors.add(value);
+    const clone: UnknownRecord = {};
+    for (const key of Object.keys(value)) {
+      Object.defineProperty(clone, key, {
+        value: cloneJsonValue(value[key], ancestors),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    ancestors.delete(value);
+    return clone;
+  }
+  throw new TypeError("Contract values must be JSON values.");
+}
+
+function canonicalizeJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeJsonValue);
+  if (!isRecord(value)) return value;
+  const canonical: UnknownRecord = {};
+  for (const key of Object.keys(value).sort((left, right) => left.localeCompare(right, "en-US"))) {
+    Object.defineProperty(canonical, key, {
+      value: canonicalizeJsonValue(value[key]),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return canonical;
+}
+
+function decodeDirectChildPointer(pointer: string): string | undefined {
+  if (!pointer.startsWith("/")) return undefined;
+  const segments = pointer.slice(1).split("/");
+  if (segments.length !== 1) return undefined;
+  const segment = segments[0] ?? "";
+  if (/~(?:[^01]|$)/u.test(segment)) return undefined;
+  return segment.replaceAll("~1", "/").replaceAll("~0", "~");
+}
+
+interface SchemaNativeAuthorityParseResult {
+  readonly authority: SchemaNativeValueAuthority;
+  readonly dependencies: readonly DerivationReference[];
+  readonly formatParts?: readonly DerivationFormatPart[];
+}
+
+function validateSchemaNativeAuthority(
+  value: unknown,
+  path: string,
+  violations: ArtifactContractViolation[],
+): SchemaNativeAuthorityParseResult | undefined {
+  if (!isRecord(value)) {
+    addViolation(violations, "ARTIFACT_CONTRACT_INVALID_VALUE", path, "Authority must be an object.");
+    return undefined;
+  }
+  const kind = value.kind;
+  if (kind === "supplied" || kind === "platform") {
+    checkUnknownKeys(value, ["kind"], path, violations);
+    return { authority: { kind }, dependencies: [] };
+  }
+  if (kind === "derived") {
+    checkUnknownKeys(value, ["kind", "derive"], path, violations);
+    if (!hasOwn(value, "derive")) {
+      addViolation(
+        violations,
+        "ARTIFACT_CONTRACT_MISSING_PROPERTY",
+        `${path}.derive`,
+        'Derived authority requires "derive".',
+      );
+      return undefined;
+    }
+    const derivation = validateDerivation(value.derive, `${path}.derive`, violations);
+    if (derivation === undefined) return undefined;
+    return {
+      authority: { kind: "derived", derive: derivation.spec },
+      dependencies: derivation.dependencies,
+      ...(derivation.formatParts === undefined ? {} : { formatParts: derivation.formatParts }),
+    };
+  }
+  if (kind === "fixed") {
+    checkUnknownKeys(value, ["kind", "value"], path, violations);
+    if (!hasOwn(value, "value")) {
+      addViolation(
+        violations,
+        "ARTIFACT_CONTRACT_MISSING_FIXED_VALUE",
+        `${path}.value`,
+        'Fixed authority requires "value".',
+      );
+      return undefined;
+    }
+    try {
+      return {
+        authority: { kind: "fixed", value: cloneJsonValue(value.value) },
+        dependencies: [],
+      };
+    } catch {
+      addViolation(
+        violations,
+        "ARTIFACT_CONTRACT_INVALID_FIXED_VALUE",
+        `${path}.value`,
+        "Fixed authority value must be JSON data.",
+      );
+      return undefined;
+    }
+  }
+  addViolation(
+    violations,
+    "ARTIFACT_CONTRACT_UNKNOWN_AUTHORITY",
+    `${path}.kind`,
+    `Authority kind "${String(kind)}" is not supported.`,
+  );
+  return undefined;
+}
+
+function validateSchemaNativePresentation(
+  value: unknown,
+  path: string,
+  violations: ArtifactContractViolation[],
+): ArtifactContractPresentation | undefined {
+  if (!isRecord(value)) {
+    addViolation(violations, "ARTIFACT_CONTRACT_INVALID_VALUE", path, "Presentation must be an object.");
+    return undefined;
+  }
+  checkUnknownKeys(value, ["control", "options"], path, violations);
+  const control = requiredString(value, "control", path, violations);
+  if (
+    control !== undefined &&
+    (!/^[a-z][a-z0-9_-]*$/u.test(control) || control.length > MAX_PRESENTATION_CONTROL_LENGTH)
+  ) {
+    addViolation(
+      violations,
+      "ARTIFACT_CONTRACT_INVALID_VALUE",
+      `${path}.control`,
+      "Presentation control must be a bounded lowercase identifier.",
+    );
+  }
+  let options: Record<string, string> | undefined;
+  if (hasOwn(value, "options")) {
+    if (!isRecord(value.options)) {
+      addViolation(violations, "ARTIFACT_CONTRACT_INVALID_VALUE", `${path}.options`, "Options must be an object.");
+    } else {
+      options = Object.create(null) as Record<string, string>;
+      const entries = Object.entries(value.options);
+      if (entries.length > MAX_PRESENTATION_OPTION_COUNT) {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_INVALID_VALUE",
+          `${path}.options`,
+          `Presentation options may contain at most ${MAX_PRESENTATION_OPTION_COUNT} entries.`,
+        );
+      }
+      for (const [option, label] of entries) {
+        if (option.length === 0 || option.length > MAX_PRESENTATION_OPTION_KEY_LENGTH) {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_VALUE",
+            `${path}.options.${option}`,
+            `Option keys must contain 1 to ${MAX_PRESENTATION_OPTION_KEY_LENGTH} characters.`,
+          );
+        }
+        if (typeof label !== "string" || label.length === 0 || label.length > MAX_PRESENTATION_OPTION_LABEL_LENGTH) {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_VALUE",
+            `${path}.options.${option}`,
+            `Option labels must contain 1 to ${MAX_PRESENTATION_OPTION_LABEL_LENGTH} characters.`,
+          );
+        } else {
+          options[option] = label;
+        }
+      }
+    }
+  }
+  if (
+    control === undefined ||
+    !/^[a-z][a-z0-9_-]*$/u.test(control) ||
+    control.length > MAX_PRESENTATION_CONTROL_LENGTH
+  ) {
+    return undefined;
+  }
+  return { control, ...(options === undefined ? {} : { options }) };
+}
+
+function compileSchemaNativeArtifactContract(input: UnknownRecord): CompileResult {
+  const violations: ArtifactContractViolation[] = [];
+  const version = requiredString(input, "version", "$", violations);
+  if (version !== SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION) {
+    addViolation(
+      violations,
+      "ARTIFACT_CONTRACT_UNSUPPORTED_VERSION",
+      "$.version",
+      `Schema-native Artifact Contracts require version ${SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION}.`,
+    );
+  }
+  const kindValue = requiredString(input, "kind", "$", violations);
+  const kind =
+    kindValue !== undefined && (ARTIFACT_CONTRACT_KINDS as readonly string[]).includes(kindValue)
+      ? (kindValue as ArtifactContractKind)
+      : undefined;
+  if (kindValue !== undefined && kind === undefined) {
+    addViolation(
+      violations,
+      "ARTIFACT_CONTRACT_UNSUPPORTED_KIND",
+      "$.kind",
+      `Artifact kind "${kindValue}" is not supported.`,
+    );
+  }
+  const id = requiredString(input, "id", "$", violations);
+  if (id !== undefined) validateIdentifier(id, "$.id", violations);
+  checkUnknownKeys(input, ["version", "kind", "id", "schema", "bindings"], "$", violations);
+
+  if (!hasOwn(input, "schema")) {
+    addViolation(violations, "ARTIFACT_CONTRACT_MISSING_PROPERTY", "$.schema", 'Property "schema" is required.');
+  }
+  let schema: ArtifactContractRootSchema | undefined;
+  let schemaProperties: UnknownRecord | undefined;
+  if (hasOwn(input, "schema")) {
+    if (!isRecord(input.schema)) {
+      addViolation(violations, "ARTIFACT_CONTRACT_INVALID_SCHEMA", "$.schema", "Root schema must be an object.");
+    } else {
+      try {
+        const clonedSchema = cloneJsonValue(input.schema);
+        if (!isRecord(clonedSchema)) throw new TypeError("Root schema must be an object.");
+        schema = clonedSchema;
+        if (schema.$schema !== JSON_SCHEMA_DIALECT) {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_SCHEMA",
+            "$.schema.$schema",
+            "Root schema must declare the Draft 2020-12 dialect.",
+          );
+        }
+        if (schema.type !== "object") {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_SCHEMA",
+            "$.schema.type",
+            'Root schema type must be "object".',
+          );
+        }
+        if (!isRecord(schema.properties)) {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_SCHEMA",
+            "$.schema.properties",
+            "Root schema properties must be an object.",
+          );
+        } else {
+          schemaProperties = schema.properties;
+        }
+        const rootProperties = schemaProperties;
+        if (Array.isArray(schema.required) && rootProperties !== undefined) {
+          schema.required.forEach((property, index) => {
+            if (typeof property === "string" && !hasOwn(rootProperties, property)) {
+              addViolation(
+                violations,
+                "ARTIFACT_CONTRACT_INVALID_SCHEMA",
+                `$.schema.required[${index}]`,
+                `Required property "${property}" is not declared in root properties.`,
+              );
+            }
+          });
+        }
+        if (schema.additionalProperties !== false) {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_SCHEMA",
+            "$.schema.additionalProperties",
+            "Root schema must reject undeclared properties.",
+          );
+        }
+        try {
+          compileJsonSchema(schema);
+        } catch {
+          addViolation(
+            violations,
+            "ARTIFACT_CONTRACT_INVALID_SCHEMA",
+            "$.schema",
+            "Root schema is not a valid hermetic Draft 2020-12 schema.",
+          );
+        }
+      } catch {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_INVALID_SCHEMA",
+          "$.schema",
+          "Root schema must contain only JSON data.",
+        );
+      }
+    }
+  }
+
+  if (!hasOwn(input, "bindings")) {
+    addViolation(violations, "ARTIFACT_CONTRACT_MISSING_PROPERTY", "$.bindings", 'Property "bindings" is required.');
+  }
+  const bindingsInput = input.bindings;
+  if (hasOwn(input, "bindings") && !isRecord(bindingsInput)) {
+    addViolation(violations, "ARTIFACT_CONTRACT_INVALID_VALUE", "$.bindings", "Bindings must be an object.");
+  }
+  const bindings: Record<string, ArtifactContractBinding> = Object.create(null) as Record<
+    string,
+    ArtifactContractBinding
+  >;
+  const dependenciesByName = new Map<string, readonly DerivationReference[]>();
+  const derived = new Set<string>();
+  const derivationsByName = new Map<string, ArtifactContractDerivation>();
+  const boundProperties = new Set<string>();
+
+  if (isRecord(bindingsInput)) {
+    for (const [pointer, rawBinding] of Object.entries(bindingsInput)) {
+      const bindingPath = `$.bindings.${pointer}`;
+      const propertyName = decodeDirectChildPointer(pointer);
+      if (propertyName === undefined) {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_INVALID_BINDING_PATH",
+          bindingPath,
+          "Binding keys must be RFC 6901 pointers to one direct root property.",
+        );
+        continue;
+      }
+      if (schemaProperties === undefined || !hasOwn(schemaProperties, propertyName)) {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_INVALID_BINDING_PATH",
+          bindingPath,
+          "Binding pointer must name a property declared by the root schema.",
+        );
+        continue;
+      }
+      boundProperties.add(propertyName);
+      if (!isRecord(rawBinding)) {
+        addViolation(violations, "ARTIFACT_CONTRACT_INVALID_VALUE", bindingPath, "Binding must be an object.");
+        continue;
+      }
+      checkUnknownKeys(rawBinding, ["authority", "presentation"], bindingPath, violations);
+      if (!hasOwn(rawBinding, "authority")) {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_MISSING_PROPERTY",
+          `${bindingPath}.authority`,
+          'Property "authority" is required.',
+        );
+        continue;
+      }
+      const authority = validateSchemaNativeAuthority(rawBinding.authority, `${bindingPath}.authority`, violations);
+      if (authority === undefined) continue;
+      const presentation = hasOwn(rawBinding, "presentation")
+        ? validateSchemaNativePresentation(rawBinding.presentation, `${bindingPath}.presentation`, violations)
+        : undefined;
+      bindings[pointer] = {
+        authority: authority.authority,
+        ...(presentation === undefined ? {} : { presentation }),
+      };
+      dependenciesByName.set(propertyName, authority.dependencies);
+      if (authority.authority.kind === "derived") {
+        derived.add(propertyName);
+        derivationsByName.set(propertyName, {
+          target: propertyName,
+          operation: authority.authority.derive,
+          dependencies: authority.dependencies,
+          ...(authority.formatParts === undefined ? {} : { formatParts: authority.formatParts }),
+        });
+      }
+    }
+  }
+
+  if (schemaProperties !== undefined && isRecord(bindingsInput)) {
+    for (const propertyName of Object.keys(schemaProperties)) {
+      if (!boundProperties.has(propertyName)) {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_MISSING_PROPERTY",
+          `$.bindings/${propertyName.replaceAll("~", "~0").replaceAll("/", "~1")}`,
+          "Every root schema property requires a value-authority binding.",
+        );
+      }
+    }
+  }
+
+  for (const [name, dependencies] of dependenciesByName) {
+    for (const reference of dependencies) {
+      if (schemaProperties === undefined || !hasOwn(schemaProperties, reference.name)) {
+        addViolation(
+          violations,
+          "ARTIFACT_CONTRACT_UNDECLARED_DEPENDENCY",
+          `$.bindings/${name}/authority.derive`,
+          `Derivation reference "${reference.name}" is not a declared root property.`,
+        );
+      }
+    }
+  }
+  detectDerivationCycles(derived, dependenciesByName, violations);
+
+  if (violations.length > 0 || kind === undefined || id === undefined || schema === undefined) return { violations };
+  const emptyLegacyProperties = Object.create(null) as Record<string, never>;
+  return {
+    violations,
+    contract: {
+      version: SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+      kind,
+      id,
+      properties: emptyLegacyProperties,
+      derivations: [...derivationsByName.values()].sort((left, right) =>
+        left.target.localeCompare(right.target, "en-US"),
+      ),
+      schema,
+      bindings,
+    },
+  };
+}
+
 interface CompileResult {
   readonly violations: readonly ArtifactContractViolation[];
   /** Present only when `violations` is empty. */
@@ -1171,6 +1646,13 @@ interface CompileResult {
  * so enrichment is a real transformation, not a cast of the input.
  */
 function compileArtifactContract(input: unknown): CompileResult {
+  if (isRecord(input) && input.version === SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION) {
+    return compileSchemaNativeArtifactContract(input);
+  }
+  return compileLegacyArtifactContract(input);
+}
+
+function compileLegacyArtifactContract(input: unknown): CompileResult {
   const violations: ArtifactContractViolation[] = [];
   if (!isRecord(input)) {
     return {
@@ -1493,7 +1975,46 @@ function canonicalizeField(declaration: FieldDeclaration): UnknownRecord {
   };
 }
 
+function canonicalizeSchemaNativeBinding(binding: ArtifactContractBinding): UnknownRecord {
+  const authority = binding.authority;
+  const serializedAuthority: UnknownRecord =
+    authority.kind === "supplied" || authority.kind === "platform"
+      ? { kind: authority.kind }
+      : authority.kind === "derived"
+        ? { kind: "derived", derive: { ...authority.derive } }
+        : { kind: "fixed", value: canonicalizeJsonValue(authority.value) };
+  return {
+    authority: serializedAuthority,
+    ...(binding.presentation === undefined
+      ? {}
+      : {
+          presentation: {
+            control: binding.presentation.control,
+            ...(binding.presentation.options === undefined
+              ? {}
+              : { options: canonicalizeJsonValue(binding.presentation.options) }),
+          },
+        }),
+  };
+}
+
 function canonicalizeContract(contract: ArtifactContract): UnknownRecord {
+  if (contract.version === SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION) {
+    const bindings: UnknownRecord = Object.create(null) as UnknownRecord;
+    for (const pointer of Object.keys(contract.bindings ?? {}).sort((left, right) =>
+      left.localeCompare(right, "en-US"),
+    )) {
+      const binding = contract.bindings?.[pointer];
+      if (binding !== undefined) bindings[pointer] = canonicalizeSchemaNativeBinding(binding);
+    }
+    return {
+      version: contract.version,
+      kind: contract.kind,
+      id: contract.id,
+      schema: canonicalizeJsonValue(contract.schema),
+      bindings,
+    };
+  }
   const properties: UnknownRecord = {};
   for (const key of Object.keys(contract.properties).sort((left, right) => left.localeCompare(right, "en-US"))) {
     const declaration = contract.properties[key];

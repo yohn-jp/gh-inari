@@ -10,6 +10,7 @@
  */
 
 import {
+  SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
   type ArtifactContract,
   type ArtifactContractDerivation,
   type ArtifactContractKind,
@@ -295,6 +296,11 @@ export function compileEffectiveArtifactContract(
 ): EffectiveArtifactContract {
   if (!isRecord(contractInput) || !isRecord(options) || !isRecord(options.provenance)) {
     throw new EffectiveArtifactContractCompilationError("An Artifact Contract and immutable provenance are required.");
+  }
+  if (contractInput.version === SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION) {
+    throw new EffectiveArtifactContractCompilationError(
+      "Schema-native Artifact Contract version 2 is not supported by the effective contract compiler.",
+    );
   }
   if (!Array.isArray(contractInput.derivations)) {
     throw new EffectiveArtifactContractCompilationError("Artifact Contract derivation metadata is missing.");
