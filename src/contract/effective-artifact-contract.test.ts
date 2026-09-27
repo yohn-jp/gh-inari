@@ -10,6 +10,7 @@ import {
   serializeArtifactContract,
 } from "./artifact-contract.js";
 import type { ArtifactContractProvenance } from "./ir.js";
+import { compileJsonSchema } from "./json-schema-runtime.js";
 import type { JsonSchema } from "./schema.js";
 
 const provenance: ArtifactContractProvenance = {
@@ -125,6 +126,50 @@ const authorityContract = {
   ],
 } satisfies Record<string, unknown>;
 
+const schemaNativeContract = {
+  version: "2",
+  kind: "issue",
+  id: "schema-native",
+  schema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://example.test/contracts/issue.json",
+    title: "Repository issue input",
+    $defs: {
+      tag: {
+        type: "object",
+        properties: { label: { type: "string", minLength: 2 } },
+        required: ["label"],
+        additionalProperties: false,
+      },
+    },
+    type: "object",
+    properties: {
+      summary: {
+        type: "object",
+        properties: {
+          headline: { type: "string", minLength: 3, pattern: "^[A-Z]" },
+          tags: { type: "array", items: { $ref: "#/$defs/tag" }, minItems: 1, uniqueItems: true },
+        },
+        required: ["headline", "tags"],
+        additionalProperties: false,
+      },
+      optional: { type: "array", items: { $ref: "#/$defs/tag" }, maxItems: 2 },
+      generated: { type: "string" },
+      fixed: { type: "string", const: "main" },
+      platform: { type: "boolean" },
+    },
+    required: ["summary", "generated", "fixed", "platform"],
+    additionalProperties: false,
+  },
+  bindings: {
+    "/summary": { authority: { kind: "supplied" } },
+    "/optional": { authority: { kind: "supplied" } },
+    "/generated": { authority: { kind: "derived", derive: { op: "copy", from: "summary" } } },
+    "/fixed": { authority: { kind: "fixed", value: "main" } },
+    "/platform": { authority: { kind: "platform" } },
+  },
+} satisfies Record<string, unknown>;
+
 function compile(input: Record<string, unknown>, options?: { readonly treeSha?: string }) {
   const contract = parseArtifactContract(input);
   return compileEffectiveArtifactContract(contract, {
@@ -186,23 +231,121 @@ function schemaAccepts(schema: JsonSchema, value: unknown): boolean {
   });
 }
 
-test("effective compilation rejects schema-native contracts until schema filtering is supported", () => {
-  const contract = parseArtifactContract({
+test("schema-native effective input projects supplied schemas and root requiredness", () => {
+  const effective = compile(schemaNativeContract);
+  const validator = compileJsonSchema(effective.inputSchema);
+
+  assert.equal(effective.inputSchema.$id, schemaNativeContract.schema.$id);
+  assert.equal(effective.inputSchema.title, schemaNativeContract.schema.title);
+  assert.equal(effective.inputSchema.additionalProperties, false);
+  assert.deepEqual(Object.keys(effective.inputSchema.properties), ["optional", "summary"]);
+  assert.deepEqual(effective.inputSchema.required, ["summary"]);
+  assert.deepEqual(effective.inputSchema.properties.optional, schemaNativeContract.schema.properties.optional);
+  assert.deepEqual(effective.inputSchema.properties.summary, schemaNativeContract.schema.properties.summary);
+  assert.deepEqual(
+    (effective.inputSchema as unknown as Record<string, unknown>).$defs,
+    schemaNativeContract.schema.$defs,
+  );
+
+  assert.equal(validator.validate({ summary: { headline: "A title", tags: [{ label: "core" }] } }).valid, true);
+  assert.equal(
+    validator.validate({
+      summary: { headline: "A title", tags: [{ label: "core" }] },
+      optional: [{ label: "test" }],
+    }).valid,
+    true,
+  );
+  assert.equal(
+    validator.validate({ summary: { headline: "A title", tags: [{ label: "core" }] }, generated: "caller" }).valid,
+    false,
+  );
+  assert.equal(validator.validate({ summary: { headline: "abC", tags: [{ label: "core" }] } }).valid, false);
+  assert.equal(validator.validate({ summary: { headline: "A title", tags: [] } }).valid, false);
+  assert.equal(validator.validate({ summary: { headline: "A title", tags: [{ label: "x" }] } }).valid, false);
+  assert.equal(
+    validator.validate({ summary: { headline: "A title", tags: [{ label: "core", extra: true }] } }).valid,
+    false,
+  );
+  assert.equal(
+    validator.validate({ summary: { headline: "A title", tags: [{ label: "core" }] }, fixed: "main" }).valid,
+    false,
+  );
+  assert.equal(
+    validator.validate({ summary: { headline: "A title", tags: [{ label: "core" }] }, platform: true }).valid,
+    false,
+  );
+});
+
+test("schema-native projection rejects root cross-property constraints and unresolved local references", () => {
+  const dependentContract = parseArtifactContract({
     version: SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
     kind: "issue",
-    id: "schema-native",
+    id: "dependent-properties",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { summary: { type: "string" }, generated: { type: "string" } },
+      required: ["summary", "generated"],
+      dependentRequired: { summary: ["generated"] },
+      additionalProperties: false,
+    },
+    bindings: {
+      "/summary": { authority: { kind: "supplied" } },
+      "/generated": { authority: { kind: "derived", derive: { op: "copy", from: "summary" } } },
+    },
+  });
+  assert.throws(
+    () => compileEffectiveArtifactContract(dependentContract, { provenance }),
+    (error) =>
+      error instanceof EffectiveArtifactContractCompilationError &&
+      error.message === "Schema-native root constraints cannot be projected equivalently to supplied caller input.",
+  );
+
+  const patternedContract = parseArtifactContract({
+    version: SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+    kind: "issue",
+    id: "patterned-properties",
     schema: {
       $schema: "https://json-schema.org/draft/2020-12/schema",
       type: "object",
       properties: { summary: { type: "string" } },
+      patternProperties: { "^x-": { type: "string" } },
       additionalProperties: false,
     },
     bindings: { "/summary": { authority: { kind: "supplied" } } },
   });
-
   assert.throws(
-    () => compileEffectiveArtifactContract(contract, { provenance }),
-    EffectiveArtifactContractCompilationError,
+    () => compileEffectiveArtifactContract(patternedContract, { provenance }),
+    (error) =>
+      error instanceof EffectiveArtifactContractCompilationError &&
+      error.message === "Schema-native root patternProperties cannot be projected into closed caller input.",
+  );
+
+  const referencedContract = parseArtifactContract({
+    version: SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+    kind: "issue",
+    id: "sibling-schema-reference",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        summary: { $ref: "#/properties/generated" },
+        generated: { type: "string" },
+      },
+      required: ["summary", "generated"],
+      additionalProperties: false,
+    },
+    bindings: {
+      "/summary": { authority: { kind: "supplied" } },
+      "/generated": { authority: { kind: "derived", derive: { op: "copy", from: "summary" } } },
+    },
+  });
+  assert.throws(
+    () => compileEffectiveArtifactContract(referencedContract, { provenance }),
+    (error) =>
+      error instanceof EffectiveArtifactContractCompilationError &&
+      error.message ===
+        "Schema-native caller schema contains references that cannot be resolved after supplied-only projection.",
   );
 });
 
