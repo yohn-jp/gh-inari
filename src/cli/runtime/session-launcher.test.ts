@@ -117,7 +117,7 @@ test("#1213 a Source-bound Session keeps the Implementation task and issues per-
       key: keyPair,
       notBefore: new Date("2026-08-01T00:00:00.000Z"),
       maxSessionTtlSeconds: 3600,
-      capabilityCeiling: ["change.implement", "change.ready", "branch.advance"],
+      capabilityCeiling: ["change.implement", "change.ready", "branch.advance", "pullRequest.create"],
     });
     writeLocalJson(
       "admission",
@@ -228,7 +228,7 @@ test("#1213 a Source-bound Session keeps the Implementation task and issues per-
       { kind: "change.ready", issue: 1208 },
       { kind: "change.implement", issue: 1209 },
       { kind: "change.ready", issue: 1209 },
-      { kind: "change.implement", issue: 1213 },
+      { kind: "pullRequest.create", head: "fix/1213-source-binding", base: "main", max: 1 },
       { kind: "branch.advance", branch: "fix/1213-source-binding" },
     ]);
     assert.equal(binding.branchObservation?.implementation, 1213);
@@ -238,6 +238,47 @@ test("#1213 a Source-bound Session keeps the Implementation task and issues per-
       { ...repository, number: 1209 },
       { repositoryHost: "github.com", repositoryId: "987", number: 7 },
     ]);
+    await assert.rejects(
+      start({
+        branchObservation: {
+          ...branchObservation,
+          target: { repository, implementation: 4242 },
+        },
+      }),
+      { code: "ADMISSION_SESSION_BRANCH_MISMATCH" },
+    );
+    assert.equal(registered.length, 1);
+
+    const missingCeilingEnvironment: NodeJS.ProcessEnv = {
+      INARI_CONFIG_HOME: path.join(root, "missing-ceiling-config"),
+      PATH: process.env.PATH ?? "",
+    };
+    setupLocalAuthority(missingCeilingEnvironment);
+    const missingCeilingKeyPair = loadDelegatorKeyPair(
+      localComponentPath("authority", "private-key.pem", missingCeilingEnvironment),
+    );
+    const authorityWithoutPullRequest = createDelegatorRecord({
+      id: "launcher-source-without-pr-test",
+      key: missingCeilingKeyPair,
+      notBefore: new Date("2026-08-01T00:00:00.000Z"),
+      maxSessionTtlSeconds: 3600,
+      capabilityCeiling: ["change.implement", "change.ready", "branch.advance"],
+    });
+    writeLocalJson(
+      "admission",
+      "runtime-authority.json",
+      authorityWithoutPullRequest,
+      (value) => {
+        const valid = validateDelegator(value);
+        if (!valid.valid || valid.value === undefined) throw new Error("invalid authority");
+        return valid.value;
+      },
+      missingCeilingEnvironment,
+    );
+    await assert.rejects(start({ environment: missingCeilingEnvironment }), {
+      code: "ADMISSION_SESSION_CAPABILITY_UNAVAILABLE",
+    });
+    assert.equal(registered.length, 1);
     for (const issue of [1208, 1209])
       assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, issue)?.rootIssue, issue);
     for (const issue of [1213, 7, 4242])
@@ -289,7 +330,7 @@ test("#1213 a Session launches with the full Source-bound lifecycle for more tha
       key: keyPair,
       notBefore: new Date("2026-08-01T00:00:00.000Z"),
       maxSessionTtlSeconds: 3600,
-      capabilityCeiling: [...lifecycle, "branch.advance"],
+      capabilityCeiling: [...lifecycle, "branch.advance", "pullRequest.create"],
     });
     writeLocalJson(
       "admission",
@@ -385,7 +426,7 @@ test("#1213 a Session launches with the full Source-bound lifecycle for more tha
     assert.deepEqual(binding.task, { kind: "issue", number: 1213 });
     assert.deepEqual(binding.capabilities, [
       ...sameRepository.flatMap((issue) => lifecycle.map((kind) => ({ kind, issue }))),
-      { kind: "change.implement", issue: 1213 },
+      { kind: "pullRequest.create", head: "fix/1213-source-binding", base: "main", max: 1 },
       { kind: "branch.advance", branch: "fix/1213-source-binding" },
     ]);
     for (const issue of sameRepository)

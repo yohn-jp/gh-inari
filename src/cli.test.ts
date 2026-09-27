@@ -5231,6 +5231,11 @@ function sourceImplementationEvidence(
   sources: readonly Record<string, unknown>[],
   baseHead: string,
   projection: ReturnType<typeof projectChangeFromGitHubEvidence>,
+  currentBase: { readonly branch: string; readonly revision: string; readonly freshness: string } = {
+    branch: "main",
+    revision: baseHead,
+    freshness: baseHead,
+  },
 ): Record<string, unknown> {
   const reference = { ...SOURCE_REPOSITORY, number: SOURCE_IMPLEMENTATION };
   const body = renderImplementationIssueBody({
@@ -5266,7 +5271,7 @@ function sourceImplementationEvidence(
     implementation: reference,
     issue: { reference, body },
     repository: SOURCE_REPOSITORY,
-    base: { branch: "main", revision: baseHead, freshness: baseHead },
+    base: currentBase,
     readiness: { evidence: [] },
     change: projection,
   };
@@ -5378,6 +5383,7 @@ test("#1213 an Implementation Session issues and shows only its current canonica
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
   // The Implementation's own branch-side projection (PR publication / branch.advance), never a Source root.
   let implementationHead = baseHead;
+  let currentImplementationBaseEvidence = { branch: "main", revision: baseHead, freshness: baseHead };
   const implementationProjection = () =>
     sourceChangeProjection(SOURCE_IMPLEMENTATION, SOURCE_BRANCH, implementationHead);
   const executions: { readonly operation: string; readonly issue: number }[] = [];
@@ -5389,7 +5395,14 @@ test("#1213 an Implementation Session issues and shows only its current canonica
     key: keyPair,
     notBefore: new Date("2026-01-01T00:00:00.000Z"),
     maxSessionTtlSeconds: 3_600,
-    capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge", "branch.advance"],
+    capabilityCeiling: [
+      "change.implement",
+      "change.ready",
+      "change.abort",
+      "change.merge",
+      "branch.advance",
+      "pullRequest.create",
+    ],
   });
   writeLocalJson(
     "admission",
@@ -5437,7 +5450,12 @@ test("#1213 an Implementation Session issues and shows only its current canonica
       return {
         ...trust,
         change: projection,
-        implementation: sourceImplementationEvidence(currentSources, baseHead, implementationProjection()),
+        implementation: sourceImplementationEvidence(
+          currentSources,
+          baseHead,
+          implementationProjection(),
+          currentImplementationBaseEvidence,
+        ),
       };
     },
     readGovernedContract: async () =>
@@ -5520,15 +5538,24 @@ test("#1213 an Implementation Session issues and shows only its current canonica
     assert.ok(binding);
     // The Session task stays the Implementation; change.* claims are exactly the same-repository Sources.
     assert.deepEqual(binding.task, { kind: "issue", number: SOURCE_IMPLEMENTATION });
+    assert.deepEqual(binding.implementationBinding?.base, currentImplementationBaseEvidence);
     assert.deepEqual(
       binding.capabilities.filter((claim) => claim.kind !== "branch.advance"),
       [
         ...[1208, 1209].flatMap((issue) =>
           ["change.implement", "change.ready", "change.abort", "change.merge"].map((kind) => ({ kind, issue })),
         ),
-        // The single task-bound compatibility claim: Implementation PR publication, never a Change root.
-        { kind: "change.implement", issue: SOURCE_IMPLEMENTATION },
+        { kind: "pullRequest.create", head: SOURCE_BRANCH, base: "main", max: 1 },
       ],
+    );
+    assert.deepEqual(
+      binding.capabilities.find((claim) => claim.kind === "pullRequest.create"),
+      {
+        kind: "pullRequest.create",
+        head: SOURCE_BRANCH,
+        base: binding.implementationBinding?.base.branch,
+        max: 1,
+      },
     );
     assert.deepEqual(
       binding.capabilities.filter((claim) => claim.kind === "branch.advance"),
@@ -5552,6 +5579,24 @@ test("#1213 an Implementation Session issues and shows only its current canonica
       assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, issue)?.rootIssue, issue);
     assert.equal(readLocalSessionChangeIssueProvenance(binding, environment), undefined);
     assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, 7), undefined);
+
+    const acceptedBaseEvidence = currentImplementationBaseEvidence;
+    currentImplementationBaseEvidence = {
+      branch: "main",
+      revision: "f".repeat(40),
+      freshness: "f".repeat(40),
+    };
+    const staleAuthorization = await captureCli(
+      ["session", "start", "--issue", String(SOURCE_IMPLEMENTATION), "--", process.execPath, "-e", "process.exit(0)"],
+      environment,
+      dependencies,
+    );
+    assert.notEqual(staleAuthorization.exitCode, 0, staleAuthorization.stdout);
+    assert.deepEqual(
+      (await readdir(sessionsDirectory)).filter((name) => name.endsWith(".json")),
+      [bindingFile],
+    );
+    currentImplementationBaseEvidence = acceptedBaseEvidence;
 
     environment.INARI_SESSION_ID = sessionId;
     for (const issue of [1208, 1209]) {
