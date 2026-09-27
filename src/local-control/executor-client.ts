@@ -77,20 +77,24 @@ function validTaskTerminationObservation(
     )
   )
     return false;
-  if (
-    value.provenance !== undefined &&
-    (!record(value.provenance) ||
-      Object.keys(value.provenance).length > 4 ||
-      !Object.values(value.provenance).every((entry) => typeof entry === "string" && entry.length <= 128))
-  )
-    return false;
+  const validProvenance =
+    record(value.provenance) &&
+    Object.keys(value.provenance).length >= 1 &&
+    Object.keys(value.provenance).length <= 4 &&
+    Object.values(value.provenance).every(
+      (entry) => typeof entry === "string" && entry.length >= 1 && entry.length <= 128,
+    );
+  if (value.provenance !== undefined && !validProvenance) return false;
   const common = ["status", "provenance", "recordProvenance"];
   if (value.status === "present")
     return (
+      validProvenance &&
+      value.recordProvenance.length >= 1 &&
       exactKeys(value, [...common, "record"]) &&
       validateImplementationTaskTerminationRecord(value.record, authorization).valid
     );
-  if (value.status === "absent" || value.status === "unavailable") return exactKeys(value, common);
+  if (value.status === "absent" || value.status === "unavailable")
+    return validProvenance && value.recordProvenance.length === 0 && exactKeys(value, common);
   return (
     value.status === "invalid" &&
     exactKeys(value, [...common, "violations"]) &&

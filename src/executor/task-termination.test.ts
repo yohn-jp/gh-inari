@@ -9,6 +9,7 @@ import {
 import { authorizeImplementation } from "../implementation-authorization.js";
 import type { CurrentImplementationAdmissionEvidence } from "../implementation-frontier-composition.js";
 import type { GitHubBranchAdvanceCapability } from "../github/git-data-capability.js";
+import type { GitHubAppRepositoryReadCapability } from "../github/app-installation-credential-broker.js";
 import { TASK_TERMINATION_METADATA_BRANCH } from "../github/task-termination-record.js";
 import {
   finalizeExecutorTaskTermination,
@@ -160,19 +161,23 @@ test("uncertain provider effect is not retried or reported successful", async ()
 
 test("task evidence uses the read-only App transport and cannot issue a write", async () => {
   const methods: string[] = [];
-  const reader = taskTerminationReadCapability(
-    {
-      providerPrincipal: { kind: "github-app", slug: "inari-issuer", appId: "1", principal: "app:inari-issuer" },
-      scope: gitData().capability.scope,
-      transport: {
-        request: async (request) => {
-          methods.push(request.method);
-          return { status: 200, body: { ref: "refs/heads/main", object: { type: "commit", sha: base.revision } } };
-        },
+  const scoped = {
+    providerPrincipal: { kind: "github-app", slug: "inari-issuer", appId: "1", principal: "app:inari-issuer" },
+    scope: gitData().capability.scope,
+    transport: {
+      request: async (request) => {
+        methods.push(request.method);
+        return { status: 200, body: { ref: "refs/heads/main", object: { type: "commit", sha: base.revision } } };
       },
     },
-    { repositoryHost: "github.com", repositoryId: repository.repositoryId, nameWithOwner: repository.repository },
-  );
+  } satisfies GitHubAppRepositoryReadCapability;
+  const identity = {
+    repositoryHost: "github.com",
+    repositoryId: repository.repositoryId,
+    nameWithOwner: repository.repository,
+  };
+  assert.throws(() => taskTerminationReadCapability(scoped, { ...identity, repositoryId: "9" }));
+  const reader = taskTerminationReadCapability(scoped, identity);
   assert.equal((await reader.readRef("main"))?.sha, base.revision);
   await assert.rejects(reader.createBlob({ content: "YQ==" }));
   assert.deepEqual(methods, ["GET"]);

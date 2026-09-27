@@ -26,6 +26,12 @@ export function taskTerminationReadCapability(
 ): GitHubBranchAdvanceCapability {
   const parts = identity.nameWithOwner.split("/");
   if (parts.length !== 2) throw new TypeError("Repository locator is invalid.");
+  if (
+    capability.scope.repository.repositoryHost.toLowerCase() !== identity.repositoryHost.toLowerCase() ||
+    capability.scope.repository.repositoryId !== identity.repositoryId ||
+    capability.scope.repository.nameWithOwner.toLowerCase() !== identity.nameWithOwner.toLowerCase()
+  )
+    throw new TypeError("Task evidence repository binding is invalid.");
   return new GitHubBranchAdvanceCapabilityImpl({
     repository: { hostname: identity.repositoryHost, owner: parts[0]!, name: parts[1]! },
     repositoryId: identity.repositoryId,

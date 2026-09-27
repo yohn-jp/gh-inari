@@ -141,13 +141,19 @@ test("Executor client accepts bounded exact task status and rejects malformed or
       endpoint: "http://127.0.0.1:8765",
       fetch: async () => response(taskTermination, executorId),
     });
-  assert.deepEqual(await client({ status: "absent", recordProvenance: [] }).readEvidence(request), {
+  const absent = {
+    status: "absent",
+    provenance: { source: "github-git-data", commit: "a".repeat(40) },
+    recordProvenance: [],
+  };
+  assert.deepEqual(await client(absent).readEvidence(request), {
     repository: { repositoryHost: "github.com", repositoryId: "123456789", nameWithOwner: "acme/inari" },
     implementation: { implementation: authorization.implementation },
-    taskTermination: { status: "absent", recordProvenance: [] },
+    taskTermination: absent,
   });
   for (const task of [
-    { status: "absent" },
+    { status: "absent", recordProvenance: [] },
+    { ...absent, provenance: {} },
     { status: "present", recordProvenance: [], record: { version: 1 } },
     { status: "unavailable", recordProvenance: [], token: "secret" },
   ])
@@ -156,7 +162,7 @@ test("Executor client accepts bounded exact task status and rejects malformed or
       (error: unknown) => error instanceof LocalExecutorClientError && error.code === "EXECUTOR_PROTOCOL_INVALID",
     );
   await assert.rejects(
-    client({ status: "absent", recordProvenance: [] }, "exec_fedcba9876543210").readEvidence(request),
+    client(absent, "exec_fedcba9876543210").readEvidence(request),
     (error: unknown) => error instanceof LocalExecutorClientError && error.code === "EXECUTOR_IDENTITY_MISMATCH",
   );
 });
