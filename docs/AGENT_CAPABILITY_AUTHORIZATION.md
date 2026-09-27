@@ -512,10 +512,36 @@ A Source operation requires membership in both signed and current Source
 sets. There is no implicit primary Source. Unrelated, removed, malformed,
 cross-repository, or stale Source evidence is denied.
 
-Exactly the existing task-bound `change.implement` compatibility claim may
-support leaf PR publication/branch-side fallback. It must not authorize
-`change.issue/show/ready/abort/merge` on the Implementation as a Change root.
-This renewal does not add `pullRequest.create` to existing Authority ceilings.
+For newly authorized Implementation task Sessions, current repository and
+task policy must authorize exact leaf PR publication before Runtime Authority
+adds `pullRequest.create` to its capability ceiling and issues the explicit
+claim in the Authority-signed LocalSessionBinding. That claim is scoped to
+the immutable repository, Implementation task, exact leaf head and accepted
+base, and the bound publication request. Admission checks those identities
+against current policy and evidence for each operation. Neither the App's
+provider permission, a branch name, nor `change.implement` creates the
+claim. `branch.advance` remains a separate exact branch-write grant.
+
+The #1213 LocalSessionBinding version 1 task-bound `change.implement` claim
+is a legacy input. Its canonical output is only same-task Implementation
+leaf PR publication; it is not a `pullRequest.create` claim or an
+Implementation-root Change grant. The existing Session launcher is its
+producer; capability admission and authorized execution are its consumers.
+For an already signed valid binding, those consumers verify its original
+signature, trust, task, immutable repository, validity interval, exact leaf
+head and accepted base, bound request, and current repository/task policy.
+They admit only that same-task leaf publication, never
+`change.issue/show/ready/abort/merge` on the Implementation as a Change root
+or a branch write through this claim. Existing bindings gain no new grant;
+their bridge eligibility ends at original expiry or explicit reissue.
+
+Once the replacement producer is active, new task Session issuance omits
+the compatibility claim and signs the exact `pullRequest.create` claim only
+under the new ceiling and policy. Keep legacy consumer validation until no
+active valid legacy binding can require it and end-to-end tests certify
+issuance, Admission, authorized execution, provider publication, and
+postcondition verification through the explicit path. Then retire bridge
+admission. Historical readers may still classify old binding data.
 
 ### 11.4 Branch advancement
 

@@ -237,12 +237,27 @@ make a Change operation pass an equality check.
 The signed local binding retains task identity, branch observation, and
 current Implementation authorization with its Source set. Source lifecycle
 claims are issued for that set. Branch advancement remains exact leaf-branch
-authority.
+authority under `branch.advance`.
 
-The #1213 task-bound `change.implement` compatibility claim may support
-Implementation leaf publication/branch-side composition only. It must not
-permit the Implementation to masquerade as a Source Change. No additional
-Authority ceiling is introduced merely to remove the compatibility bridge.
+Newly authorized Implementation task Sessions receive an explicit
+`pullRequest.create` claim in the Runtime Authority ceiling and signed
+binding only when current repository and task policy authorize that exact
+leaf publication. The claim and each publication request must match the
+immutable repository, Implementation, exact leaf head, accepted base, and
+current policy. The claim is not inferred from `change.implement`, branch
+spelling, or an App permission.
+
+For a valid #1213 binding issued before replacement, the task-bound
+`change.implement` claim remains a compatibility input only for exact
+same-task Implementation leaf PR publication. Admission must verify the
+original signed binding and validity interval, current task authorization,
+repository, leaf head, accepted base, request, and current policy. It must
+not reinterpret the old claim as a new `pullRequest.create` grant or permit
+Implementation-root Source Change operations. Its use ends at the binding's
+original expiry or explicit reissue; replacement issuance omits it. Retire
+legacy admission only after no active valid binding can require it and the
+explicit path has end-to-end proof. Historical readers may still classify
+old bindings.
 
 ### 6.4 Publication and integration
 

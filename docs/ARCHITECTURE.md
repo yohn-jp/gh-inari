@@ -191,9 +191,22 @@ semantic operation IDs, an immutable repository ID, and exact targets. A
 grant cannot widen current Implementation authorization, Source membership,
 branch/base, execution scope, or effect preconditions.
 
-The #1213 task-bound `change.implement` compatibility claim remains restricted
-to Implementation publication/branch-side composition. It is not an
-Implementation-root Change grant and does not add a new capability ceiling.
+For newly authorized Implementation task Sessions, the Runtime Authority
+ceiling and Authority-signed Session binding explicitly include
+`pullRequest.create` only when current repository and task policy authorize
+that exact operation. Admission binds it to the immutable repository, the
+Implementation, the exact leaf head and accepted base, the request, and
+current policy. Neither `change.implement` nor branch spelling supplies this
+grant. `branch.advance` retains its separate exact leaf-branch authority.
+
+An existing valid #1213 signed Session may use its task-bound
+`change.implement` compatibility claim only for the same Implementation's
+leaf PR publication until that binding's original expiry or explicit reissue.
+It gains no new capability and cannot use the claim for an
+Implementation-root Source Change operation. Replacement issuance stops the
+task-bound compatibility claim; bridge admission retires after no active
+valid legacy binding can require it and the explicit publication path has
+end-to-end certification. Historical binding readers may remain.
 
 ### ARC-04: Hosted authenticates and relays
 
