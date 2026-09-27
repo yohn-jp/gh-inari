@@ -4,6 +4,7 @@ export * from "./native-template-projection.js";
 export * from "./effective-artifact-contract.js";
 export * from "./semantic-artifact.js";
 export * from "./schema.js";
+export * from "./json-schema-runtime.js";
 export * from "./issue-form.js";
 export * from "./validation.js";
 export * from "./constraints.js";
