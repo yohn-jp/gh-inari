@@ -7,6 +7,7 @@ import {
   canonicalizeImplementationScopePath,
   implementationContractDigest,
   implementationContractFromIssueFields,
+  implementationIssueBodyDigest,
   implementationIssueFieldsFromContract,
   isImplementationPathAllowed,
   parseImplementationContract,
@@ -345,4 +346,57 @@ test("reserved integration branch names are strict in Implementation execution m
   const malformedBranchResult = validateImplementationContract(malformedBranch);
   assert.equal(malformedBranchResult.valid, false);
   assert.ok(malformedBranchResult.violations.some((violation) => violation.path === "$.execution.branch"));
+});
+
+test("Implementation Issue parsing uses Markdown headings and preserves canonical identity", () => {
+  const contract = parseImplementationContract(validContract());
+  const body = renderImplementationIssueBody(contract);
+  const parsed = parseImplementationIssueBody(body);
+
+  assert.equal(parsed.valid, true);
+  assert.deepEqual(parsed.contract, contract);
+  assert.equal(renderImplementationIssueBody(parsed.contract), body);
+  assert.equal(implementationIssueBodyDigest(body), "f2b91c85e22a027aeeacf218bcefa7db5a14e18ab960b6b770d4190f93c561d1");
+});
+
+test("Implementation Issue parsing ignores heading-like fenced text and accepts Markdown H3 indentation", () => {
+  const objective =
+    "Add a canonical Implementation execution contract.\n\n```md\n### Not a field\n```\n\nKeep this text.";
+  const body = renderImplementationIssueBody(validContract({ objective })).replace(
+    "### Objective\n",
+    " ### Objective\n",
+  );
+  const parsed = parseImplementationIssueBody(body);
+
+  assert.equal(parsed.valid, true);
+  assert.equal(parsed.contract?.objective, objective);
+  assert.equal(
+    implementationIssueBodyDigest(body),
+    implementationIssueBodyDigest(renderImplementationIssueBody(validContract({ objective }))),
+  );
+});
+
+test("Implementation Issue parsing rejects unknown and duplicate H3 headings and out-of-field content", () => {
+  const body = renderImplementationIssueBody(validContract());
+  const unknown = parseImplementationIssueBody(body.replace("### Objective", "### Unknown field"));
+  assert.equal(unknown.valid, false);
+  assert.deepEqual(unknown.violations[0], {
+    code: "IMPLEMENTATION_BODY_UNKNOWN_HEADING",
+    path: "$",
+    message: 'Unknown Implementation heading "Unknown field".',
+  });
+
+  const duplicate = parseImplementationIssueBody(
+    body.replace("### Architecture decision", "### Objective\n\nA duplicate objective.\n\n### Architecture decision"),
+  );
+  assert.equal(duplicate.valid, false);
+  assert.deepEqual(duplicate.violations[0], {
+    code: "IMPLEMENTATION_BODY_DUPLICATE_FIELD",
+    path: "$.objective",
+    message: "Issue body field appears more than once.",
+  });
+
+  const outside = parseImplementationIssueBody(`Unexpected preamble.\n\n${body}`);
+  assert.equal(outside.valid, false);
+  assert.ok(outside.violations.some((violation) => violation.code === "IMPLEMENTATION_BODY_INVALID"));
 });
