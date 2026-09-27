@@ -85,6 +85,14 @@ function publicationRepositoryMatches(
   );
 }
 
+function publicationRootIssue(input: PrPublicationCreateInput): number {
+  const identity = input.workIdentity;
+  if ("release" in identity) throw new Error("Release publication has no Issue-scoped create effect.");
+  if (identity.role === "issue-integration") return identity.sourceIssue.number;
+  if (identity.role === "epic-integration") return identity.epic.number;
+  return identity.implementation.number;
+}
+
 /**
  * Canonical GitHub App adapter for governed PR publication. Local Executor
  * composition and direct-App compatibility share this provider/effect seam.
@@ -149,7 +157,7 @@ export function createPrPublicationProvider(input: {
             kind: "CREATE_PULL_REQUEST",
             branch: input.head,
             baseBranch: input.base,
-            rootIssue: input.workIdentity.implementation.number,
+            rootIssue: publicationRootIssue(input),
             title: input.title,
             body: input.body,
             draft: true,

@@ -15,6 +15,8 @@ import { deriveReleasePrPublicationRoute, type ReleasePrPublicationRoute } from 
 export const PR_PUBLICATION_CONTRACT_VERSION = 1 as const;
 export type PrPublicationContractVersion = typeof PR_PUBLICATION_CONTRACT_VERSION;
 export const PR_PUBLICATION_KIND = "pr-publication" as const;
+const PR_PUBLICATION_IDENTITY_MARKER_KIND = "pr-publication-identity" as const;
+const PR_PUBLICATION_IDENTITY_MARKER_VERSION = 1 as const;
 export const PR_PUBLICATION_RESULT_CLASSIFICATIONS = Object.freeze(["created", "returned-existing", "failed"] as const);
 export type PrPublicationResultClassification = (typeof PR_PUBLICATION_RESULT_CLASSIFICATIONS)[number];
 
@@ -24,11 +26,31 @@ export interface PrPublicationRepositoryIdentity {
   readonly repository?: string;
 }
 
-/** The existing governed Implementation identity remains repository-bound. */
+/** A governed Implementation leaf publication remains repository-bound. */
 export interface PrPublicationImplementationWorkIdentity {
+  /** Omitted only by the bounded pre-role Implementation compatibility form. */
+  readonly role?: "implementation";
   readonly implementation: IssueReference;
   readonly sourceIssue?: IssueReference;
+  readonly epic?: IssueReference;
   readonly identityKey?: string;
+}
+
+/** A Source Change integration PR is bound to its Source and parent Epic. */
+export interface PrPublicationSourceIntegrationWorkIdentity {
+  readonly role: "issue-integration";
+  /** Type-only compatibility slot for older Implementation-only readers. */
+  readonly implementation?: Readonly<{ readonly number?: never }>;
+  readonly sourceIssue: IssueReference;
+  readonly epic: IssueReference;
+}
+
+/** An Epic integration PR is bound to the Epic it composes. */
+export interface PrPublicationEpicIntegrationWorkIdentity {
+  readonly role: "epic-integration";
+  /** Type-only compatibility slot for older Implementation-only readers. */
+  readonly implementation?: Readonly<{ readonly number?: never }>;
+  readonly epic: IssueReference;
 }
 
 /** Issue-less release publication identity. */
@@ -45,8 +67,12 @@ export interface PrPublicationReleaseWorkIdentity {
   }>;
 }
 
-/** Publication identity is intentionally closed: Implementation or release. */
-export type PrPublicationWorkIdentity = PrPublicationImplementationWorkIdentity | PrPublicationReleaseWorkIdentity;
+/** Publication identity follows the canonical route role. */
+export type PrPublicationWorkIdentity =
+  | PrPublicationImplementationWorkIdentity
+  | PrPublicationSourceIntegrationWorkIdentity
+  | PrPublicationEpicIntegrationWorkIdentity
+  | PrPublicationReleaseWorkIdentity;
 
 export type PrPublicationRouting = IntegrationRoutingProjection | ReleasePrPublicationRoute;
 
@@ -145,6 +171,7 @@ export interface NormalizedPrPublicationRequest {
   readonly expectedBase: string;
   readonly headRevision: string;
   readonly title: string;
+  /** Provider body; Source/Epic roles include the hidden canonical binding. */
   readonly body: string;
   readonly draft?: boolean;
   readonly maintainerCanModify?: boolean;
@@ -312,14 +339,45 @@ function normalizeWorkIdentity(
 ): PrPublicationWorkIdentity | undefined {
   if (isRecord(value) && value.release !== undefined) return releaseWorkIdentity(value, path, diagnostics);
   const source =
-    isRecord(value) && (value.implementation !== undefined || value.issue !== undefined)
+    isRecord(value) && ("role" in value || "implementation" in value || "issue" in value)
       ? value
       : { implementation: value };
+  const role = source.role;
+  const allowed =
+    role === "issue-integration"
+      ? new Set(["role", "sourceIssue", "epic"])
+      : role === "epic-integration"
+        ? new Set(["role", "epic"])
+        : new Set(["role", "implementation", "issue", "sourceIssue", "epic", "identityKey"]);
+  for (const key of Object.keys(source))
+    if (!allowed.has(key))
+      diagnostics.push(
+        diagnostic("PR_PUBLICATION_WORK_IDENTITY_INVALID", `${path}.${key}`, "Property is not supported."),
+      );
+
+  if (role !== undefined && role !== "implementation" && role !== "issue-integration" && role !== "epic-integration")
+    diagnostics.push(
+      diagnostic("PR_PUBLICATION_WORK_IDENTITY_INVALID", `${path}.role`, "Publication role is not supported."),
+    );
+
+  if (role === "issue-integration") {
+    const sourceIssue = issueReference(source.sourceIssue, `${path}.sourceIssue`, diagnostics);
+    const epic = issueReference(source.epic, `${path}.epic`, diagnostics);
+    if (sourceIssue === undefined || epic === undefined || diagnostics.length > 0) return undefined;
+    return { role, sourceIssue, epic };
+  }
+  if (role === "epic-integration") {
+    const epic = issueReference(source.epic, `${path}.epic`, diagnostics);
+    if (epic === undefined || diagnostics.length > 0) return undefined;
+    return { role, epic };
+  }
+
   const implementation = issueReference(source.implementation ?? source.issue, `${path}.implementation`, diagnostics);
   const sourceIssue =
     source.sourceIssue === undefined
       ? undefined
       : issueReference(source.sourceIssue, `${path}.sourceIssue`, diagnostics);
+  const epic = source.epic === undefined ? undefined : issueReference(source.epic, `${path}.epic`, diagnostics);
   const identityKey = source.identityKey;
   if (
     identityKey !== undefined &&
@@ -332,58 +390,304 @@ function normalizeWorkIdentity(
         "Identity key must be a bounded non-empty string.",
       ),
     );
-  if (implementation === undefined) return undefined;
+  if (implementation === undefined || diagnostics.length > 0) return undefined;
   return {
     implementation,
     ...(sourceIssue === undefined ? {} : { sourceIssue }),
+    ...(epic === undefined ? {} : { epic }),
     ...(typeof identityKey === "string" ? { identityKey } : {}),
   };
 }
 
 function workIdentityKey(value: PrPublicationWorkIdentity): string {
   if ("release" in value) return `release:${value.release.targetVersion}:${value.release.sourceRevision}`;
-  // The GitHub PR relation persists the governed Implementation reference;
-  // authorization/source evidence remains request-side binding data and is
-  // intentionally not reconstructed from mutable PR prose.
-  return issueReferenceKey(value.implementation);
+  if (value.role === "issue-integration")
+    return `issue-integration:${issueReferenceKey(value.sourceIssue)}:${issueReferenceKey(value.epic)}`;
+  if (value.role === "epic-integration") return `epic-integration:${issueReferenceKey(value.epic)}`;
+  return `implementation:${issueReferenceKey(value.implementation)}:${value.sourceIssue ? issueReferenceKey(value.sourceIssue) : ""}:${value.epic ? issueReferenceKey(value.epic) : ""}`;
 }
 
-function bodyWorkIdentity(
-  body: string | null | undefined,
-  repository: PrPublicationRepositoryIdentity,
-): PrPublicationWorkIdentity | undefined {
-  if (typeof body !== "string") return undefined;
-  const marker = /inari:pr-publication\s+(\{[^\n]*\})/u.exec(body);
-  if (marker !== null) {
-    try {
-      const parsed = JSON.parse(marker[1]!) as unknown;
-      const diagnostics: PrPublicationDiagnostic[] = [];
-      const normalized = normalizeWorkIdentity(parsed, "$.bodyMarker", diagnostics);
-      if (normalized !== undefined && diagnostics.length === 0) return normalized;
-    } catch {
-      // The body is provider data. It is simply not identity evidence when malformed.
-    }
+function workIdentityMatchesRouting(
+  workIdentity: PrPublicationWorkIdentity,
+  routing: IntegrationRoutingProjection,
+): boolean {
+  if ("release" in workIdentity || (workIdentity.role ?? "implementation") !== routing.role) return false;
+  if (routing.role === "implementation") {
+    if (
+      (workIdentity.role !== undefined && workIdentity.role !== "implementation") ||
+      routing.implementation === undefined ||
+      issueReferenceKey(workIdentity.implementation) !== issueReferenceKey(routing.implementation)
+    )
+      return false;
+    if (
+      workIdentity.sourceIssue !== undefined &&
+      (routing.sourceIssue === undefined ||
+        issueReferenceKey(workIdentity.sourceIssue) !== issueReferenceKey(routing.sourceIssue))
+    )
+      return false;
+    if (
+      workIdentity.epic !== undefined &&
+      (routing.epic === undefined || issueReferenceKey(workIdentity.epic) !== issueReferenceKey(routing.epic))
+    )
+      return false;
+    return true;
   }
-  const match = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([1-9][0-9]*)\b/iu.exec(body);
-  if (match === null) return undefined;
-  const diagnostics: PrPublicationDiagnostic[] = [];
-  return normalizeWorkIdentity(
-    { implementation: { ...repository, number: Number(match[1]) } },
-    "$.bodyReference",
-    diagnostics,
+  if (routing.role === "issue-integration")
+    return (
+      workIdentity.role === "issue-integration" &&
+      routing.sourceIssue !== undefined &&
+      routing.epic !== undefined &&
+      issueReferenceKey(workIdentity.sourceIssue) === issueReferenceKey(routing.sourceIssue) &&
+      issueReferenceKey(workIdentity.epic) === issueReferenceKey(routing.epic)
+    );
+  return (
+    workIdentity.role === "epic-integration" &&
+    routing.epic !== undefined &&
+    issueReferenceKey(workIdentity.epic) === issueReferenceKey(routing.epic)
   );
+}
+
+function workIdentityReferences(value: PrPublicationWorkIdentity): readonly IssueReference[] {
+  if ("release" in value) return [];
+  if (value.role === "issue-integration") return [value.sourceIssue, value.epic];
+  if (value.role === "epic-integration") return [value.epic];
+  return [
+    value.implementation,
+    ...(value.sourceIssue === undefined ? [] : [value.sourceIssue]),
+    ...(value.epic === undefined ? [] : [value.epic]),
+  ];
+}
+
+type CandidateIdentityEvidence =
+  | {
+      readonly classification: "canonical";
+      readonly workIdentity: PrPublicationWorkIdentity;
+      readonly routing?: PrPublicationRouting;
+      readonly expectedHead?: string;
+      readonly expectedBase?: string;
+      readonly headRevision?: string;
+      readonly bodyContent?: string;
+    }
+  | {
+      readonly classification: "historical-implementation";
+      readonly workIdentity: PrPublicationImplementationWorkIdentity;
+      readonly bodyContent?: string;
+    }
+  | { readonly classification: "invalid"; readonly bodyContent?: string }
+  | undefined;
+
+function stableKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableKey).join(",")}]`;
+  if (isRecord(value))
+    return `{${Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${stableKey(value[key])}`)
+      .join(",")}}`;
+  return JSON.stringify(value) ?? "undefined";
+}
+
+interface PublicationIdentityMarker {
+  readonly version: typeof PR_PUBLICATION_IDENTITY_MARKER_VERSION;
+  readonly kind: typeof PR_PUBLICATION_IDENTITY_MARKER_KIND;
+  readonly workIdentity: PrPublicationWorkIdentity;
+  readonly routing: IntegrationRoutingProjection;
+  readonly expectedHead: string;
+  readonly expectedBase: string;
+  readonly headRevision: string;
+  readonly bodyLength: number;
+}
+
+function markerLine(marker: PublicationIdentityMarker): string {
+  const json = JSON.stringify(marker).replaceAll("<", "\\u003c").replaceAll("--", "\\u002d\\u002d");
+  return `<!-- inari:pr-publication ${json} -->`;
+}
+
+function parseMarkerValue(
+  value: unknown,
+):
+  | { readonly current: PublicationIdentityMarker }
+  | { readonly historical: PrPublicationImplementationWorkIdentity }
+  | { readonly invalid: true } {
+  if (!isRecord(value)) return { invalid: true };
+  if (value.kind !== PR_PUBLICATION_IDENTITY_MARKER_KIND && value.version !== PR_PUBLICATION_IDENTITY_MARKER_VERSION) {
+    const diagnostics: PrPublicationDiagnostic[] = [];
+    const identity = normalizeWorkIdentity(value, "$.bodyMarker", diagnostics);
+    return identity !== undefined &&
+      !isReleaseWorkIdentity(identity) &&
+      (identity.role === undefined || identity.role === "implementation") &&
+      diagnostics.length === 0
+      ? { historical: { ...identity, role: undefined } as PrPublicationImplementationWorkIdentity }
+      : { invalid: true };
+  }
+  if (
+    value.kind !== PR_PUBLICATION_IDENTITY_MARKER_KIND ||
+    value.version !== PR_PUBLICATION_IDENTITY_MARKER_VERSION ||
+    typeof value.expectedHead !== "string" ||
+    typeof value.expectedBase !== "string" ||
+    typeof value.headRevision !== "string" ||
+    !Number.isSafeInteger(value.bodyLength) ||
+    (value.bodyLength as number) < 0
+  )
+    return { invalid: true };
+  const identityDiagnostics: PrPublicationDiagnostic[] = [];
+  const workIdentity = normalizeWorkIdentity(value.workIdentity, "$.bodyMarker.workIdentity", identityDiagnostics);
+  const routing = tryAdaptIntegrationRouting(value.routing);
+  if (
+    workIdentity === undefined ||
+    identityDiagnostics.length > 0 ||
+    routing === undefined ||
+    !routing.valid ||
+    routing.projection === undefined ||
+    !workIdentityMatchesRouting(workIdentity, routing.projection) ||
+    routing.projection.expectedBase !== value.expectedBase ||
+    routing.projection.expectedHead !== value.expectedHead
+  )
+    return { invalid: true };
+  return {
+    current: {
+      version: PR_PUBLICATION_IDENTITY_MARKER_VERSION,
+      kind: PR_PUBLICATION_IDENTITY_MARKER_KIND,
+      workIdentity,
+      routing: routing.projection,
+      expectedHead: value.expectedHead,
+      expectedBase: value.expectedBase,
+      headRevision: value.headRevision,
+      bodyLength: value.bodyLength as number,
+    },
+  };
+}
+
+function bodyMarker(
+  body: string | null | undefined,
+):
+  | { readonly marker: PublicationIdentityMarker; readonly bodyContent: string }
+  | { readonly historical: PrPublicationImplementationWorkIdentity; readonly bodyContent: string }
+  | { readonly invalid: true }
+  | undefined {
+  if (typeof body !== "string") return undefined;
+  const start = body.lastIndexOf("inari:pr-publication ");
+  if (start < 0) return undefined;
+  const match = /inari:pr-publication\s+(\{[^\r\n]*\})\s+-->/u.exec(body.slice(start));
+  if (match === null || /inari:pr-publication\s+\{/u.test(body.slice(0, start))) return { invalid: true };
+  const markerStart = start >= 5 && body.slice(start - 5, start) === "<!-- " ? start - 5 : -1;
+  if (markerStart < 0 || body.slice(markerStart).trim() !== `<!-- ${match[0]}`) return { invalid: true };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[1]!);
+  } catch {
+    return { invalid: true };
+  }
+  const evidence = parseMarkerValue(parsed);
+  if ("invalid" in evidence) return evidence;
+  if ("historical" in evidence) {
+    return { historical: evidence.historical, bodyContent: body.slice(0, markerStart).replace(/\r?\n$/u, "") };
+  }
+  if (evidence.current.bodyLength > body.length) return { invalid: true };
+  const bodyContent = body.slice(0, evidence.current.bodyLength);
+  const separator = bodyContent.length === 0 || bodyContent.endsWith("\n") || bodyContent.endsWith("\r") ? "" : "\n";
+  if (
+    markerLine(evidence.current) !== body.slice(markerStart).trim() ||
+    markerStart < bodyContent.length ||
+    body.slice(bodyContent.length, markerStart) !== separator
+  )
+    return { invalid: true };
+  return { marker: evidence.current, bodyContent };
+}
+
+function bodyForIdentity(
+  bodyContent: string,
+  workIdentity: PrPublicationWorkIdentity,
+  routing: IntegrationRoutingProjection,
+  expectedHead: string,
+  expectedBase: string,
+  headRevision: string,
+): string {
+  if ("release" in workIdentity) return bodyContent;
+  const marker: PublicationIdentityMarker = {
+    version: PR_PUBLICATION_IDENTITY_MARKER_VERSION,
+    kind: PR_PUBLICATION_IDENTITY_MARKER_KIND,
+    workIdentity,
+    routing,
+    expectedHead,
+    expectedBase,
+    headRevision,
+    bodyLength: bodyContent.length,
+  };
+  const separator = bodyContent.length === 0 || bodyContent.endsWith("\n") || bodyContent.endsWith("\r") ? "" : "\n";
+  return `${bodyContent}${separator}${markerLine(marker)}`;
+}
+
+function requestBodyContent(request: NormalizedPrPublicationRequest): string {
+  const evidence = bodyMarker(request.body);
+  return evidence !== undefined && "bodyContent" in evidence ? evidence.bodyContent : request.body;
 }
 
 function candidateIdentity(
   candidate: PrPublicationRecord,
   repository: PrPublicationRepositoryIdentity,
-): PrPublicationWorkIdentity | undefined {
+): CandidateIdentityEvidence {
+  const bodyEvidence = bodyMarker(candidate.body);
+  if (bodyEvidence !== undefined && "invalid" in bodyEvidence) return { classification: "invalid" };
   const diagnostics: PrPublicationDiagnostic[] = [];
   const explicit =
     candidate.workIdentity === undefined
       ? undefined
       : normalizeWorkIdentity(candidate.workIdentity, "$.workIdentity", diagnostics);
-  return explicit ?? bodyWorkIdentity(candidate.body, repository);
+  if (candidate.workIdentity !== undefined && (explicit === undefined || diagnostics.length > 0))
+    return {
+      classification: "invalid",
+      ...(bodyEvidence !== undefined && "bodyContent" in bodyEvidence ? { bodyContent: bodyEvidence.bodyContent } : {}),
+    };
+  if (bodyEvidence !== undefined && "marker" in bodyEvidence) {
+    if (explicit !== undefined && workIdentityKey(explicit) !== workIdentityKey(bodyEvidence.marker.workIdentity))
+      return { classification: "invalid", bodyContent: bodyEvidence.bodyContent };
+    return {
+      classification: "canonical",
+      workIdentity: bodyEvidence.marker.workIdentity,
+      routing: bodyEvidence.marker.routing,
+      expectedHead: bodyEvidence.marker.expectedHead,
+      expectedBase: bodyEvidence.marker.expectedBase,
+      headRevision: bodyEvidence.marker.headRevision,
+      bodyContent: bodyEvidence.bodyContent,
+    };
+  }
+  if (bodyEvidence !== undefined && "historical" in bodyEvidence) {
+    if (explicit !== undefined && workIdentityKey(explicit) !== workIdentityKey(bodyEvidence.historical))
+      return { classification: "invalid", bodyContent: bodyEvidence.bodyContent };
+    return {
+      classification: "historical-implementation",
+      workIdentity: bodyEvidence.historical,
+      bodyContent: bodyEvidence.bodyContent,
+    };
+  }
+  if (explicit !== undefined) {
+    if ("release" in explicit)
+      return { classification: "canonical", workIdentity: explicit, bodyContent: candidate.body ?? undefined };
+    if ((explicit.role === undefined || explicit.role === "implementation") && !isRecord(candidate.workIdentity))
+      return { classification: "historical-implementation", workIdentity: explicit };
+    if (
+      (explicit.role === undefined || explicit.role === "implementation") &&
+      isRecord(candidate.workIdentity) &&
+      !("role" in candidate.workIdentity)
+    )
+      return { classification: "historical-implementation", workIdentity: explicit };
+    return { classification: "canonical", workIdentity: explicit, bodyContent: candidate.body ?? undefined };
+  }
+  const match = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([1-9][0-9]*)\b/iu.exec(candidate.body ?? "");
+  if (match === null) return undefined;
+  const referenceDiagnostics: PrPublicationDiagnostic[] = [];
+  const legacy = normalizeWorkIdentity(
+    { implementation: { ...repository, number: Number(match[1]) } },
+    "$.bodyReference",
+    referenceDiagnostics,
+  );
+  return legacy === undefined || isReleaseWorkIdentity(legacy) || legacy.role !== undefined
+    ? { classification: "invalid" }
+    : {
+        classification: "historical-implementation",
+        workIdentity: { ...legacy, role: undefined } as PrPublicationImplementationWorkIdentity,
+      };
 }
 
 function requestResult(
@@ -524,7 +828,14 @@ function validateRequest(input: unknown): PrPublicationValidationResult {
       diagnostics.push(diagnostic("PR_PUBLICATION_ROUTING_INVALID", item.path, item.message));
   if (routing !== undefined && repository !== undefined) {
     if ("role" in routing && routing.role === "release") {
-      // Release routes deliberately carry no Issue references.
+      if (!isReleaseWorkIdentity(workIdentity))
+        diagnostics.push(
+          diagnostic(
+            "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
+            "$.workIdentity.role",
+            "Release routing requires the release work identity.",
+          ),
+        );
     } else {
       const refs = [routing.implementation, routing.sourceIssue, routing.epic].filter(
         (entry): entry is IssueReference => entry !== undefined,
@@ -541,51 +852,25 @@ function validateRequest(input: unknown): PrPublicationValidationResult {
               "Routing references must match the request repository.",
             ),
           );
-      if (
-        workIdentity !== undefined &&
-        !isReleaseWorkIdentity(workIdentity) &&
-        !sameRepository(
-          {
-            repositoryHost: workIdentity.implementation.repositoryHost,
-            repositoryId: workIdentity.implementation.repositoryId,
-          },
-          repository,
-        )
-      )
-        diagnostics.push(
-          diagnostic(
-            "PR_PUBLICATION_REPOSITORY_MISMATCH",
-            "$.workIdentity.implementation",
-            "Work identity must match the request repository.",
-          ),
-        );
-      if (
-        workIdentity !== undefined &&
-        !isReleaseWorkIdentity(workIdentity) &&
-        routing.implementation !== undefined &&
-        issueReferenceKey(workIdentity.implementation) !== issueReferenceKey(routing.implementation)
-      )
-        diagnostics.push(
-          diagnostic(
-            "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
-            "$.workIdentity.implementation",
-            "Work identity must match the canonical routing Implementation.",
-          ),
-        );
-      if (
-        workIdentity !== undefined &&
-        !isReleaseWorkIdentity(workIdentity) &&
-        workIdentity.sourceIssue !== undefined &&
-        routing.sourceIssue !== undefined &&
-        issueReferenceKey(workIdentity.sourceIssue) !== issueReferenceKey(routing.sourceIssue)
-      )
-        diagnostics.push(
-          diagnostic(
-            "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
-            "$.workIdentity.sourceIssue",
-            "Work identity source Issue must match canonical routing.",
-          ),
-        );
+      if (workIdentity !== undefined && !isReleaseWorkIdentity(workIdentity)) {
+        for (const ref of workIdentityReferences(workIdentity))
+          if (!sameRepository(ref, repository))
+            diagnostics.push(
+              diagnostic(
+                "PR_PUBLICATION_REPOSITORY_MISMATCH",
+                "$.workIdentity",
+                "Work identity references must match the request repository.",
+              ),
+            );
+        if (!workIdentityMatchesRouting(workIdentity, routing))
+          diagnostics.push(
+            diagnostic(
+              "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
+              "$.workIdentity",
+              "Work identity role and governed references must match canonical routing.",
+            ),
+          );
+      }
     }
   }
   const releaseExpectedHead =
@@ -657,6 +942,66 @@ function validateRequest(input: unknown): PrPublicationValidationResult {
     diagnostics.push(
       diagnostic("PR_PUBLICATION_MAINTAINER_INVALID", "$.maintainerCanModify", "maintainerCanModify must be boolean."),
     );
+  let bodyContent = typeof input.body === "string" ? input.body : "";
+  let publicationBody = bodyContent;
+  if (
+    typeof input.body === "string" &&
+    workIdentity !== undefined &&
+    !isReleaseWorkIdentity(workIdentity) &&
+    (workIdentity.role === "issue-integration" || workIdentity.role === "epic-integration") &&
+    routing !== undefined &&
+    !("role" in routing && routing.role === "release") &&
+    typeof expectedHead === "string" &&
+    typeof expectedBase === "string" &&
+    typeof input.headRevision === "string"
+  ) {
+    const existingMarker = bodyMarker(input.body);
+    if (existingMarker !== undefined && "invalid" in existingMarker) {
+      diagnostics.push(
+        diagnostic(
+          "PR_PUBLICATION_WORK_IDENTITY_INVALID",
+          "$.body",
+          "Publication identity marker is malformed or contradictory.",
+        ),
+      );
+    } else if (existingMarker !== undefined && "marker" in existingMarker) {
+      const marker = existingMarker.marker;
+      if (
+        workIdentityKey(marker.workIdentity) !== workIdentityKey(workIdentity) ||
+        stableKey(marker.routing) !== stableKey(routing) ||
+        marker.expectedHead !== expectedHead ||
+        marker.expectedBase !== expectedBase ||
+        marker.headRevision !== input.headRevision
+      )
+        diagnostics.push(
+          diagnostic(
+            "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
+            "$.body",
+            "Publication identity marker must match the governed role, route, and revision.",
+          ),
+        );
+      bodyContent = existingMarker.bodyContent;
+    } else if (existingMarker !== undefined && "historical" in existingMarker) {
+      diagnostics.push(
+        diagnostic(
+          "PR_PUBLICATION_WORK_IDENTITY_MISMATCH",
+          "$.body",
+          "Historical Implementation identity cannot bind another publication role.",
+        ),
+      );
+      bodyContent = existingMarker.bodyContent;
+    }
+    publicationBody = bodyForIdentity(
+      bodyContent,
+      workIdentity,
+      routing,
+      expectedHead,
+      expectedBase,
+      input.headRevision,
+    );
+    if (publicationBody.length > 1_000_000)
+      diagnostics.push(diagnostic("PR_PUBLICATION_BODY_INVALID", "$.body", "Bound publication body is too large."));
+  }
   if (
     diagnostics.length > 0 ||
     repository === undefined ||
@@ -684,7 +1029,7 @@ function validateRequest(input: unknown): PrPublicationValidationResult {
     expectedBase,
     headRevision: input.headRevision,
     title: input.title,
-    body: input.body,
+    body: publicationBody,
     ...(typeof input.draft === "boolean" ? { draft: input.draft } : {}),
     ...(typeof input.maintainerCanModify === "boolean" ? { maintainerCanModify: input.maintainerCanModify } : {}),
   });
@@ -697,19 +1042,50 @@ export function tryValidatePrPublicationRequest(input: unknown): PrPublicationVa
 
 export const tryValidatePullRequestPublication = tryValidatePrPublicationRequest;
 
+function candidateIdentityMatchesRequest(
+  identity: CandidateIdentityEvidence,
+  request: NormalizedPrPublicationRequest,
+): boolean {
+  if (identity === undefined || identity.classification === "invalid") return false;
+  if (identity.classification === "historical-implementation")
+    return (
+      !isReleaseWorkIdentity(request.workIdentity) &&
+      (request.workIdentity.role === undefined || request.workIdentity.role === "implementation") &&
+      issueReferenceKey(identity.workIdentity.implementation) === issueReferenceKey(request.workIdentity.implementation)
+    );
+  if (workIdentityKey(identity.workIdentity) !== workIdentityKey(request.workIdentity)) return false;
+  if (!isReleaseWorkIdentity(request.workIdentity) && identity.routing === undefined) return false;
+  if (identity.routing !== undefined && stableKey(identity.routing) !== stableKey(request.routing)) return false;
+  if (identity.expectedHead !== undefined && identity.expectedHead !== request.expectedHead) return false;
+  if (identity.expectedBase !== undefined && identity.expectedBase !== request.expectedBase) return false;
+  if (identity.headRevision !== undefined && identity.headRevision !== request.headRevision) return false;
+  return true;
+}
+
 function candidateCoreMatches(candidate: PrPublicationRecord, request: NormalizedPrPublicationRequest): boolean {
   if (candidate.repository !== undefined && !sameRepository(candidate.repository, request.repository)) return false;
   if (candidate.head !== request.expectedHead || candidate.base !== request.expectedBase) return false;
   if (candidate.headRevision !== request.headRevision) return false;
   const identity = candidateIdentity(candidate, request.repository);
-  if ("release" in request.workIdentity && identity === undefined)
-    return request.expectedHead === `release/${request.workIdentity.release.targetVersion}`;
-  return identity !== undefined && workIdentityKey(identity) === workIdentityKey(request.workIdentity);
+  if (isReleaseWorkIdentity(request.workIdentity)) {
+    if (identity === undefined) return request.expectedHead === `release/${request.workIdentity.release.targetVersion}`;
+    return candidateIdentityMatchesRequest(identity, request);
+  }
+  return candidateIdentityMatchesRequest(identity, request);
+}
+
+function candidateBodyContent(candidate: PrPublicationRecord, request: NormalizedPrPublicationRequest): string | null {
+  const identity = candidateIdentity(candidate, request.repository);
+  if (identity !== undefined && "bodyContent" in identity && identity.bodyContent !== undefined)
+    return identity.bodyContent;
+  return candidate.body;
 }
 
 function candidateMatches(candidate: PrPublicationRecord, request: NormalizedPrPublicationRequest): boolean {
   return (
-    candidateCoreMatches(candidate, request) && candidate.title === request.title && candidate.body === request.body
+    candidateCoreMatches(candidate, request) &&
+    candidate.title === request.title &&
+    candidateBodyContent(candidate, request) === requestBodyContent(request)
   );
 }
 
@@ -717,11 +1093,12 @@ function candidateConflicts(candidate: PrPublicationRecord, request: NormalizedP
   if (candidate.repository !== undefined && !sameRepository(candidate.repository, request.repository)) return true;
   if (candidate.head !== request.expectedHead || candidate.base !== request.expectedBase) return false;
   if (candidate.headRevision !== request.headRevision) return true;
-  if (candidate.title !== request.title || candidate.body !== request.body) return true;
+  if (candidate.title !== request.title || candidateBodyContent(candidate, request) !== requestBodyContent(request))
+    return true;
   const identity = candidateIdentity(candidate, request.repository);
-  if ("release" in request.workIdentity && identity === undefined)
+  if (isReleaseWorkIdentity(request.workIdentity) && identity === undefined)
     return request.expectedHead !== `release/${request.workIdentity.release.targetVersion}`;
-  return identity === undefined || workIdentityKey(identity) !== workIdentityKey(request.workIdentity);
+  return !candidateIdentityMatchesRequest(identity, request);
 }
 
 function matchingResult(
