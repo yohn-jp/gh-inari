@@ -72,20 +72,28 @@ test("diagnose rejects a stale canonical executable from its standalone contract
   assert.match(String(canonical.detail), /command contract/u);
 });
 
-test("unknown diagnostic-looking argv is rejected without probing another process", async () => {
-  const lines: string[] = [];
-  const originalLog = console.log;
-  console.log = (line: string) => lines.push(line);
+test("unknown diagnostic-looking argv stays in Canon usage handling without probing", async () => {
+  const originalStderrWrite = process.stderr.write;
+  let stderr = "";
+  let probed = false;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stderr.write;
   try {
     const exitCode = await runCli(["repo", "view", "--diagnose", "--json"], {
       packageMetadata: { name: "gh-inari", version: "0.9.0", description: "" },
       runCanonicalDiagnosticCommand: () => {
-        throw new Error("diagnostic probe must not run for an unsupported command");
+        probed = true;
+        return { status: 0, stdout: versionOutput(), stderr: "" };
       },
     });
-    assert.equal(exitCode, 1);
-    assert.equal((JSON.parse(lines[0] ?? "{}") as { error?: { code?: string } }).error?.code, "UNKNOWN_COMMAND");
+    assert.equal(exitCode, 2);
+    assert.equal(probed, false);
+    const usage = JSON.parse(stderr) as { error?: { kind?: string; code?: string } };
+    assert.equal(usage.error?.kind, "usage");
+    assert.equal(usage.error?.code, "unknown-command");
   } finally {
-    console.log = originalLog;
+    process.stderr.write = originalStderrWrite;
   }
 });

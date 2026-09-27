@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { runCli } from "./cli.js";
 import {
   IMPLEMENTATION_CONTRACT_VERSION,
@@ -29,6 +31,17 @@ const CONTEXT: RepositoryContext = {
   url: "https://github.com/acme/inari",
   repositoryId: "415000001",
 };
+
+function capturePublicCliOutput(argv: readonly string[]) {
+  const moduleUrl = new URL("./cli.ts", import.meta.url).href;
+  const source = `import { runCli } from ${JSON.stringify(moduleUrl)}; process.exitCode = await runCli(${JSON.stringify(argv)});`;
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  return result;
+}
 
 const BRANCH: GitHubBranch = {
   name: "main",
@@ -263,18 +276,12 @@ function implementationAuthorizationRecord(body = implementationBody(), branch =
 }
 
 test("impl is discoverable and plan keeps inferred recommendations unauthorized", async () => {
-  const helpLines: string[] = [];
-  const originalLog = console.log;
-  try {
-    console.log = (line: string) => helpLines.push(line);
-    assert.equal(await runCli(["impl", "--help=json"]), 0);
-  } finally {
-    console.log = originalLog;
-  }
-  const help = JSON.parse(helpLines.at(-1) ?? "{}") as { commands: readonly { id: string }[] };
+  const helpResult = capturePublicCliOutput(["impl", "--help=json"]);
+  assert.equal(helpResult.status, 0, helpResult.stderr);
+  const help = JSON.parse(helpResult.stdout) as { commands: readonly { id: string }[] };
   assert.deepEqual(
     help.commands.map((entry) => entry.id),
-    ["impl.plan", "impl.show", "impl.validate", "impl.authorize", "impl.inspect", "impl.verify", "impl.frontier"],
+    ["impl.authorize", "impl.frontier", "impl.inspect", "impl.plan", "impl.show", "impl.validate", "impl.verify"],
   );
 
   const adapter = new ImplementationCliAdapter("A source Issue with a checklist.\n\n- [ ] Keep scope explicit");

@@ -39,6 +39,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/cli-core.d.ts",
   "dist/cli-core.js",
   "dist/cli-core.js.map",
+  "dist/cli-composition.d.ts",
+  "dist/cli-composition.js",
+  "dist/cli-composition.js.map",
   "dist/cli.d.ts",
   "dist/cli.js",
   "dist/cli.js.map",
@@ -1120,6 +1123,63 @@ export async function validateCodexPlugin(packageJson, packedFiles) {
   // Scenario routing is certified by the installed artifact harness below.
 }
 
+function certifyInstalledCli(consumer, installed, packageName) {
+  const environment = { ...process.env, INARI_CONFIG_HOME: path.join(consumer, ".inari-config") };
+  for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) delete environment[name];
+  const invoke = (args) => {
+    const result = spawnSync(process.execPath, [path.join(installed, "dist", "index.js"), ...args], {
+      cwd: consumer,
+      env: environment,
+      encoding: "utf8",
+    });
+    if (result.error) throw result.error;
+    return result;
+  };
+
+  const version = invoke(["--version", "--json"]);
+  if (version.status !== 0 || version.stderr !== "") {
+    throw new Error(`installed CLI Canon version shell failed: ${version.stdout}${version.stderr}`);
+  }
+  if (
+    JSON.stringify(JSON.parse(version.stdout)) !==
+    JSON.stringify({ name: packageName, version: packageJsonVersion(installed) })
+  ) {
+    throw new Error("installed CLI Canon version shell did not report the installed package identity");
+  }
+
+  const help = invoke(["--help"]);
+  if (help.status !== 0 || !help.stdout.includes("Usage: inari <command>")) {
+    throw new Error(`installed CLI Canon help shell failed: ${help.stdout}${help.stderr}`);
+  }
+
+  const noCommand = invoke(["--json"]);
+  if (noCommand.status === 0) throw new Error("installed CLI Canon accepted a no-command invocation");
+  let usage;
+  try {
+    usage = JSON.parse(noCommand.stderr);
+  } catch {
+    throw new Error(`installed CLI Canon no-command shell did not emit machine usage: ${noCommand.stderr}`);
+  }
+  if (usage?.failureKind !== "usage" && usage?.error?.kind !== "usage") {
+    throw new Error("installed CLI Canon no-command shell did not classify the failure as usage");
+  }
+
+  const delegated = invoke(["skill", "--json"]);
+  if (delegated.status !== 0 || delegated.stderr !== "") {
+    throw new Error(`installed delegated CLI route failed: ${delegated.stdout}${delegated.stderr}`);
+  }
+  const skill = JSON.parse(delegated.stdout);
+  if (typeof skill.version !== "string" || !Array.isArray(skill.scenarios) || skill.scenarios.length === 0) {
+    throw new Error("installed delegated CLI route did not return the skill index");
+  }
+  console.log("installed CLI verified: Canon root shell and delegated skill route from the exact packed artifact");
+}
+
+function packageJsonVersion(installed) {
+  const packagePath = path.join(installed, "package.json");
+  return JSON.parse(fs.readFileSync(packagePath, "utf8")).version;
+}
+
 // Installs the packed artifact outside the checkout and starts the installed
 // `inari setup console`: the host must serve exactly the packaged console
 // assets from beside its own installed module and deliver a same-origin
@@ -1148,6 +1208,7 @@ async function certifyInstalledSetupConsole(tarballPath, packageName) {
     const installed = fs.realpathSync(path.join(consumer, "node_modules", ...packageName.split("/")));
     if (!path.relative(repoRoot, installed).startsWith(".."))
       throw new Error("installed package resolved inside the checkout");
+    certifyInstalledCli(consumer, installed, packageName);
     certifyInstalledContractPackage(consumer, packageName);
     certifyInstalledArtifactReconciliationPackage(consumer, packageName);
     const environment = { ...process.env, INARI_CONFIG_HOME: path.join(root, "config") };

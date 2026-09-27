@@ -1,6 +1,19 @@
 import { spawnSync } from "node:child_process";
-import { AGENT_INVOCATION_CONTRACT, tokenizeCommandArgv } from "./command-contract.js";
+import { runNodeCli, type CliResult } from "@yohn-jp/cli-canon/node";
+import packageJson from "../package.json" with { type: "json" };
+import type { ProductPackageIdentity } from "@yohn-jp/cli-canon";
+import {
+  AGENT_INVOCATION_CONTRACT,
+  getCommandForPositionals,
+  getOptionForToken,
+  tokenizeCommandArgv,
+} from "./command-contract.js";
 import { runCli as runCoreCli, versionAtLeast, type CliDependencies as CoreCliDependencies } from "./cli-core.js";
+import {
+  commandRequiredOptionIds,
+  compileInariCliProduct,
+  createLegacyDelegatedCommandSource,
+} from "./cli-composition.js";
 
 interface DiagnosticCommandResult {
   readonly status: number | null;
@@ -31,23 +44,135 @@ export interface CliDependencies extends CoreCliDependencies {
   readonly runCanonicalDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
 }
 
-function isDiagnosticRequest(argv: readonly string[]): boolean {
-  if (argv.some((token) => token === "--help" || token.startsWith("--help="))) return false;
+/**
+ * #1194 classifies --diagnose and --doctor as transition-only root aliases.
+ * Route those existing product aliases through their named commands while the
+ * named diagnose/doctor routes remain delegated to the product readiness code.
+ */
+function namedDiagnosticAliasArgv(argv: readonly string[]): readonly string[] {
+  if (argv.some((token) => token === "--help" || token.startsWith("--help="))) return argv;
   const tokenized = tokenizeCommandArgv(argv);
-  if (tokenized.options.some((option) => option.definition === undefined)) return false;
-  const first = tokenized.positionals[0];
-  return (
-    first === "diagnose" ||
-    first === "doctor" ||
-    (tokenized.positionals.length === 0 &&
-      argv.some(
-        (token) =>
-          token === "--diagnose" ||
-          token.startsWith("--diagnose=") ||
-          token === "--doctor" ||
-          token.startsWith("--doctor="),
-      ))
+  if (tokenized.positionals.length !== 0) return argv;
+  if (tokenized.options.some((option) => option.definition?.id === "version")) return argv;
+
+  const aliases = tokenized.options.filter(
+    (option) =>
+      (option.definition?.id === "diagnose" || option.definition?.id === "doctor") &&
+      (option.value === undefined || option.value === "true"),
   );
+  if (aliases.length === 0) return argv;
+
+  const route = aliases.some((option) => option.definition?.id === "doctor") ? "doctor" : "diagnose";
+  const aliasTokens = new Set(aliases.map((option) => option.rawToken));
+  const aliasIndexes = new Set<number>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--") break;
+    if (token !== undefined && aliasTokens.has(token)) {
+      aliasIndexes.add(index);
+      continue;
+    }
+    const option = token === undefined ? undefined : getOptionForToken(token);
+    if (
+      option?.arity === "required" &&
+      token?.includes("=") !== true &&
+      argv[index + 1] !== undefined &&
+      !argv[index + 1]!.startsWith("--")
+    ) {
+      index += 1;
+    }
+  }
+  return [route, ...argv.filter((_token, index) => !aliasIndexes.has(index))];
+}
+
+/**
+ * CLI Canon 0.2.0's delegated request carries only argv following the selected
+ * route. Preserve the currently supported known option-before-route forms by
+ * moving that complete option prefix after the contract-resolved route before
+ * Canon claims the invocation. Unknown or incomplete prefixes are left to
+ * Canon's normal fail-closed shell. Retire this transition when Canon can
+ * forward and certify leading option occurrences for delegated routes.
+ */
+function routeFirstTransitionArgv(argv: readonly string[]): readonly string[] {
+  if (
+    argv.some((token) => {
+      const name = token?.split("=", 1)[0];
+      return name === "--help" || name === "-h" || name === "--version";
+    })
+  ) {
+    return argv;
+  }
+
+  const tokenized = tokenizeCommandArgv(argv);
+  const command = getCommandForPositionals(tokenized.positionals);
+  if (command === undefined || command.path.length === 0) return argv;
+
+  for (let index = 1; index + command.path.length <= argv.length; index += 1) {
+    if (!command.path.every((segment, routeIndex) => argv[index + routeIndex] === segment)) continue;
+    const prefix = argv.slice(0, index);
+    const parsedPrefix = tokenizeCommandArgv(prefix);
+    if (
+      parsedPrefix.positionals.length !== 0 ||
+      parsedPrefix.options.length === 0 ||
+      parsedPrefix.options.some(
+        (option) =>
+          option.definition === undefined ||
+          option.definition.id === "version" ||
+          option.definition.id === "help" ||
+          !command.optionIds.includes(option.definition.id) ||
+          (option.definition.arity === "required" && option.value === undefined),
+      )
+    )
+      continue;
+
+    return [...command.path, ...prefix, ...argv.slice(index + command.path.length)];
+  }
+  return argv;
+}
+
+/**
+ * Canon 0.2 cannot own an executable command and child group at `setup`.
+ * Keep only the validated root.setup invocation (including `setup --json`)
+ * in the bounded legacy owner; Help and nested routes enter Canon. Retire
+ * this when Canon can represent and certify executable parents with children.
+ */
+function isValidatedSetupParentTransition(argv: readonly string[]): boolean {
+  if (
+    argv.includes("--") ||
+    argv.some((token) => {
+      const name = token?.split("=", 1)[0];
+      return name === "--help" || name === "-h" || name === "--version";
+    })
+  ) {
+    return false;
+  }
+
+  const tokenized = tokenizeCommandArgv(argv);
+  const command = getCommandForPositionals(tokenized.positionals);
+  if (
+    command?.id !== "root.setup" ||
+    tokenized.positionals.length !== command.path.length ||
+    !command.path.every((segment, index) => tokenized.positionals[index] === segment)
+  ) {
+    return false;
+  }
+
+  const applicableOptions = new Set<string>(command.optionIds);
+  if (
+    tokenized.options.some(
+      (option) =>
+        option.definition === undefined ||
+        !applicableOptions.has(option.definition.id) ||
+        (option.definition.arity === "required" && option.value === undefined),
+    )
+  ) {
+    return false;
+  }
+
+  const presentOptions = new Set<string>(
+    tokenized.options.flatMap((option) => (option.definition === undefined ? [] : [option.definition.id])),
+  );
+  return [...commandRequiredOptionIds(command)].every((optionId) => presentOptions.has(optionId));
 }
 
 function runCanonicalDiagnosticCommand(args: readonly string[]): DiagnosticCommandResult {
@@ -171,7 +296,10 @@ function projectCanonicalRuntime(
 
 async function runDiagnosticWithCanonicalProbe(argv: string[], dependencies: CliDependencies): Promise<number> {
   const execute = dependencies.runCanonicalDiagnosticCommand ?? runCanonicalDiagnosticCommand;
-  const canonicalProbe = execute(["--version", "--json"]);
+  // Bare CLI Canon version output is package identity only. The existing named
+  // product route keeps the runtime contract and capabilities needed by
+  // diagnose; retire this probe when #1194 adds a canonical readiness handshake.
+  const canonicalProbe = execute(["version", "--json"]);
   const jsonArgv = argv.some((token) => token === "--json" || token === "--json=true")
     ? [...argv]
     : [...argv, "--json"];
@@ -204,12 +332,31 @@ async function runDiagnosticWithCanonicalProbe(argv: string[], dependencies: Cli
   return canonical.status === "ready" ? 0 : 2;
 }
 
-/**
- * Public CLI entrypoint. Diagnostics first prove that the canonical `inari`
- * executable itself is reachable and reports the expected contract; all other
- * behavior is handled by the closed governed CLI core.
- */
+function writeCliResult(result: CliResult): void {
+  if (result.stdout !== "") process.stdout.write(result.stdout);
+  if (result.stderr !== "") process.stderr.write(result.stderr);
+}
+
+/** The public CLI enters the compiled CLI Canon product and its standard shell. */
 export async function runCli(argv: string[], dependencies: CliDependencies = {}): Promise<number> {
-  if (!isDiagnosticRequest(argv)) return runCoreCli(argv, dependencies);
-  return runDiagnosticWithCanonicalProbe(argv, dependencies);
+  const normalizedArgv = routeFirstTransitionArgv(namedDiagnosticAliasArgv(argv));
+  if (isValidatedSetupParentTransition(normalizedArgv)) return runCoreCli([...normalizedArgv], dependencies);
+
+  const delegated = createLegacyDelegatedCommandSource(async (request) => {
+    const delegatedArgv = [...request.route, ...request.argv];
+    if (request.presentation === "machine") delegatedArgv.push("--json");
+
+    const exitCode =
+      request.commandId === "root.diagnose" || request.commandId === "root.doctor"
+        ? await runDiagnosticWithCanonicalProbe(delegatedArgv, dependencies)
+        : await runCoreCli(delegatedArgv, dependencies);
+    return { exitCode, stdout: "", stderr: "" };
+  });
+  const metadata = (dependencies.packageMetadata ?? packageJson) as ProductPackageIdentity;
+  const product = compileInariCliProduct(metadata, packageJson.description);
+  const result = await runNodeCli(product, normalizedArgv, {
+    delegatedSources: [delegated],
+  });
+  writeCliResult(result);
+  return result.exitCode;
 }

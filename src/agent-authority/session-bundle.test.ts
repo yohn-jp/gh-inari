@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createPrivateKey } from "node:crypto";
 import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { runCli } from "../cli.js";
 import { canonicalJsonString, base64UrlEncodeText, type CanonicalJsonValue } from "./codec.js";
 import * as sessionIssuance from "./session-issuance.js";
@@ -60,6 +62,17 @@ function requestFor(
     agent: { name: "codex", version: "1", runtime: "node" },
     ...overrides,
   } as SessionIssuanceRequestDocument;
+}
+
+function capturePublicCliOutput(argv: readonly string[]) {
+  const moduleUrl = new URL("../cli.ts", import.meta.url).href;
+  const source = `import { runCli } from ${JSON.stringify(moduleUrl)}; process.exitCode = await runCli(${JSON.stringify(argv)});`;
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], {
+    cwd: fileURLToPath(new URL("../..", import.meta.url)),
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  return result;
 }
 
 async function captureCli(
@@ -299,17 +312,9 @@ test("session CLI issues and inspects a packed-format bundle without disclosing 
 });
 
 test("the canonical command contract exposes the frozen Session issue and inspect invocations", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-session-command-help-"));
-  try {
-    const issue = await captureCli(["session", "issue", "--help"], directory);
-    const inspect = await captureCli(["session", "inspect", "--help"], directory);
-    assert.equal(issue.exitCode, 0);
-    assert.match(
-      issue.stdout.join("\n"),
-      /Usage: inari session issue --from <path> --private-key <path> --to <semantic-file>/u,
-    );
-    assert.match(inspect.stdout.join("\n"), /Usage: inari session inspect --from <path>/u);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  const issue = capturePublicCliOutput(["session", "issue", "--help"]);
+  const inspect = capturePublicCliOutput(["session", "inspect", "--help"]);
+  assert.equal(issue.status, 0, issue.stderr);
+  assert.match(issue.stdout, /Usage: inari session issue --from <path> --private-key <path> --to <semantic-file>/u);
+  assert.match(inspect.stdout, /Usage: inari session inspect --from <path>/u);
 });
