@@ -19,6 +19,7 @@ import {
 } from "./executor-http.js";
 import { verifyLocalMtlsPeerIdentity, type LocalMtlsIdentity } from "./transport-security.js";
 import { validateRuntimeFailure, type RuntimeFailure } from "../runtime-contracts/runtime-failure.js";
+import { validateImplementationTaskTerminationRecord } from "../implementation-task-termination.js";
 
 export interface LocalExecutorClientOptions {
   readonly id: string;
@@ -55,6 +56,56 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function validTaskTerminationObservation(
+  value: unknown,
+  authorization: LocalExecutorEvidenceRequest["taskTerminationAuthorization"],
+): boolean {
+  if (authorization === undefined || !record(value) || !Array.isArray(value.recordProvenance)) return false;
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > 80_000 || value.recordProvenance.length > 16)
+    return false;
+  if (
+    !value.recordProvenance.every(
+      (item: unknown) =>
+        record(item) &&
+        Object.keys(item).length <= 4 &&
+        (item.valid === false
+          ? Object.keys(item).length === 1
+          : Object.values(item).every((entry) => typeof entry === "string" && entry.length <= 128)),
+    )
+  )
+    return false;
+  if (
+    value.provenance !== undefined &&
+    (!record(value.provenance) ||
+      Object.keys(value.provenance).length > 4 ||
+      !Object.values(value.provenance).every((entry) => typeof entry === "string" && entry.length <= 128))
+  )
+    return false;
+  const common = ["status", "provenance", "recordProvenance"];
+  if (value.status === "present")
+    return (
+      exactKeys(value, [...common, "record"]) &&
+      validateImplementationTaskTerminationRecord(value.record, authorization).valid
+    );
+  if (value.status === "absent" || value.status === "unavailable") return exactKeys(value, common);
+  return (
+    value.status === "invalid" &&
+    exactKeys(value, [...common, "violations"]) &&
+    Array.isArray(value.violations) &&
+    value.violations.length > 0 &&
+    value.violations.length <= 64 &&
+    value.violations.every(
+      (violation: unknown) =>
+        record(violation) &&
+        exactKeys(violation, ["code", "path", "message", "expected", "actual"]) &&
+        typeof violation.code === "string" &&
+        typeof violation.path === "string" &&
+        typeof violation.message === "string",
+    )
+  );
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -278,6 +329,26 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
       !Object.prototype.hasOwnProperty.call(body, "evidence")
     ) {
       throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Current Executor evidence is unavailable.");
+    }
+    if (
+      request.taskTerminationAuthorization !== undefined &&
+      (!record(body.evidence) ||
+        !record(body.evidence.repository) ||
+        body.evidence.repository.repositoryHost !== "github.com" ||
+        body.evidence.repository.repositoryId !== request.repository.id ||
+        typeof body.evidence.repository.nameWithOwner !== "string" ||
+        body.evidence.repository.nameWithOwner.toLowerCase() !== request.repository.name.toLowerCase() ||
+        !record(body.evidence.implementation) ||
+        !record(body.evidence.implementation.implementation) ||
+        body.evidence.implementation.implementation.number !== request.implementationIssue ||
+        body.evidence.implementation.implementation.repositoryId !== request.repository.id ||
+        body.evidence.implementation.implementation.repositoryHost !== "github.com" ||
+        typeof body.evidence.implementation.implementation.repository !== "string" ||
+        body.evidence.implementation.implementation.repository.toLowerCase() !==
+          request.repository.name.toLowerCase() ||
+        !validTaskTerminationObservation(body.evidence.taskTermination, request.taskTerminationAuthorization))
+    ) {
+      throw new LocalExecutorClientError("EXECUTOR_PROTOCOL_INVALID", "Current task termination evidence is invalid.");
     }
     return body.evidence;
   }

@@ -9,6 +9,7 @@ import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "..
 import { executeAuthorizedExecution, type AuthorizedExecution } from "../authorized-execution.js";
 import { createLocalExecutorHttpServer } from "./executor-server.js";
 import {
+  createLocalExecutorHttpHandler,
   LOCAL_EXECUTOR_EXECUTIONS_PATH,
   LOCAL_EXECUTOR_EVIDENCE_PATH,
   LOCAL_EXECUTOR_HEALTH_PATH,
@@ -346,4 +347,75 @@ test("Executor evidence endpoint is closed, bounded, read-only, and identifies t
   } finally {
     await closeServer(server);
   }
+});
+
+test("task termination request binds the exact repository and Implementation before the owner read", async () => {
+  const authorization = {
+    version: 1,
+    kind: "implementation-authorization",
+    contractVersion: 1,
+    repository: {
+      repositoryHost: "github.com",
+      repositoryId: REPOSITORY.repositoryId,
+      repository: REPOSITORY.nameWithOwner,
+    },
+    implementation: {
+      repositoryHost: "github.com",
+      repositoryId: REPOSITORY.repositoryId,
+      repository: REPOSITORY.nameWithOwner,
+      number: ISSUE,
+    },
+    base: { branch: "main", revision: "a".repeat(40), freshness: "fresh-1" },
+    governedBodyDigest: "b".repeat(64),
+  };
+  let reads = 0;
+  const handler = createLocalExecutorHttpHandler({
+    version: "0.14.1",
+    executorId: CONFIG.id,
+    execute: async () => {
+      throw new Error("No mutation route is allowed.");
+    },
+    readEvidence: async (request) => {
+      reads += 1;
+      assert.deepEqual(request.taskTerminationAuthorization, authorization);
+      return { taskTermination: { status: "absent", recordProvenance: [] } };
+    },
+  });
+  const request = {
+    version: 1,
+    repository: { id: REPOSITORY.repositoryId, name: REPOSITORY.nameWithOwner },
+    authorityId: "runtime-local-test",
+    issue: ISSUE,
+    implementationIssue: ISSUE,
+    taskTerminationAuthorization: authorization,
+  };
+  const send = (body: unknown) =>
+    handler(
+      new Request(`http://127.0.0.1${LOCAL_EXECUTOR_EVIDENCE_PATH}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  assert.equal((await send(request)).status, 200);
+  for (const wrong of [
+    {
+      ...request,
+      taskTerminationAuthorization: {
+        ...authorization,
+        repository: { ...authorization.repository, repositoryId: "9" },
+      },
+    },
+    {
+      ...request,
+      taskTerminationAuthorization: {
+        ...authorization,
+        implementation: { ...authorization.implementation, number: ISSUE + 1 },
+      },
+    },
+    { ...request, taskTerminationAuthorization: { ...authorization, base: {} } },
+    { ...request, implementationIssue: undefined },
+  ])
+    assert.equal((await send(wrong)).status, 400);
+  assert.equal(reads, 1);
 });

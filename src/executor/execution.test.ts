@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { ChangeTrustedExecutorError } from "../change-trusted-executor.js";
 import {
@@ -8,6 +11,7 @@ import {
   GitHubAppInstallationCredentialBroker,
 } from "../github/app-installation-credential-broker.js";
 import { withChangeFailures } from "./execution.js";
+import { setupLocalExecutor, startConfiguredLocalExecutor } from "../local-control/executor-server.js";
 
 const repository = { hostname: "github.com", owner: "acme", name: "inari" } as const;
 const now = new Date("2026-09-05T00:00:00.000Z");
@@ -80,5 +84,66 @@ test("preserves only exact bounded Change failures across broker callback saniti
         return true;
       },
     );
+  }
+});
+
+test("configured Executor process wires exact task evidence through existing read route and denies missing custody", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inari-task-termination-process-"));
+  const keyPath = path.join(root, "issuer.pem");
+  const environment: NodeJS.ProcessEnv = {
+    INARI_CONFIG_HOME: path.join(root, "config"),
+    INARI_GITHUB_APP_ID: "218",
+    INARI_GITHUB_APP_PRIVATE_KEY_FILE: keyPath,
+  };
+  await writeFile(keyPath, privateKeyPem, { mode: 0o600 });
+  let server: Awaited<ReturnType<typeof startConfiguredLocalExecutor>>["server"] | undefined;
+  try {
+    await setupLocalExecutor(environment);
+    const started = await startConfiguredLocalExecutor("0.14.1", environment);
+    server = started.server;
+    const address = server.address();
+    assert.ok(address !== null && typeof address !== "string");
+    const endpoint = `http://127.0.0.1:${address.port}/v1/evidence`;
+    const authorization = {
+      version: 1,
+      kind: "implementation-authorization",
+      contractVersion: 1,
+      repository: { repositoryHost: "github.com", repositoryId: "123456789", repository: "acme/inari" },
+      implementation: {
+        repositoryHost: "github.com",
+        repositoryId: "123456789",
+        repository: "acme/inari",
+        number: 1250,
+      },
+      base: { branch: "main", revision: "a".repeat(40), freshness: "fresh-1" },
+      governedBodyDigest: "b".repeat(64),
+    };
+    const request = {
+      version: 1,
+      repository: { id: "123456789", name: "acme/inari" },
+      authorityId: "runtime-test",
+      issue: 1250,
+      implementationIssue: 1250,
+      taskTerminationAuthorization: authorization,
+    };
+    const send = (body: unknown) =>
+      fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal(
+      (await send({ ...request, taskTerminationAuthorization: { ...authorization, base: {} } })).status,
+      400,
+    );
+    const unavailable = await send(request);
+    assert.equal(unavailable.status, 409);
+    const result = (await unavailable.json()) as {
+      readonly executorId?: string;
+      readonly evidence?: unknown;
+      readonly error?: { readonly code?: string };
+    };
+    assert.equal(result.evidence, undefined);
+    assert.equal(result.executorId, undefined);
+    assert.equal(result.error?.code, "EVIDENCE_UNAVAILABLE");
+  } finally {
+    if (server !== undefined) await new Promise<void>((resolve) => server!.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
   }
 });
