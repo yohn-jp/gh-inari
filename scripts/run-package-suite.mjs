@@ -192,6 +192,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/contract/schema.d.ts",
   "dist/contract/schema.js",
   "dist/contract/schema.js.map",
+  "dist/contract/json-schema-runtime.d.ts",
+  "dist/contract/json-schema-runtime.js",
+  "dist/contract/json-schema-runtime.js.map",
   "dist/contract/validation.d.ts",
   "dist/contract/validation.js",
   "dist/contract/validation.js.map",
@@ -836,6 +839,20 @@ function run(command, args, options = {}) {
   return result;
 }
 
+function certifyInstalledContractPackage(consumer, packageName) {
+  const smokePath = path.join(consumer, "contract-runtime.mjs");
+  const source = [
+    'import assert from "node:assert/strict";',
+    `import { compileJsonSchema } from ${JSON.stringify(`${packageName}/contract`)};`,
+    'const schema = compileJsonSchema({ $schema: "https://json-schema.org/draft/2020-12/schema", type: "string" });',
+    'assert.deepEqual(schema.validate("value"), { valid: true, diagnostics: [] });',
+    'assert.equal(schema.validate(3).diagnostics[0]?.code, "value_invalid");',
+  ].join("\n");
+  fs.writeFileSync(smokePath, `${source}\n`);
+  run(process.execPath, [smokePath], { cwd: consumer });
+  console.log("installed contract runtime verified: public package subpath resolves and validates Draft 2020-12");
+}
+
 // Walks every shape the "exports" map can take: a direct string target, an
 // array of fallback targets, or a conditions object whose values may
 // themselves be any of these (nested conditions such as node/import/require).
@@ -979,6 +996,7 @@ async function certifyInstalledSetupConsole(tarballPath, packageName) {
     const installed = fs.realpathSync(path.join(consumer, "node_modules", ...packageName.split("/")));
     if (!path.relative(repoRoot, installed).startsWith(".."))
       throw new Error("installed package resolved inside the checkout");
+    certifyInstalledContractPackage(consumer, packageName);
     const environment = { ...process.env, INARI_CONFIG_HOME: path.join(root, "config") };
     for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) delete environment[name];
     child = spawn(
