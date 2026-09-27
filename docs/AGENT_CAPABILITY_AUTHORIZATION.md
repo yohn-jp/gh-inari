@@ -1,1316 +1,899 @@
-# Inari Repository-Native Agent Capability Authorization
+# Caller Authentication and Capability Authorization
 
-Status: normative Session/App authorization architecture for Epic #364 and
-Issue #365, reconciled with the canonical responsibility vocabulary by #552.
+Status: normative target under [Product Architecture Canon](./ARCHITECTURE.md).
 
-This document extends [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md),
-[`SEMANTIC_ARTIFACT_CONTRACTS.md`](./SEMANTIC_ARTIFACT_CONTRACTS.md), and
-[`XSTATE_CHANGE_MACHINE.md`](./XSTATE_CHANGE_MACHINE.md). It changes the authentication,
-delegation, and privileged execution boundary; it does not replace their Change lifecycle,
-Semantic Artifact authority, or trusted execution semantics.
+This document retains the detailed trust, delegation, attenuation, replay,
+provenance, and threat contracts of the earlier Session architecture. It
+replaces the requirement that every remote caller bring a Session private key
+and reach an independent Direct App executor. Existing wire formats are
+identified separately from the target remote invocation contract.
 
-[`NATIVE_MCP_ISSUER_GATEWAY.md`](./NATIVE_MCP_ISSUER_GATEWAY.md) is retained as transport
-prior art, but its hosted gateway, centralized requester-authentication/admission, and
-Actions-as-required-execution assumptions are subordinate to this document where they
-conflict. MCP remains a supported protocol/transport, not the trust root.
-
-The subordinate operator procedure for the Delegator lifecycle is
-[`DELEGATOR_OPERATIONS.md`](./DELEGATOR_OPERATIONS.md). This architecture
-remains normative; the runbook documents the current CLI and deployment
-procedure without redefining the trust model. The former
-[`RUNTIME_AUTHORITY_OPERATIONS.md`](./RUNTIME_AUTHORITY_OPERATIONS.md) filename
-is retained as a compatibility pointer.
+The target is not claimed implemented by this documentation change. Current
+code and certification remain revision-bound evidence.
 
 ## 1. Purpose
 
-Coding agents should not need a user's GitHub credential in order to perform governed
-repository work.
+Coding agents must not need reusable GitHub provider credentials to perform
+governed repository work. Inari separates caller evidence from provider
+execution authority and admits only the semantic operation justified by the
+caller's actual authorization and current repository state.
 
-The common model today is effectively:
+There are two normal caller-evidence profiles:
 
-```text
-Human authority
-     |
-     | GH_TOKEN / PAT / gh auth / installation token
-     v
-Agent process
-     |
-     v
-GitHub
-```
+- local delegated work uses Authority-signed LocalSessionBinding and the
+  Admission-owned Session lifecycle;
+- remote human-operated clients use a Hosted-signed Repository Access
+  Assertion and Runtime-side subject/operation admission.
 
-Even when the credential is short-lived, the agent still receives provider-level GitHub
-authority. The blast radius is defined by GitHub permissions rather than by the task the
-agent was asked to perform.
+A trusted local operator additionally has explicitly authorized bootstrap and
+control operations. That operator profile is not granted by knowing a Relay
+URL, possessing a repository visibility assertion, or running on loopback.
 
-Inari instead delegates **repository-change authority**.
+The common outcome is an admitted semantic request reaching user-owned
+Executor. No profile may bypass Core planning, effect authorization, or
+postcondition verification.
 
-A trusted local Runtime may certify that one Agent Session is authorized to perform a
-bounded semantic task for one repository and a short period. The Agent Session proves
-possession of its own ephemeral key. The Inari GitHub App then uses its GitHub authority
-only when the signed delegation, repository policy, and current authoritative GitHub
-state all admit the requested semantic operation.
+## 2. Product responsibilities
 
-The target property is:
+GitHub owns repository facts and provider-enforced state. Protected repository
+Canon defines repository policy and trust. Inari Core interprets contracts and
+plans bounded operations.
 
-> An agent receives the minimum authority necessary to complete a governed repository
-> change, not general GitHub access.
+Authority owns delegation-signing material. Admission authenticates supported
+caller evidence and evaluates capability/task/operation authorization.
+Executor owns Inari Access credentials, repository/App binding, provider
+observations, and admitted effects.
 
-This document freezes the trust model, credential ownership, repository trust roots,
-Session Certificate contract, capability attenuation model, execution ordering, replay
-rules, threat model, and migration boundary required to implement that property.
+Hosted authenticates through the Inari Access user authorization profile and
+attests caller/repository eligibility. Relay authenticates the Runtime's
+transport connection and delivers bounded requests. Neither issues Inari
+capabilities or decides task execution legality.
 
-## 2. Product definition
+A signature proves that a key signed bytes. Trust in the signer, scope,
+freshness, current repository evidence, and the requested operation are
+separate checks.
 
-For this architecture, Inari is:
+## 3. Relationship to other contracts
 
-> A repository-native semantic authorization plane for AI coding agents.
+### 3.1 Change lifecycle
 
-Inari is not a general identity provider and is not defined by a hosted control-plane
-service. It uses GitHub as repository Authority and the GitHub App as a bounded
-Provider Principal while adding a cryptographic delegation layer whose
-semantics are repository-native.
+[Change Control Plane](./CHANGE_CONTROL_PLANE.md) owns Source Change identity,
+canonical publication, issuance, ready, abort, merge composition, idempotency,
+and recovery. Authentication does not redefine those operations.
 
-The product separates these roles:
+A Source Change is not the Session task. A Session task is the Implementation
+and its exact current authorization. The binding between them is explicit,
+not equality of Issue numbers.
 
-- **Governance Canon** — declares trusted Delegators and the maximum bounded
-  Session capability each Delegator may issue.
-- **Delegator** — holds a long-lived delegation key and certifies bounded Agent
-  Sessions. It is a delegation principal, not a GitHub mutation principal.
-- **Session Principal** — holds one ephemeral Session private key and a
-  Delegator-signed Session Certificate. It requests only the bounded
-  capability delegated to that session.
-- **Semantic Core Roles** — resolve contracts, project current state, plan
-  effects, and verify postconditions without becoming repository Authority.
-- **Session Authenticator / Capability Authorizer** — authenticate the Session
-  proof and admit its bounded semantic capability as separate Roles.
-- **Executor / Lifecycle Controller** — coordinate an admitted operation and
-  control its lifecycle sequencing; XState is the current controller
-  implementation.
-- **App Principal / Credential Broker / Effect Authorizer** — contain provider
-  credentials and admit only already-planned GitHub effects.
-- **GitHub** — remains the repository Authority and provider enforcing the
-  App installation permission ceiling, Rulesets, reviews, and merges.
+### 3.2 Artifact semantics
 
-The architecture intentionally separates delegation, semantic execution, and
-provider identity. No Runtime Host, transport, XState actor, or App replaces
-GitHub as repository Authority.
+[Semantic Artifact Contracts](./SEMANTIC_ARTIFACT_CONTRACTS.md) owns effective
+contracts, supplied/derived/fixed values, relationships, desired projections,
+and mutation plans. Caller evidence does not carry another copy of those
+rules.
 
-```text
-Repository                         GitHub
-    |                                 ^
-    | trusts Runtime signer           | App installation authority
-    v                                 |
-Delegator                            |
-    |                                 |
-    | certifies bounded Session       |
-    v                                 |
-Agent Session -> Inari authorization/executor -> GitHub App
-```
+### 3.3 Lifecycle Controller
 
-A Runtime key can delegate. It cannot mutate GitHub.
+[XState](./XSTATE_CHANGE_MACHINE.md) implements operation sequencing and
+recovery. Capability admission precedes effects; it does not become a second
+state machine or a persisted Change store.
 
-A Session key can authenticate a delegated request. It cannot create another Session
-Certificate.
+### 3.4 Provider boundary
 
-Only the App/executor can turn an admitted semantic request into a GitHub mutation.
+[Inari Access](./INARI_ISSUER_APP.md) defines the bounded read and effect
+capabilities. A caller's OAuth credential is not used by Executor for normal
+mutations, and installation credentials never become caller credentials.
 
-## 3. Relationship to existing Inari architecture
+### 3.5 Interfaces
 
-### 3.1 Change remains semantic lifecycle authority
+CLI, MCP, Console, HTTP, and Relay bind these contracts to input and transport.
+They do not select weaker authorization semantics. Direct App is retired as
+an independent execution profile.
 
-`CHANGE_CONTROL_PLANE.md` remains authoritative for Change identity, canonical Issue /
-branch / pull-request projections, lifecycle transitions, idempotency, compensation,
-recovery, and provenance.
+## 4. Trust topology
 
-This document does not silently redefine `change issue`, `change ready`, `change abort`,
-or the current invariant that Change issuance is one logical transaction. A future change
-to those public semantics requires separate governance.
-
-The capability layer answers a different question:
-
-> Is this Agent Session authorized to request the semantic transition or bounded effect
-> that Core already knows how to plan and verify?
-
-### 3.2 Semantic Artifact remains desired-state authority
-
-Repository policy, canonical artifact derivation, branch identity, PR rendering, and
-artifact validation remain Core/Semantic Artifact responsibilities. Certificates do not
-carry duplicate copies of those semantics.
-
-### 3.3 XState implements the Lifecycle Controller
-
-The XState machines implement lifecycle legality and trusted execution
-sequencing as the Lifecycle Controller. They are not a repository Authority or
-state store. Capability authorization is an admission gate before privileged
-effects, not a replacement state machine.
-
-Ambiguous GitHub outcomes continue to use the existing pattern:
+Local delegated work:
 
 ```text
-request
-  -> authoritative read
-  -> project
-  -> authorize/admit
-  -> plan
-  -> effect
-  -> authoritative reread
-  -> verify
-  -> result / recovery
+protected repository trust and policy
+  -> Authority signs bounded local Session binding
+  -> Admission validates current trust, binding, task and capabilities
+  -> Executor observes repository evidence through its read capability
+  -> Core plans and Lifecycle Controller sequences the admitted operation
+  -> Inari Access applies bounded provider effects
+  -> authoritative reread and verification
 ```
 
-A network error after an effect never proves the effect did not happen.
-
-### 3.4 App Principal remains the provider identity
-
-`INARI_ISSUER_APP.md` remains correct that App private keys and installation
-tokens are not caller credentials. The App Principal is not GitHub Authority or
-a semantic Executor. This architecture strengthens that boundary by also
-prohibiting Delegator keys from becoming caller-to-App execution credentials.
-
-### 3.5 MCP, Direct App, Actions, and CLI are adapters and profiles
-
-The native MCP work under #267 remains useful where it defines a typed agent protocol,
-transport-neutral boundaries, and App credential containment. Neither a central hosted
-requester-authentication/session service nor Actions mediation of every repository
-operation is required.
-
-A hosted MCP endpoint, local stdio server, direct HTTPS App endpoint, Actions
-bridge, CLI, or other adapter may carry the same signed Session request. MCP is
-a Protocol Adapter; Direct App is an ingress/deployment composition; Actions is
-a compatibility Deployment Profile; and CLI is a Client Adapter. None may
-change the authorization model or become a trust root.
-
-## 4. Normative trust topology
-
-The target topology is:
+Remote human-operated work:
 
 ```text
-┌───────────────────────────────────────────────────────────────┐
-│ Repository protected canonical ref                           │
-│                                                               │
-│ .github/inari/authorities/*.json                              │
-│ .github/inari/... semantic authorization policy               │
-│                                                               │
-│ - trusted Runtime public keys                                │
-│ - per-Runtime delegation ceilings                            │
-│ - repository capability policy                              │
-└──────────────────────────┬────────────────────────────────────┘
-                           │ trusts / limits
-                           v
-                  ┌──────────────────┐
-                  │ Delegator        │
-                  │                  │
-                  │ Runtime private  │
-                  │ key              │
-                  └────────┬─────────┘
-                           │ signs delegation
-                           v
-                  ┌──────────────────┐
-                  │ Agent Session    │
-                  │                  │
-                  │ Session private  │
-                  │ key              │
-                  │ + Certificate    │
-                  └────────┬─────────┘
-                           │ signed semantic request
-                           v
-                  ┌──────────────────┐
-                  │ Inari executor   │
-                  │ / GitHub App     │
-                  │                  │
-                  │ verify           │
-                  │ authorize        │
-                  │ project / admit  │
-                  │ effect           │
-                  │ reread / verify  │
-                  └────────┬─────────┘
-                           │ installation token, never returned
-                           v
-                        GitHub
+GitHub user authorization through Inari Access
+  -> Hosted verifies caller and exact repository/installation eligibility
+  -> Hosted signs a short-lived request-bound assertion
+  -> GitHub user credential is discarded, not relayed
+  -> Relay delivers to the authenticated Runtime connection
+  -> Runtime verifies the configured assertion issuer and exact binding
+  -> Admission evaluates subject, operation, target and current policy
+  -> the same Executor/Core/effect/verification composition
 ```
 
-There is no required central Session registry between Runtime and App.
+The assertion is not a Hosted-issued Inari Session. The client receives no
+Runtime Authority private key, installation token, shell access, or arbitrary
+filesystem/network capability.
 
-## 5. Authority and credential ownership matrix
+## 5. Credential and state ownership
 
-| Item                             | Holder / canonical location                            | Lifetime                        | Secret?                                             | What it authorizes                                                                    | Must never be used for                                                    |
-| -------------------------------- | ------------------------------------------------------ | ------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Runtime private key              | Runtime manager / local secret store                   | Long-lived, rotated             | Yes                                                 | Signing bounded Session Certificates                                                  | Direct App request authentication; GitHub API; Agent bootstrap disclosure |
-| Runtime public key               | Repository canonical trust artifact                    | Until revoked/rotated           | No                                                  | Verification that a Session Certificate came from a trusted Runtime                   | GitHub mutation by itself                                                 |
-| Runtime trust record             | Protected canonical repository ref                     | Versioned                       | No                                                  | Maximum delegable capability, TTL and key status for one Runtime                      | Session-local policy overrides                                            |
-| Session private key              | One Agent Session                                      | Ephemeral; session/TTL bounded  | Yes                                                 | Proof-of-possession and request signatures for that Session                           | Signing new Session Certificates; GitHub API authentication               |
-| Session public key               | Embedded in Session Certificate                        | Same as certificate             | No                                                  | Verification of Session request signatures                                            | Delegation by itself                                                      |
-| Session Certificate              | Agent Session; may be logged only where policy permits | Short-lived                     | No in the PoP model                                 | Evidence that a trusted Runtime delegated bounded authority to the Session public key | GitHub API authentication without Session proof-of-possession             |
-| Manual Session credential bundle | Human -> one manual Agent Session                      | Short-lived                     | **Yes** because it contains the Session private key | Portable bootstrap of the same Session protocol                                       | Reuse across sessions or long-term storage                                |
-| GitHub App private key           | App/executor deployment only                           | Long-lived, rotated             | Yes                                                 | Minting App JWT / installation tokens                                                 | Agent or Runtime credential                                               |
-| GitHub App installation token    | App/executor process only                              | Provider-bounded short lifetime | Yes                                                 | Actual GitHub API operations within App/install permission ceiling                    | Returning to Agent/Runtime/MCP result                                     |
-| Repository semantic policy       | Protected canonical repository ref                     | Versioned                       | No                                                  | Defines admissible semantic capabilities and constraints                              | Secret storage or session identity                                        |
-| Current GitHub evidence          | GitHub                                                 | Current state                   | No                                                  | Admission, idempotency, postcondition and one-shot evidence                           | Delegation identity                                                       |
+### Delegation credential
 
-Three secret classes exist and must remain separated:
+Authority holds the long-lived delegation private key. Public trust records
+contain the public key, status, validity, and maximum delegable scope. The
+private key never goes to Hosted, Relay storage, an agent child, or Executor.
 
-```text
-Runtime private key      -> Runtime only
-Session private key      -> one Session only
-GitHub App credential    -> App/executor only
-```
+### Local Session binding
 
-No component needs any other component's private key.
+Admission owns the local Session record and its active/closed lifecycle.
+The binding is Authority-signed and includes task, repository, claims, and
+validity. It is not Session Certificate V1 and contains no Agent private key.
+
+A Session identifier is a locator for that binding, not a secret that replaces
+authenticated transport or current authorization.
+
+### Certificate/PoP compatibility material
+
+Where a supported legacy reader consumes Session Certificate V1, the
+certificate binds an ephemeral public key. The associated private key remains
+with its client-side signer. A credential bundle containing that key is
+secret; the certificate alone is not sufficient for PoP authentication.
+
+Keeping a decoder does not retain the retired Direct App engine or make
+manual secret-bundle transfer the remote Golden Path.
+
+### Provider credential
+
+Executor holds the Inari Access private key and obtains short-lived,
+repository-scoped installation credentials. Only bounded read/effect
+capabilities leave the broker; tokens and generic authenticated clients do
+not.
+
+App-scoped custody may intentionally serve multiple repository bindings.
+Repository registration is not permission to copy that App key into each
+repository's configuration.
+
+### Hosted authentication material
+
+Hosted may hold service-owned OAuth client secrets and assertion-signing keys.
+GitHub user access tokens, refresh tokens, callback codes, and PKCE verifiers
+are transient authentication material. They are not durable user accounts or
+repository membership state.
+
+These values must not be forwarded to Runtime, serialized into Relay jobs,
+placed in URLs, logs, traces, crash evidence, or browser persistent storage.
+Discarding a token is not the same as cryptographically revoking it. An
+implementation must not claim immediate provider revocation merely because
+its in-memory reference was released.
+
+### Relay transport credential
+
+The user-owned Relay client keeps its own transport keypair. Hosted verifies
+possession and derives the corresponding public locator. Delegation and App
+keys are not reused as Relay credentials.
+
+### Operational state
+
+GitHub owns repository/Change facts. Admission owns local Session lifecycle.
+The runtime lifecycle owner owns process/discovery state. Relay may retain
+bounded delivery and replay state with explicit expiry. An actor snapshot,
+UI stage, or log line is not an alternate state authority.
 
 ## 6. Repository-native Runtime trust root
 
-### 6.1 Canonical location
+### 6.1 Canonical location and content
 
-V1 uses repository-native structured trust records under:
+The existing public trust-record location is:
 
 ```text
 .github/inari/authorities/<authority-id>.json
 ```
 
-The file contains the Delegator public key plus policy metadata. A raw `.pub` file is
-insufficient because rotation state, lifetime ceilings, and delegable capability ceilings
-must be governed alongside the key.
+A trust record contains the Delegator identity/public key and governed
+validity, status, maximum Session TTL, and capability ceiling. A bare public
+key file cannot replace these policy dimensions.
 
-Illustrative shape:
-
-```json
-{
-  "version": 1,
-  "kind": "runtime-authority",
-  "id": "yohn-local-runtime-2026-09",
-  "key": {
-    "kty": "OKP",
-    "crv": "Ed25519",
-    "x": "<base64url-public-key>"
-  },
-  "status": "active",
-  "notBefore": "2026-09-08T00:00:00Z",
-  "notAfter": null,
-  "maxSessionTtlSeconds": 7200,
-  "capabilityCeiling": ["change.implement", "change.ready", "change.abort"]
-}
-```
-
-The exact semantic-schema implementation is a follow-up task, but these fields and
-meanings are normative.
+The exact serialized format is validated by the current Delegator contract.
+A reader must reject unsupported versions, malformed key material, unknown
+security fields, and identity disagreement rather than ignoring them.
 
 ### 6.2 Authoritative ref
 
-Mutation authorization reads Runtime trust records and authorization policy only from the
-repository's configured protected canonical authority ref. V1 defaults to the repository
-default branch.
+Mutation admission reads trust and authorization policy from the configured
+protected canonical ref. The normal default is the repository default branch.
+It records the resolved ref and immutable commit used as evidence.
 
-The Agent working branch is never an authority source for Runtime keys or authorization
-policy.
+The agent's working branch is not a source of trust keys or a way to enlarge
+its own authority. A valid key on an untrusted branch is not a trusted key.
 
-An executor must record the authority ref and resolved commit SHA used for authorization
-in bounded provenance/evidence.
+### 6.3 Bootstrap
 
-```text
-policyRef = refs/heads/main
-policySha = <immutable commit SHA>
-```
+Adding the first public key is an explicit trust-root operation. The new key
+cannot authorize its own registration.
 
-### 6.3 Registration and bootstrap
+Setup may prepare or publish the exact public record through the existing
+operator-authorized path. Independent human review/merge and protected-ref
+reread establish repository trust. A successful PR publication is not trust.
 
-Adding the first Runtime public key is an explicit trust-root bootstrap ceremony. It
-cannot be authorized by the Runtime key that is being added.
-
-Bootstrap uses an already-trusted repository administrative/governed path: for example a
-human-reviewed PR created through the existing governance path and merged under the
-repository's Ruleset. Inari CLI may generate/render the trust artifact, but possession of
-the new private key does not grant permission to install its public key.
+The App-user bootstrap credential remains a separately owned operator input;
+normal Executor operation does not fall back to it.
 
 ### 6.4 Self-escalation prevention
 
-Ordinary Agent capabilities must never authorize modification of:
+Ordinary delegated writes must not modify their own trust roots,
+authorization policy, or privileged execution definitions. Protected-path
+restrictions are in addition to task WRITE/CREATE/DELETE scopes.
 
-```text
-.github/inari/authorities/**
-<canonical authorization-policy paths>
-<other repository trust-root configuration>
-```
-
-A generic branch-write capability therefore requires an immutable deny-set for trust-root
-paths in addition to any repository-configured path restrictions.
-
-Trust-root changes require a distinct highest-privilege governance path that is not
-included in normal Runtime delegation ceilings by default.
+A signed request cannot override these restrictions. A broad provider
+permission such as contents write is not a semantic grant to change them.
 
 ### 6.5 Rotation
 
-Rotation is overlap-based:
+Rotation is staged:
 
-1. generate a new Runtime keypair locally;
-2. add the new public trust record through governed review;
-3. allow old and new keys during a bounded overlap;
-4. move runtimes to the new private key;
-5. remove or disable the old trust record through governed review.
+1. prepare a candidate key at Authority;
+2. publish the new public trust record through governed review;
+3. establish the explicitly authorized overlap;
+4. move issuance to the verified candidate;
+5. revoke/retire old trust through the same independent boundary.
 
-No private key is committed or transmitted to GitHub.
+A Setup rerun must not regenerate the key, alter identity, change validity, or
+widen the capability ceiling as a repair for a mismatch.
 
 ### 6.6 Revocation
 
-Removing or disabling the Runtime trust record revokes all unexpired Session Certificates
-issued by that Runtime because every mutation request re-evaluates current repository
-trust.
+Removing or disabling a trust record prevents subsequent admitted mutations
+under that delegation once current trust is reread. Read failure is denial,
+not permission to reuse stale trust indefinitely.
 
-Mutation admission must fail closed when the canonical trust record or policy cannot be
-read or validated.
+A cache optimization must preserve the explicitly accepted freshness and
+revocation contract. This renewal does not grant an unbounded cached-trust
+window.
 
-A cached trust decision may not outlive the mutation request in V1. Optimized caching is a
-future concern and must preserve bounded revocation latency explicitly.
+Revocation of delegation, closure of a local Session, rotation of an App key,
+and expiry of a Hosted assertion are different events. One does not silently
+rewrite the others.
 
-### 6.7 Required repository Ruleset
+### 6.7 Repository enforcement
 
-The canonical Delegator root is published through the dedicated PR validation
-check and independent human review. Repository operators must configure the required
-Ruleset rule as follows:
+Trust-root publication requires the applicable Runtime Authority Governance
+check and independent human approval under actual repository policy.
+Configured Rulesets and their operation are distinct from product validation.
+The presence of a validator or document does not prove live enforcement.
 
-```text
-.github/inari/authorities/**
--> require "Runtime Authority Governance"
--> require independent human approval
-```
-
-The local `inari authority register`, `rotate`, and `revoke` commands materialize trust-root
-changes only in the operator's dedicated worktree. They do not publish to GitHub, change
-Ruleset settings, or introduce a Runtime/App credential into the Agent execution model.
+See [Delegator Operations](./DELEGATOR_OPERATIONS.md) and the read-only
+operational backlog audit before making enforcement claims.
 
 ## 7. Delegator
 
-### 7.1 Runtime key semantics
+### 7.1 Signing semantics
 
-The Runtime keypair uses Ed25519 in V1.
+The current delegation profile uses Ed25519. Authority signs only an admitted
+bounded delegation/provenance payload with its domain-separated format.
+It is not a general signing oracle and does not authenticate arbitrary remote
+GitHub effects merely by signing their bytes.
 
-The private key is an **offline/local delegation signer**. The App protocol must not have
-an endpoint or authentication mode in which a Runtime private-key signature alone can
-execute a GitHub mutation.
+The public signing port does not return the private key. Hosted never uses
+that key to attest GitHub caller identity.
 
-The only normative privileged operation of the Runtime key is:
+### 7.2 Storage
 
-```text
-sign(Session Certificate)
-```
+Authority uses owner-controlled restrictive storage. Key loading verifies
+format, identity/fingerprint, file ownership, permissions, and the applicable
+safe-filesystem contract.
 
-This is a protocol-level distinction, not merely a UI convention.
+Generic Setup configuration stores only public identity references. No key
+path is used as a cross-host component-binding contract. An external secret
+manager may supply owner material, but Inari does not become a general
+secrets-management product.
 
-### 7.2 Runtime storage
+### 7.3 Attenuation
 
-`inari authority generate` is expected to create the keypair locally. The default private
-key output must be a secret file with restrictive filesystem permissions or an OS-backed
-key-store reference where supported. Printing raw private-key material to ordinary logs
-or making an environment variable the default storage form is prohibited.
-
-Managed runtimes may obtain the private key from their own secret manager. Inari defines
-the key interface/format; it does not become a general secrets manager.
-
-### 7.3 Delegator authority ceiling
-
-A trusted Runtime is privileged because it can mint Session Certificates without asking
-an Inari management server. Its power is therefore bounded by the repository trust
-record.
-
-For any Session Certificate `S` issued by Runtime `R`:
+For a delegated Session S and trusted Authority R:
 
 ```text
-Authority(S) ⊆ CapabilityCeiling(R) ⊆ RepositoryPolicy
-TTL(S)       <= MaxSessionTTL(R)
-Repository(S) = repository trusting R
+delegated scope(S) is within ceiling(R)
+ceiling(R) is constrained by current repository policy
+TTL(S) is no greater than the accepted Authority TTL ceiling
+repository(S) is the same immutable repository that trusts R
 ```
 
-A Runtime signature claiming authority outside its repository-defined ceiling is valid
-cryptographically but unauthorized semantically and must be rejected.
+A valid signature outside those bounds is unauthorized.
 
-## 8. Agent Session identity
+The ceiling is a maximum, not a grant to every authenticated caller. Remote
+repository visibility does not cause Authority to issue its full ceiling.
 
-### 8.1 Managed session flow
+## 8. Caller-evidence profiles
 
-The preferred flow is proof-of-possession with a Session-generated ephemeral keypair:
+### 8.1 Local delegated Session
+
+The current LocalSessionBinding has these distinct fields:
 
 ```text
-Agent Session                           Runtime
-     |
-     | generate Ed25519 Session keypair
-     |
-     |-- Session public key ----------->|
-     |                                  | validate requested delegation
-     |                                  | sign Session Certificate
-     |<--------- Session Certificate ---|
-     |
-     | retains Session private key only
+version
+sessionId
+repository
+task
+capabilities
+authority identity and public fingerprint
+iat / nbf / exp
+signature
+optional signed branchObservation
+optional signed implementationBinding
 ```
 
-The Runtime never receives the Session private key.
+`src/local-control/session-binding.ts` is the exact versioned byte/validation
+reference. It uses an Authority signature and does not accept an Agent Session
+private key. The schema-only public key used internally for shared vocabulary
+validation is not a real Session key and is not serialized into the binding.
 
-The Session key is destroyed when the session ends. The certificate must expire no later
-than the delegated session lifetime.
+Admission checks current trust, signature, lifetime, repository, Session
+lifecycle, task/authorization evidence, capabilities, and the requested
+operation. Loading a well-formed local file alone does not prove admission.
 
-### 8.2 Manual Claude/Web-style flow
+### 8.2 Remote human-operated invocation
 
-A manual environment cannot always generate a keypair and perform an interactive local
-bootstrap before the user hands it credentials. In that case the Inari CLI may generate
-the ephemeral Session keypair locally, sign the Session Certificate with the Runtime key,
-and emit a **Session credential bundle** containing:
+The remote client authenticates through Hosted and submits the selected
+repository and Inari request. Hosted sends only the signed eligibility
+assertion plus the bound request over Relay.
 
-- Session private key;
-- Session Certificate;
-- non-secret metadata required by the client.
+Runtime validates the assertion as specified in
+[Repository Access Assertion](./REPOSITORY_ACCESS_ASSERTION.md). Executor
+checks the asserted App/installation/repository against its current binding.
+Admission then requires the actual subject/operation authorization.
+
+No new Hosted Session issuance handshake, client-generated ephemeral key, or
+secret credential bundle is required by this profile.
+
+This profile authorizes Inari protocol operations only. It is not SSH, a VPN,
+a raw GitHub API tunnel, arbitrary command execution, or access to owner
+configuration directories.
+
+### 8.3 Retained certificate/PoP readers
+
+Existing serialized certificates and signed request envelopes may remain
+readable through a bounded compatibility adapter. Their signature, proof,
+expiry, repository, task, and current-policy checks remain intact.
+
+A managed legacy signer generated its ephemeral key locally and supplied only
+the public key for issuance. A manual legacy bundle also contained the
+private key and therefore required secret handling. These describe existing
+material and its threat model, not a second normal cloud-client bootstrap.
+
+A retained reader must have a supported consumer, exact version, negative
+fixtures, and a canonical output. It must not route into an independent
+provider executor or automatically issue new legacy authority.
+
+### 8.4 Client name is not principal identity
+
+A client implementation name is provenance metadata, not a principal.
+Two invocations from the same client product do not become the same Session
+or GitHub subject. A local process name, username string, or Relay connection
+label is not verified caller evidence.
+
+### 8.5 Read and operator profiles
+
+Pure validation/rendering of already supplied data needs no mutation grant.
+Private repository reads use a bounded read authorization path, not a
+fabricated `change.implement` claim.
+
+Enrollment, delegation, trust publication, configuration changes, reviews,
+and merges retain their own authority boundaries. Remote identity does not
+implicitly make the caller a local operator.
+
+## 9. Session Certificate V1 reference
+
+This section preserves the existing representation contract for bounded
+compatibility. It does not make this certificate the target Hosted credential.
+
+### 9.1 Header and claims
+
+The current header uses `alg: EdDSA`, `typ: inari-session+jwt`, and a `kid`
+resolving to the trusted Delegator. The versioned claims include:
 
 ```text
-Human local machine
-  inari session issue ...
-       |
-       | generate Session keypair
-       | certify Session public key
-       v
-  short-lived secret bundle
-       |
-       | manual handoff
-       v
-  Claude Web / other isolated session
+ver
+iss = runtime:<Delegator id>
+sub = session:<opaque Session id>
+jti
+repository.id and diagnostic repository.name
+sessionKey (Ed25519 public JWK)
+optional task
+optional implementationBinding
+capabilities
+iat / nbf / exp
 ```
 
-The bundle is secret because it contains the Session private key. It must be short-lived,
-repository/task bounded, and treated as compromised when the manual session ends.
+The precise closed schemas and canonical encoding are in
+`src/agent-authority/session-certificate.ts` and its codec. Its repository
+field is not silently rewritten by this document. The enclosing trusted
+provider context must bind the GitHub host so IDs cannot cross host partitions.
 
-This weaker bootstrap changes **who generated the Session key**, not the App-side
-verification protocol. App verification remains identical to the managed flow.
+Unknown properties, malformed IDs, header/issuer disagreement, invalid
+capabilities, noncanonical encoding, unsupported algorithm/type/version, and
+invalid time values fail closed. A decoder's structural success is not
+signature verification or live authorization.
 
-### 8.2.1 Client-side bootstrap and MCP handoff boundary
+### 9.2 Confidentiality
 
-Both approved bootstrap profiles are client-side composition profiles. In the
-Session-configured profile, the client creates the managed Session, sends only
-the public issuance request across the Runtime boundary, accepts the returned
-certificate, and binds that Session signer to a configured MCP call port. In the
-preconfigured-handoff profile, the client receives one short-lived credential
-bundle and constructs the bundle-backed signer locally before Agent use. The
-bundle private key remains local to that signer construction.
+A certificate without its associated private key does not authenticate a PoP
+request. It still contains identity/task metadata and must not be gratuitously
+logged or publicly retained.
 
-In either profile, the configured client creates the canonical signed Session
-envelope immediately before invoking `inari_change_execute` and sends only
-`{ envelope }` through the MCP call port. Session private-key custody and
-bootstrap therefore end at the client-side signer boundary. The Session signer,
-client, and any bundle are discarded with the Session lifetime; none is a
-server-side credential store.
+A bundle containing the private key is confidential even if its certificate
+is public. No certificate statement makes a bearer token non-secret.
 
-MCP server and Relay remain authentication-free protocol/transport adapters in
-the Inari authority model. They forward the canonical envelope and do not issue,
-hold, or replace Session authority. Existing Session request verification is the
-proof oracle, while the GitHub App remains the authentication and provider
-effect boundary. ChatGPT compatibility is a separate follow-up and is not part
-of these bootstrap profiles.
+### 9.3 Validity
 
-### 8.3 Agent implementation identity vs security principal
+The certificate is valid only within its accepted time interval and Authority
+ceiling. The current implementation uses an exclusive `exp` boundary.
+A request cannot extend expiry by supplying a later timestamp.
 
-`claude-web`, `codex`, `cursor`, `luna`, or another product name is provenance metadata,
-not the cryptographic principal.
+Time validation uses the accepted clock-skew and maximum-age contract. A
+malformed or absent time does not become an unlimited grant.
 
-The security principal is the unique Session key / Session ID. Agent implementation and
-runtime metadata may be included for audit, but two Claude sessions do not share an
-identity merely because both use Claude.
+### 9.4 No delegation chaining
 
-## 9. Session Certificate contract
+A Session cannot certify another Session. Retaining a legacy decoder does not
+introduce a delegation chain or authorize descendant issuance.
 
-### 9.1 Cryptographic profile
+## 10. Session request proof-of-possession reference
 
-V1 uses a JWS-signed certificate with Ed25519 (`alg = EdDSA`). The Runtime trust record
-contains the corresponding Ed25519 public key and stable key ID.
+A retained signed request binds the certificate identity, repository,
+operation, canonical semantic request digest, unique request identity, and
+request validity interval.
 
-JWS is used so the signed bytes are explicit and existing JOSE implementations can verify
-the Runtime signature without Inari inventing an ad-hoc certificate encoding.
+Canonicalization, hashing, signature input, and domain separation are defined
+by the existing codec/request-envelope implementation and byte-level vectors.
+No adapter substitutes its own JSON serialization or delimiter convention.
 
-The protected header includes at minimum:
+A certificate signature, provenance signature, Relay possession proof, and
+request signature cannot substitute for one another.
 
-```json
-{
-  "alg": "EdDSA",
-  "typ": "inari-session+jwt",
-  "kid": "yohn-local-runtime-2026-09"
-}
-```
+The verifier checks the request against the certificate's public Session key,
+then checks certificate/task/repository/request agreement and current
+admission. Signature verification alone does not establish single use.
 
-The payload is a versioned claims object. V1 requires at least:
-
-```json
-{
-  "ver": 1,
-  "iss": "runtime:yohn-local-runtime-2026-09",
-  "sub": "session:<opaque-id>",
-  "jti": "<unique-certificate-id>",
-  "repository": {
-    "id": "<immutable-github-repository-id>",
-    "name": "yohn-jp/gh-inari"
-  },
-  "sessionKey": {
-    "kty": "OKP",
-    "crv": "Ed25519",
-    "x": "<base64url-public-key>"
-  },
-  "task": {
-    "kind": "issue",
-    "number": 364
-  },
-  "capabilities": [{ "kind": "change.implement", "issue": 364 }],
-  "iat": 0,
-  "nbf": 0,
-  "exp": 0
-}
-```
-
-`repository.id` is the security binding. The human-readable full name is retained for
-provenance and diagnostics but must not replace immutable repository identity.
-
-`task` is optional for capability kinds that are not rooted in one task, but any task
-scope present in the certificate narrows authority and cannot be widened by the request.
-
-### 9.2 Certificate confidentiality
-
-The Session Certificate is not confidential in the target proof-of-possession model.
-Possession of it without the Session private key is insufficient to authorize a request.
-
-Implementations must nevertheless avoid gratuitous public logging because certificates
-carry provenance and task metadata.
-
-### 9.3 Expiry
-
-Session Certificates are intentionally short-lived. The repository Runtime trust record
-defines the maximum TTL. The issuer may choose a shorter TTL for an individual session.
-
-The App rejects expired or not-yet-valid certificates before semantic admission.
-
-### 9.4 No delegation chaining in V1
-
-An Agent Session cannot issue child Session Certificates. V1 has exactly one delegation
-edge:
-
-```text
-trusted Runtime -> Agent Session
-```
-
-Multi-hop delegation can be considered later only with an explicit attenuation proof and
-new threat model.
-
-## 10. Session request proof-of-possession
-
-A Session request contains:
-
-- Session Certificate;
-- semantic Inari request;
-- request timestamp / expiry window;
-- unique request ID;
-- signature made by the Session private key.
-
-The request signature covers a versioned Inari request envelope containing at minimum:
-
-```text
-protocol version
-Session Certificate jti
-immutable repository ID
-semantic operation name
-canonical semantic request digest
-request ID
-issued-at / expiry
-```
-
-The semantic request payload is canonicalized using RFC 8785 JSON Canonicalization Scheme
-before SHA-256 hashing. The Session signs the versioned envelope with Ed25519.
-
-The envelope is domain-separated; a Session Certificate signature and a Session request
-signature are not interchangeable.
-
-Conceptually:
-
-```text
-INARI-REQUEST-V1\n
-certificate-jti\n
-repository-id\n
-operation\n
-sha256(jcs(request))\n
-request-id\n
-issued-at\n
-expires-at
-```
-
-Exact byte-level fixtures must be added with the implementation so alternative clients
-produce identical signatures.
-
-A transport may wrap this envelope in MCP, HTTP, stdio IPC, or another protocol, but may
-not alter the signed semantic content.
+MCP and HTTP may wrap the envelope without changing signed semantic bytes.
+A compatibility adapter returns an authenticated bounded request to common
+Admission; it does not bypass that boundary because the older executor once
+performed both steps in one component.
 
 ## 11. Capability model
 
 ### 11.1 Effective authority is an intersection
 
-A valid signature is necessary but never sufficient.
-
-For request `Q` from Session Certificate `S`:
+For local delegated execution:
 
 ```text
-EffectiveAuthority(Q)
-  = DelegatedAuthority(S)
-    ∩ RuntimeCeiling(repository, S.iss)
-    ∩ RepositoryPolicy(current canonical ref)
-    ∩ CurrentStateAdmission(GitHub evidence)
+Session's delegated authority
+  intersect current trusted Authority ceiling
+  intersect current repository policy
+  intersect current Implementation/task scope
+  intersect requested operation and current-state admission
 ```
 
-No layer can add authority omitted by an earlier layer.
+For remote human-operated execution, the verified assertion establishes
+identity/eligibility first. The Runtime's explicit subject/operation
+authorization supplies the semantic grant; eligibility is not that grant.
+The same current-policy, task, state, and provider-effect limits then apply.
 
-### 11.2 Semantic, not provider-shaped
+No later layer adds a permission absent from an earlier required gate.
 
-Agent-facing capabilities must not be expressed as:
+### 11.2 Semantic rather than provider-shaped
 
-```text
-contents: write
-pull_requests: write
-issues: write
-```
+`contents: write`, `pull_requests: write`, and `issues: write` are GitHub
+provider permissions. They are not the agent-facing capability vocabulary.
+Inari capabilities refer to bounded semantic operations and their exact
+subjects.
 
-Those are App/provider permission ceilings.
+An App installation permission is a ceiling on possible provider effects.
+It does not tell Admission which task, Source, branch, or transition the
+caller may request.
 
-The capability vocabulary represents governed repository work, for example:
+### 11.3 Source and task binding
 
-```text
-change.implement(issue:364)
-change.ready(issue:364)
-change.abort(issue:364)
-```
+The local #1213 composition retains the Implementation as `task.number`.
+It projects a bounded canonical Source set in signed Implementation evidence.
+Source lifecycle claims target those Sources; `branch.advance` remains bound
+to the Implementation leaf branch.
 
-Where lower-level capability primitives are necessary, they are bounded semantic effects,
-not general GitHub permissions:
+A Source operation requires membership in both signed and current Source
+sets. There is no implicit primary Source. Unrelated, removed, malformed,
+cross-repository, or stale Source evidence is denied.
 
-```text
-branch.create(name=X, max=1)
-branch.advance(branch=X, until=T, expectedHead=H, pathPolicy=P)
-pullRequest.create(head=X, base=main, max=1)
-```
+Exactly the existing task-bound `change.implement` compatibility claim may
+support leaf PR publication/branch-side fallback. It must not authorize
+`change.issue/show/ready/abort/merge` on the Implementation as a Change root.
+This renewal does not add `pullRequest.create` to existing Authority ceilings.
 
-### 11.3 Higher-level capability compilation
+### 11.4 Branch advancement
 
-A high-level certificate may say:
+Branch writes bind immutable repository identity, exact admitted branch,
+current head/generation, target content/tree/commit, validity, task scope, and
+protected paths.
 
-```json
-{
-  "kind": "change.implement",
-  "issue": 364
-}
-```
+WRITE does not imply CREATE or DELETE. A rename may require both creation
+and deletion authority. The current canonical scope/projector owns exact
+classification; clients and provider adapters do not maintain parallel rules.
 
-Repository policy and Inari Core determine the exact canonical branch, PR, allowed paths,
-and lifecycle effects. The Runtime does not reproduce canonical branch naming or PR
-rendering rules inside the certificate.
+A branch-write operation returns bounded evidence, not a reusable token or
+an unrestricted authenticated Git client.
 
-Conceptually:
+### 11.5 Distinct ceilings
 
-```text
-change.implement(issue:364)
-       |
-       | Core + repository policy
-       v
-bounded execution plan
-  - canonical branch issuance as permitted by Change semantics
-  - branch advancement only on canonical branch and within TTL/path policy
-  - canonical PR issuance as permitted by Change semantics
-```
+Different Authority identities may have different capability ceilings.
+Trust in one public key does not imply trust for every operation. A migration
+must preserve an existing restricted ceiling rather than resetting it to a
+product-wide maximum.
 
-The existing public `change issue` transaction remains unchanged until separately
-governed. The primitive capability examples above describe authorization granularity, not
-a silent lifecycle redesign.
+### 11.6 Separately privileged operations
 
-### 11.4 Branch-write authority
+Trust-root changes, repository administration, Rulesets, App installation or
+permission changes, default-branch writes, secret management, reviews,
+approvals, and merge/release actions are not ordinary implementation grants.
 
-A branch-write capability must bind at least:
+A semantic merge command, an accepted lifecycle state, and permission to
+perform the provider merge effect are separate. Unsupported execution is
+denied, not redirected to ambient user credentials.
 
-- immutable repository ID;
-- exact canonical/authorized branch identity;
-- certificate/session expiry;
-- expected current branch generation/head for each write request;
-- target commit/tree/content operation;
-- immutable protected-path deny-set;
-- optional repository-defined allow/deny paths.
+## 12. Authentication, admission, and execution order
 
-It must not be implemented by returning a general GitHub installation token to the agent.
+### 12.1 Resolve the owner binding
 
-Possible transports include Git data/content API effects or a future bounded Git proxy,
-but the transport must preserve conditional branch advancement and path policy. Raw
-`git push` using a broad bearer token is not the target authorization model.
+Executor resolves the requested repository and its verified App/installation
+binding. It does not accept caller-supplied binding as authority. Repository
+name is checked as a locator, not used in place of immutable identity.
 
-### 11.5 Capability ceilings by Runtime
+### 12.2 Obtain current read evidence
 
-Different Runtime keys may have different ceilings. For example:
+Executor uses its bounded read capability for trust, policy, contract, branch,
+PR, and other operation-specific evidence. Admission receives normalized
+public evidence, not the read token.
 
-```text
-personal-runtime:
-  change.implement
-  change.ready
+### 12.3 Authenticate the caller profile
 
-ci-release-runtime:
-  release.prepare
+Admission validates local binding, supported legacy proof, or the remote
+assertion using that profile's issuer, signature, identity, and validity
+rules. An authenticated transport peer alone does not select a more
+privileged profile.
 
-review-runtime:
-  review.submit
-```
+### 12.4 Validate subject and operation authority
 
-Trusting a Runtime public key does not imply trusting it for every Inari operation.
+Check current Session lifecycle where applicable, task authorization/digest,
+Source membership, branch/base evidence, allowed scope, and requested
+capability. Remote invocations also require explicit Runtime subject/operation
+authorization. Absent policy is denial, not a default full grant.
 
-### 11.6 Non-delegable / separately privileged capabilities
+### 12.5 Project and plan
 
-V1 repository policy should treat the following as non-delegable by ordinary
-implementation Runtime Authorities unless explicitly configured through a higher trust
-class:
+Core derives the current semantic state and intended bounded effects. The
+Lifecycle Controller selects the legal execution/recovery path. Neither
+Hosted nor a browser chooses effect permission or fabricates ready evidence.
 
-- trust-root / authorization-policy modification;
-- repository administration;
-- Ruleset modification;
-- App installation/permission changes;
-- arbitrary default-branch writes;
-- secret management;
-- merge/release authority where separation of duties is required.
+### 12.6 Recheck effect preconditions
 
-## 12. App verification and execution sequence
+Governance generation, observed artifact identity, current branch head, and
+credential/binding generation are separate preconditions. A valid caller
+proof does not make stale effect input safe.
 
-A privileged request follows this normative sequence.
+### 12.7 Apply minimum provider authority
 
-### 12.1 Resolve installation and authoritative repository identity
+The Effect Authorizer obtains the repository- and effect-scoped installation
+capability from the broker. It applies only admitted effects and exposes no
+token or arbitrary provider operation.
 
-The App/executor resolves the target GitHub App installation and immutable repository
-identity internally. No installation token is returned to the caller.
+### 12.8 Reread and verify
 
-### 12.2 Read current trust and policy
+After a possible effect, reacquire authoritative state and verify the planned
+postcondition. A provider 2xx, sent Relay frame, or completed actor alone is
+not semantic success.
 
-Using its own bounded App read authority, the executor reads trusted Runtime records and
-semantic authorization policy from the canonical protected ref and records its commit
-SHA.
+### 12.9 Return bounded evidence
 
-Failure to read/validate current trust policy fails closed.
-
-### 12.3 Verify Runtime delegation
-
-The executor verifies:
-
-- JWS algorithm/type/version;
-- `kid` resolves to an active trusted Runtime record;
-- Runtime signature;
-- certificate repository ID equals target repository ID;
-- `nbf` / `exp`;
-- requested capability is within the Runtime ceiling;
-- certificate claims are structurally canonical and bounded.
-
-### 12.4 Verify Session proof-of-possession
-
-The executor verifies the request signature against `sessionKey` embedded in the
-certificate and checks request freshness, repository binding, certificate `jti`, and
-semantic payload digest.
-
-### 12.5 Evaluate repository policy
-
-The executor resolves the requested semantic capability against current repository
-policy. Certificate claims cannot override repository deny rules, canonical names,
-protected paths, review requirements, or lifecycle constraints.
-
-### 12.6 Read authoritative GitHub evidence
-
-Before mutation, Inari rereads the repository state required by the operation and projects
-canonical current state.
-
-### 12.7 Admit and plan
-
-Core/XState determines whether the transition is currently legal and emits an explicit
-bounded effect plan.
-
-### 12.8 Mint minimum App capability internally
-
-Only after authorization/admission, the App/executor mints or uses the minimum installation
-token permissions necessary for the planned effect. Provider permissions are an internal
-ceiling, not the Session capability.
-
-### 12.9 Apply effect
-
-The existing GitHub effect adapter applies only the admitted effect. The adapter does not
-reinterpret certificate policy.
-
-### 12.10 Authoritative reread and verification
-
-Success is reported only after authoritative reread and semantic postcondition
-verification. Provenance includes at minimum:
-
-```text
-Delegator ID / key ID
-Session ID / certificate jti
-semantic operation / task
-repository ID
-policy ref + policy commit SHA
-App installation / issuer identity
-bounded effect evidence
-final verified projection
-```
+Return admitted subject/target, operation, safe owner/provider identities,
+relevant revision/generation, classified effect result, and verified outcome
+or recovery diagnostics. Raw credentials and provider exceptions are excluded.
 
 ## 13. Replay, one-shot semantics, and durable state
 
-### 13.1 A signed certificate is not a consumed token
+### 13.1 A signature is not a consumed token
 
-The architecture does not pretend a stateless signature can prove single consumption.
-`maxUses: 1` is meaningful only when Inari can prove prior consumption from authoritative
-state or from an explicit durable consumption record.
+A timestamp, nonce, `jti`, or `requestId` does not prevent replay without the
+corresponding verification and atomic consumption/state conditions.
+Strict single-use claims require a suitable owner-held fence or proof from
+canonical state.
 
-### 13.2 Prefer state-derived one-shot semantics
+### 13.2 State-derived idempotency
 
-Many GitHub operations already have canonical state that can prove one-shot behavior:
+Canonical branch/PR identity, existing Change projection, ready/aborted state,
+and expected-head conditions allow deterministic no-op or already-applied
+results. Repeating a request must not create another canonical publication.
 
-- canonical branch creation: branch exists or it does not;
-- canonical PR creation: canonical head/base/identity exists or it does not;
-- Change issuance: existing Change projection is idempotent or conflicting;
-- Ready: PR is already ready;
-- Abort: terminal projection / recovery state is observable.
+### 13.3 Conditional advancement
 
-For these operations, repeated requests are handled by existing idempotent projection and
-transition semantics rather than by a central certificate-consumption database.
+A successful branch advance changes the expected head. Reuse against the old
+head fails or returns a proven already-applied result for the exact target.
+A name-only lookup cannot replace generation evidence.
 
-### 13.3 Conditional branch advancement
+### 13.4 Owner-held consumption state
 
-Repeated branch-write requests must bind to an expected head/generation. A successful
-write advances the branch; replay against the old expected head fails or returns a proven
-already-applied result if the exact target state is current.
+Where a side effect cannot be proven from current repository state, strict
+one-shot execution requires explicit durable state at the relevant execution
+owner. It must remain bounded and must not become a competing Change or
+Hosted Session database.
 
-This makes the mutation state itself part of replay protection.
+### 13.5 Assertion and semantic replay are separate
 
-### 13.4 When durable consumption state is required
+The remote assertion is target/request-bound and consumed under the Runtime
+replay contract. The semantic request additionally obeys operation-specific
+idempotency and effect fencing. A fresh authentication assertion is not
+permission to replay an uncertain old mutation.
 
-If a future capability has a side effect whose exact prior execution cannot be proven
-from GitHub/canonical evidence, strict one-shot semantics require durable state.
+## 14. Ambiguous outcomes and recovery
 
-That state must be scoped to the App/execution function and must not become a general
-Session management database or competing Change state store.
+A timeout after a provider request may occur after the provider applied the
+effect. It is not evidence that no effect occurred.
 
-Until such state exists, Inari must not advertise strict single-use for that capability.
-
-### 13.5 Request ID does not by itself prevent replay
-
-A `requestId` is required for correlation and bounded idempotency evidence, but a unique ID
-without a durable seen-set is not a security guarantee. Documentation and code must not
-confuse the two.
-
-## 14. Ambiguous mutation, retry, compensation, and recovery
-
-Capability authorization does not change distributed-systems failure semantics.
-
-Example:
+The recovery sequence is:
 
 ```text
-App -> GitHub POST
-GitHub applies effect
-network response times out
+possible effect
+  -> authoritative reread
+  -> desired state proven: verify and return the existing result
+  -> no effect proven: retry only if the operation contract permits it
+  -> conflicting/unsafe/unavailable evidence: bounded recovery required
 ```
 
-The certificate remains evidence that the operation was authorized, but the executor must
-not blindly spend/consume another authority unit or replay the mutation based on the
-network error.
+Compensation deletes only the exact generation proven safe by its plan.
+Abort has its own cleanup semantics. Neither can delete a sibling branch or
+advanced work merely to restore a convenient apparent state.
 
-The XState trusted executor performs:
+Admission failure before any effect, transport not-delivered, and post-effect
+uncertainty remain distinguishable in public diagnostics.
 
-```text
-effect result ambiguous
-       |
-       v
-authoritative reread
-       |
-       +-- desired state proven -> verify success / idempotent completion
-       |
-       +-- no effect proven -> retry only if existing operation semantics permit
-       |
-       `-- conflicting / unsafe -> RECOVERY_REQUIRED / fail closed
-```
+## 15. Deployment and persistence boundary
 
-Issuance compensation, branch cleanup, and other destructive recovery retain their
-existing generation/provenance safety requirements. Session authority never weakens a
-recovery guard.
+Normal execution belongs to the user-owned Runtime. Hosted provides
+transient authentication/attestation and Relay. No independent Direct App
+execution deployment remains a target.
 
-## 15. App deployment boundary without a management server
+Hosted needs no durable user profile, repository membership, Runtime
+registration, or semantic Session database. Service configuration and
+service-owned secrets remain necessary. Bounded OAuth flow state, connection
+attachments, rate-limit/replay fences, and delivery records are lifecycle
+state, not a promise of zero state.
 
-A GitHub App that accepts remote Agent requests necessarily has some execution endpoint or
-adapter capable of holding the App private key and contacting GitHub. This architecture
-distinguishes that **stateless issuer/execution boundary** from a central Inari management
-control plane.
+The local Admission Session store remains valid and necessary. Removing a
+central Hosted Session database does not remove the owner's local lifecycle.
 
-The required App-side state is intentionally minimal:
-
-- App private key / installation configuration;
-- transient provider tokens;
-- request-local trust/policy/evidence;
-- optional narrowly-scoped idempotency state only where a capability demonstrably
-  requires it.
-
-V1 does **not** require:
-
-- user accounts in Inari;
-- Runtime registration database;
-- Session database;
-- Session issuance API;
-- central repository policy copy;
-- organization administration UI;
-- central capability-grant database.
-
-The authoritative Runtime registry and capability ceilings live in the repository.
-Session Certificates are minted locally by trusted Runtime keys.
-
-A deployment may be hosted, serverless, self-hosted, or bridged through Actions. That is
-an operational choice, not the authorization model.
+TLS to Hosted plus TLS/WebSocket to Runtime is not end-to-end encryption
+against Hosted. Hosted can observe transiting data at termination. The target
+claims bounded custody and no credential forwarding/persistence, not immunity
+to a malicious authentication issuer.
 
 ## 16. CLI and Runtime responsibilities
 
-The architecture implies an Inari CLI surface similar to:
+CLI and Control invoke existing owner ports for identity generation,
+enrollment, trust preparation, Session admission, and observation. Exact
+commands come from the installed command contract, not duplicated prose.
 
-```text
-inari authority generate
-inari authority render/register <public-key>
-inari session issue ...
-inari session inspect ...
-```
+Ordinary CLI and browser modules must not load sibling private custody
+implementations. Composition may wire owners but cannot parse or retain their
+private material.
 
-Exact command names are follow-up design, but responsibilities are fixed:
+Mottainai or Nawabari integration consumes the same contracts; it receives no
+special issuer privilege. Agent environment construction must not copy
+Authority, App, Control mTLS, or Hosted secrets into a child process.
 
-- generate Runtime keypairs locally;
-- render repository trust artifacts without publishing private material;
-- create/bind ephemeral Session identity;
-- sign Session Certificates with a Runtime key;
-- package manual short-lived Session credentials when required;
-- sign semantic requests with a Session key;
-- never require `gh auth` as the cryptographic authority for this protocol.
+## 17. Provenance
 
-Managed runtimes such as Mottainai/Nawabari may automate the same primitives. They do not
-receive special server-side privileges beyond possession of a repository-trusted Runtime
-private key.
+Retain the distinction between:
 
-## 17. Provenance model
+- repository trust owner and current policy ref/SHA;
+- caller profile and authenticated subject;
+- assertion issuer and assertion/request identity for remote calls;
+- Delegator and local Session for delegated calls;
+- Implementation authorization digest and selected Source;
+- exact branch/base/head and publication role;
+- Executor, App, installation, and credential generation;
+- implementation commit authors;
+- reviewer, approver, and merger.
 
-GitHub may show the mutation actor as the Inari App, while Inari evidence preserves the
-actual delegation chain.
-
-Illustrative provenance:
-
-```text
-authority_owner / repository = yohn-jp/gh-inari
-runtime_authority             = yohn-local-runtime-2026-09
-session                       = session:01...
-agent_metadata                = claude-web
-certificate_jti               = ...
-operation                     = change.implement
-subject                       = issue:364
-policy_sha                    = ...
-executed_by                   = inari-issuer[bot]
-```
-
-The following identities must remain distinguishable:
-
-- repository trust owner;
-- Delegator;
-- Agent Session;
-- agent implementation metadata;
-- issuer GitHub App;
-- commit author(s);
-- reviewer/approver;
-- merger.
-
-The App actor must never be presented as proof that the requester was the App itself.
+The App actor on GitHub is not proof that the App was the requester. A client
+product label is not a cryptographic identity. Logs record bounded provenance,
+not signed raw payloads or credentials.
 
 ## 18. Threat model
 
-### 18.1 Runtime private-key theft
+### 18.1 Delegation-key theft
 
-**Impact:** attacker can mint Session Certificates up to that Runtime's repository-defined
-ceiling until the Runtime trust record is revoked.
+An attacker may issue delegation within that Authority's trusted ceiling until
+revocation is observed. Restrictive custody, narrow ceilings, short Session
+lifetimes, and current protected-ref reads limit exposure. The key is not a
+GitHub credential.
 
-**Mitigations:** delegation-only protocol; per-Runtime capability ceiling; maximum short
-Session TTL; local secret-store protections; repository-side immediate key revocation;
-separate Runtime keys for different authority classes.
+### 18.2 Local Session misuse
 
-The attacker still cannot use the Runtime key directly as a GitHub/App credential.
+A compromised agent may exercise its own admitted scope. Task/Source/branch
+binding, expiry, current contract reads, Session closure, and protected paths
+limit it. A Session ID alone must not cross another operator/transport trust
+boundary.
 
-### 18.2 Session private-key theft
+### 18.3 Legacy Session-key or bundle theft
 
-**Impact:** attacker can exercise the stolen Session's remaining delegated authority until
-expiry/revocation/current-state exhaustion.
+The attacker obtains that Session's remaining authority, not delegation
+rights. A bundle is secret because it contains the private key. Certificate
+capture alone does not satisfy the retained PoP verifier.
 
-**Mitigations:** ephemeral per-session keys; short TTL; repository/task/capability binding;
-conditional branch writes; semantic idempotency; no delegation rights.
+### 18.4 Replay
 
-Blast radius is one bounded Session, not the Runtime or user GitHub account.
+Captured requests or assertions may be resent concurrently or after a crash.
+Atomic replay consumption, current-state idempotency, request binding,
+expected-head conditions, and bounded validity must compose. A timestamp
+alone is insufficient.
 
-### 18.3 Certificate theft without Session private key
+### 18.5 Cross-repository confused deputy
 
-**Impact:** no mutation authority in the target PoP model.
+A proof for repository A must not execute against B. Check provider host,
+immutable repository ID, assertion/local binding, selected Source/task,
+Executor App/installation binding, and requested effect together.
 
-**Mitigation:** every request requires Session private-key signature.
+### 18.6 Rename, transfer, and name reuse
 
-### 18.4 Manual credential-bundle theft
+A name is not durable identity. Reobserve host/ID and current App installation.
+A display-name change does not create another repository or silently preserve
+a binding whose provider authorization changed.
 
-**Impact:** equivalent to Session private-key theft because the bundle contains the key.
+### 18.7 Policy-ref substitution
 
-**Mitigations:** short TTL, narrow capability scope, single-session use, no long-term
-storage/logging. Manual bootstrap is intentionally weaker than managed PoP generation but
-has the same bounded blast radius.
+An agent-controlled branch must not supply its own trusted key or policy.
+Protected-ref evidence and its resolved SHA remain explicit.
 
-### 18.5 Replay
+### 18.8 Self-registration
 
-**Risk:** a captured signed request is resubmitted.
+A newly generated key cannot install its own trust. Ordinary delegated writes
+cannot alter trust roots or approve their own trust PR. Human/provider
+approval boundaries remain independent.
 
-**Mitigations:** request freshness; certificate binding; current-state idempotency;
-expected-head/generation conditions; explicit durable consumption state only when strict
-single-use cannot otherwise be proven.
+### 18.9 Broad App permission
 
-Freshness alone is not claimed as complete replay protection.
+An installation credential can be more powerful than a caller grant. The
+broker's minimum scope and Effect Authorizer's closed effect set prevent
+ordinary code from turning caller eligibility into arbitrary GitHub actions.
+App permission alone does not enforce every Inari semantic restriction.
 
-### 18.6 Cross-repository confused deputy
+### 18.10 Direct-path bypass
 
-**Risk:** a certificate trusted in repository A is presented for repository B.
+An independently supplied PAT or administrator credential is outside Inari's
+ability to constrain its owner. Repository protection, provenance checks,
+credential hygiene, and execution isolation remain defense in depth. Do not
+claim the retirement of Direct App prevents all out-of-band GitHub access.
 
-**Mitigations:** immutable repository ID in certificate and request signature; App resolves
-actual installation/repository independently; Runtime public key must be trusted by that
-same repository.
+### 18.11 Inari Access private-key compromise
 
-### 18.7 Repository rename / name reuse
+An attacker may obtain provider authority up to the App's installations and
+permissions without following Inari admission. Executor isolation, minimum
+permissions, rotation, provider audit, and repository protection are required.
+This remains the principal provider-level secret.
 
-**Risk:** name-only binding points authority at a different repository.
+### 18.12 Hosted assertion-signer compromise
 
-**Mitigation:** immutable GitHub repository ID is the security binding; full name is
-diagnostic metadata.
+An attacker can forge the identity/eligibility facts for which Runtime trusts
+that issuer. A valid signature cannot detect a dishonest issuer. Request and
+Relay binding, short validity, explicit issuer trust/revocation, and independent
+Runtime subject/operation admission limit the consequences; they do not
+eliminate that trust assumption.
 
-### 18.8 Policy-ref substitution
+### 18.13 Transient OAuth-token compromise
 
-**Risk:** Agent modifies its branch policy/public-key files and asks App to trust them.
+A GitHub App user token is limited by both user and App access, but can carry
+write permissions when both have them. Hosted's verification code must use
+only the needed identity/eligibility reads. Calling it an authentication token
+does not make it cryptographically read-only.
 
-**Mitigations:** trust/policy read only from configured canonical protected ref;
-authoritative SHA recorded; working branch never supplies authorization data.
+No persistence/forwarding reduces retention and downstream exposure, not the
+impact of theft during the bounded authentication window.
 
-### 18.9 Self-registration / privilege escalation
+### 18.14 Relay impersonation and connection replacement
 
-**Risk:** Agent writes its own Runtime public key into trusted authorities.
+A caller cannot claim another public locator without proving its transport
+key. Challenges bind the intended service and connection context. Concurrent
+connections/reconnects require explicit ownership and generation rules; last
+arrival is not an authorization rule.
 
-**Mitigations:** immutable protected-path deny-set for ordinary delegated writes;
-trust-root changes require separate human/admin governance and cannot be delegated by
-normal implementation capability.
+### 18.15 Cross-Runtime replay and payload substitution
 
-### 18.10 Broad App permission / confused deputy
+An assertion for Relay A or request X cannot authorize Relay B or request Y.
+Runtime verifies the signed target and canonical request binding, rather than
+trusting Relay-added plain user-ID headers.
 
-**Risk:** App installation has broader provider permissions than the Session capability and
-is tricked into using them.
+### 18.16 Transport and storage disclosure
 
-**Mitigations:** certificate verification -> repository policy -> current-state admission
--> explicit effect plan before provider token/effect; per-effect minimum installation
-permission; effect adapter cannot accept arbitrary GitHub operations.
-
-### 18.11 Direct-path bypass
-
-**Risk:** Agent bypasses Inari and uses another GitHub credential.
-
-**Mitigations:** this architecture removes the need to provide such a credential. Repository
-Rulesets/provenance checks continue to reject noncanonical publication where GitHub cannot
-prevent all writes. Inari cannot protect a separately supplied human PAT from its owner;
-credential hygiene and repository Rulesets remain defense in depth.
-
-### 18.12 App private-key compromise
-
-**Impact:** attacker may obtain GitHub authority up to App installation permissions and
-bypass Inari certificate checks.
-
-**Mitigations:** isolate App credential boundary; minimal App permissions; secure deployment
-secret storage; rotation; GitHub audit; repository Rulesets; do not distribute App private
-keys to Runtimes, Actions tenants, or agents.
-
-This remains the highest provider-level execution secret.
-
-### 18.13 Compromised local Agent process
-
-The architecture does not attempt to stop an Agent from exercising authority deliberately
-given to its own Session. It limits what that Session can do remotely and prevents the
-Agent from obtaining Runtime/App/user credentials with larger authority.
+TLS termination does not hide payloads from Hosted. Logs, traces, queue
+records, error bodies, and retained artifacts must have explicit allowlists.
+Bounded delivery metadata excludes user credentials and semantic payloads.
 
 ## 19. Security invariants
 
-- A Runtime private key is never a mutation credential.
-- A Session private key cannot mint another valid Session Certificate.
-- A Session Certificate without Session proof-of-possession cannot mutate GitHub.
-- A cryptographically valid certificate outside repository policy is unauthorized.
-- A certificate valid for one repository is invalid for another.
-- A certificate valid for one task cannot silently widen to another task.
-- Agent-facing capabilities are semantic and bounded, never raw GitHub provider
-  permissions.
-- Trust-root/policy changes are outside ordinary delegated implementation authority.
-- Authorization policy is read only from an authoritative protected ref.
-- Mutation success requires authoritative reread and semantic verification.
-- Ambiguous effect outcomes never imply safe replay.
-- GitHub App credentials never cross into Runtime or Agent Session environments.
-- No hosted identity/session database is required for V1.
+Delegation, caller proof, transport proof, and provider credentials are
+separate domains. Current repository policy constrains every semantic effect.
+Trust-root modifications are outside ordinary task authority. A valid proof
+for one repository/task/Relay/request does not authorize another.
 
-## 20. Relationship to Epic #267 / native MCP issuer gateway
+Read-only eligibility is not a mutation grant. Unsupported authority, stale
+binding, malformed proof, unreadable trust, unknown execution outcome, and
+missing policy fail closed with bounded diagnostics.
 
-Epic #267 correctly identified several durable boundaries:
+All normal provider effects use Executor-owned Inari Access. All success
+claims require verified postconditions. No network location changes those
+rules.
 
-- MCP can be a typed native Inari protocol;
-- transport mechanics must not define semantic policy;
-- App credentials must remain outside agents;
-- Core owns repository semantics;
-- hosted and self-hosted transports should share one contract.
+## 20. MCP and old ingress classification
 
-Those remain valid.
+MCP remains a typed protocol adapter. Hosted MCP does not run a second
+semantic executor, acquire provider credentials, or issue Inari Sessions.
+Local pure tools may use Core on already supplied data; private reads and
+effects retain their respective authorization gates.
 
-Issue #381 records the final classification needed to reconcile the native MCP
-tracker with the completed Session/App execution leaves:
+The independent Direct App endpoint and old Hosted repository/work backend
+are retired target architectures. Existing format readers do not justify
+retaining their execution engines. Actions, where a real supported adapter
+remains, cannot become a second trust or lifecycle authority.
 
-| #267/#268 assumption                                                 | Classification under the current architecture |
-| -------------------------------------------------------------------- | --------------------------------------------- |
-| Native typed MCP protocol and transport-neutral Core projections     | retained                                      |
-| Hosted gateway as authentication/admission authority                 | superseded                                    |
-| Central Runtime/Agent Session registry or requester state            | obsolete                                      |
-| Actions as the mandatory privileged execution plane                  | compatibility-only                            |
-| Actions OIDC as the normative caller-to-App authorization route      | obsolete                                      |
-| Consumer-workflow-centered App credential dispatch                   | superseded                                    |
-| OAuth/MCP identity replacing Session Certificate proof-of-possession | obsolete                                      |
+See [Native MCP](./NATIVE_MCP_ISSUER_GATEWAY.md) for catalog and transport
+boundaries, not a second authorization model.
 
-The native MCP privileged bridge may forward the canonical signed Session
-request directly to the existing Session-authorized App executor. It adds no
-certificate, capability vocabulary, Session registry, or authorization
-authority. Read-only MCP tools remain available without Session coupling, and
-the existing `ActionsChangeExecutionAdapter` remains an explicit compatibility
-or specialized transport until parity justifies any retirement.
+## 21. Migration and proof
 
-The following assumptions are superseded by #364 as normative architecture:
+First fix the Source/task/publication joins and caller-evidence contract at
+common Admission. Preserve the current local path while adding remote
+assertion verification and subject/operation admission under explicit scope.
 
-- a hosted MCP gateway is the required authentication/authorization control plane;
-- Runtime/Agent sessions must be registered or admitted by a centralized Inari service;
-- repository policy must be evaluated through a consumer Actions runner for every
-  privileged operation;
-- Actions OIDC is the required caller-to-issuer trust mechanism;
-- a hosted service is required to decide which requester may ask for which capability.
+Then route Hosted delivery into that common path, prove provider binding and
+credential isolation, and retire independent Direct App composition and its
+public selection flags. Preserve shared cryptography/Core/effect helpers
+needed by the canonical Executor.
 
-The new model is:
+For each retained legacy representation, record its version, consumer,
+canonical output, validation, and retirement condition. Never reinterpret
+old stored identity or destroy private keys/configuration during a read.
 
-```text
-local Runtime delegation
-       +
-repository trust/policy
-       +
-Session proof-of-possession
-       +
-current GitHub state
-       ->
-App execution authority
-```
+Certification must include positive and denied local/remote operations,
+wrong repository/Source/task/App/Relay, expired/revoked trust, replay,
+post-effect ambiguity, restart, credential leak negatives, and actual packed
+public-path composition. Fixtures cannot substitute for live-provider proof.
 
-MCP may carry the signed request directly to the App/executor. Actions may remain a
-compatibility or specialized execution adapter where repository-local code execution is
-actually required. Neither is mandatory for authorization.
+## 22. Implementation discretion and reserved changes
 
-No implementation work under #267 should introduce a central competing authority after
-this document becomes normative. #267 should be reassessed after #364 implementation
-leaves are derived.
+Internal module layout, bounded data structures, and implementation libraries
+may change within the accepted contract. Exact existing wire bytes remain
+versioned, tested interfaces.
 
-## 21. Migration
+Changes to issuer trust, subject authorization, permission mapping, key
+custody, signature domain, replay semantics, compatibility, or remote
+bootstrap are architecture changes. Implementers do not invent them to make
+a missing producer seam disappear.
 
-The migration is intentionally architecture-first and incremental.
+Dedicated-App Hosted OAuth registration/callback/client authentication and
+remote subject/operation authorization require explicit implementation
+contracts before those paths can be advertised as complete. Their absence
+must not be hidden by accepting arbitrary callback metadata or granting every
+visible repository full App authority.
 
-### Gate 0 — architecture
+## 23. Completion condition
 
-Merge this document through #365. Do not implement certificate/key/App behavior in the
-same PR.
+The domain is complete when every supported caller profile reaches common
+Admission, every grant is bounded by current policy and binding, provider
+credentials stay at Executor, and all reachable denial/recovery cases are
+proved at their actual interface boundary.
 
-### Gate 1 — cryptographic and repository trust foundations
-
-Expected follow-up slices:
-
-1. define Delegator / Session Certificate schemas and conformance vectors;
-2. add local Delegator Ed25519 key generation and secure key loading;
-3. add canonical repository Delegator trust artifacts and validation;
-4. protect trust-root paths in semantic branch-write policy.
-
-### Gate 2 — Session delegation
-
-5. add managed Session ephemeral key generation and Runtime certificate issuance;
-6. add manual short-lived Session credential-bundle issuance/inspection;
-7. add signed semantic request envelope and proof-of-possession verification library.
-
-### Gate 3 — App admission
-
-8. add App/executor trust-record lookup from canonical ref;
-9. add certificate + Session request verification;
-10. add capability attenuation/admission before existing trusted Change executor;
-11. preserve bounded provenance with Runtime/Session/policy SHA evidence.
-
-### Gate 4 — gh-independent execution transport
-
-12. expose the verified semantic request through a minimal transport that does not depend
-    on user `gh auth`;
-13. retain MCP, Actions, and `gh` paths as adapters/compatibility until parity is proven;
-14. never return installation tokens to callers.
-
-### Gate 5 — bounded write dogfood
-
-15. dogfood narrow authority on Inari itself, including canonical branch issuance,
-    authorized branch advancement, and governed PR publication under short Session TTL;
-16. inject ambiguous-effect/replay/key-revocation failures and verify fail-closed/recovery
-    behavior.
-
-### Gate 6 — managed runtime integration
-
-17. integrate Nawabari/Mottainai only after the manual/local Inari protocol is stable;
-18. each runtime-created Agent Session gets its own ephemeral identity and certificate;
-19. Runtime integration remains optional and uses the same public cryptographic protocol.
-
-### Gate 7 — reconcile old ingress architecture
-
-20. reassess Epic #267 and retain only native MCP/transport work compatible with this
-    trust model;
-21. retire redundant Actions-RPC / `gh` credential dependencies only after equivalent
-    capability-authorized paths are proven.
-
-Implementation Issue boundaries must be derived from this merged work graph rather than
-created before the architecture gate.
-
-## 22. Open implementation choices that are not architectural ambiguity
-
-The following may be selected by bounded implementation Issues without reopening the
-trust model:
-
-- exact local private-key container format / OS keystore adapters;
-- exact CLI command spelling;
-- HTTP vs MCP endpoint deployment adapter;
-- implementation library for JOSE/JCS/Ed25519;
-- App hosting platform;
-- precise repository policy file decomposition under `.github/inari/`;
-- bounded cache implementation if it preserves current-ref authorization semantics;
-- Git data vs content API vs future bounded Git proxy for branch advancement.
-
-The following are **not** open:
-
-- Runtime private key as a direct App credential;
-- Agent receiving GitHub/App/user credentials;
-- central Session registry as a V1 requirement;
-- authorization policy sourced from the Agent branch;
-- raw GitHub permissions as the Agent-facing capability vocabulary;
-- mutation success without post-effect authoritative reread/verification;
-- ordinary delegated capability modifying its own trust roots.
-
-## 23. Architectural acceptance conditions
-
-This architecture is complete when later implementation can proceed without reopening
-these questions:
-
-- who holds every key and credential;
-- where Runtime trust is rooted;
-- how Delegator authority is limited;
-- how Session identity and manual/managed bootstrap work;
-- what a Session Certificate proves;
-- how Session proof-of-possession is verified;
-- how semantic capabilities attenuate GitHub App authority;
-- how current GitHub state participates in authorization and one-shot behavior;
-- how ambiguous effects and replay are handled;
-- why a central Inari credential-management server is not required;
-- how MCP, Actions, HTTP, CLI, and `gh` fit without becoming trust authorities;
-- and how #267 is reconciled with the new product direction.
-
-The implementation must preserve the central invariant:
-
-> GitHub provider credentials remain inside the App boundary. The Delegator can only
-> delegate. Agent Sessions can only exercise the bounded semantic capability certified for that session
-> and still admitted by the repository's current canonical policy and state.
+Publishing this document establishes the target and preserves its detailed
+security contract. It is not evidence that those migrations, live settings,
+or end-to-end certifications have passed.

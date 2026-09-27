@@ -1,18 +1,18 @@
-# Branch-creation Ruleset operations runbook
+# Branch-Creation Ruleset Operations
 
-This is the operator runbook for #223 issuer-controlled canonical Change
-branch-creation enforcement. It is subordinate to
-[`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md) §10 (branch authority
-model) and does not redefine Change lifecycle, issuer identity, or authority
-boundaries. `src/branch-creation-ruleset.ts` is the single Core definition of
-the desired-state Ruleset payload and the staged transition rule; this
-document describes the operator procedure around that definition, not a
-parallel policy.
+Status: operator runbook under
+[Change Control Plane](./CHANGE_CONTROL_PLANE.md) section 10 and
+[Product Architecture Canon](./ARCHITECTURE.md).
 
-## What this enforces
+`src/branch-creation-ruleset.ts` is the single Core definition of the desired
+Ruleset payload and staged transition rule. This runbook preserves the exact
+scope, bypass, rollout, verification, and rollback procedure. It neither
+creates live protection nor proves current provider configuration.
 
-A GitHub repository Ruleset with exactly one rule, `Restrict creations`,
-scoped to the governed Change branch namespace:
+## 1. Existing enforcement contract
+
+The existing repository-specific definition contains exactly one rule:
+Restrict creations. It covers:
 
 ```text
 refs/heads/feat/**
@@ -23,133 +23,123 @@ refs/heads/test/**
 refs/heads/chore/**
 ```
 
-(`refs/heads/main` is explicitly excluded; the default branch remains under
-the repository's existing separate Ruleset.)
+The current definition explicitly excludes `refs/heads/main`; separate
+default-branch protection remains in force. This is gh-inari's existing
+Ruleset contract, not a universal naming rule for every consumer repository.
 
-The Ruleset's only bypass actor is the `inari-issuer` GitHub App with
-`bypass_mode: always`. No other actor bypasses branch creation in this
-namespace.
+Its sole bypass Integration is the exact configured Inari Access App ID with
+`bypass_mode: always`. Historical Issuer names remain accepted parameter
+spelling, not an instruction to select an App by display name.
 
-Because the Ruleset contains exactly one `creation` rule and no other rule
-type:
+Because this Ruleset has only creation, it does not itself gate updates to
+already existing branches. It grants no bypass of review, checks, merge,
+trust-root governance, or another Ruleset.
 
-- **Arbitrary caller creation in the governed namespace is denied.** Only the
-  issuer App (or a repository owner acting outside the Ruleset, e.g. through
-  admin override) can create a new ref matching the namespace.
-- **Canonical branch creation by the issuer succeeds** through the existing
-  governed `change issue` path, which already uses the issuer App to create
-  the canonical branch.
-- **Ordinary authorized pushes to an already-issued branch are unaffected.**
-  `Restrict creations` only gates the creation of a new ref; it does not
-  gate updates to a ref that already exists, so the existing edit/commit/push
-  loop on a working branch (§10.2 of `CHANGE_CONTROL_PLANE.md`) is unchanged.
-- **The issuer receives no reviewer, approval, merge, or administration
-  authority from this configuration.** The bypass actor is scoped to this one
-  Ruleset and this one rule; it is not a bypass entry on any other Ruleset
-  (required reviews, required checks, or the existing default-branch
-  protection).
+Repository administrators can change enforcement outside Inari; this boundary
+does not claim to constrain the repository owner against their own admin
+rights.
 
-## Generating the exact payload
+## 2. Generate the canonical payload
 
 ```sh
 node --import tsx scripts/print-branch-creation-ruleset.mjs \
-  --issuer-app-id <inari-issuer numeric App ID> \
+  --issuer-app-id <numeric-Inari-Access-App-ID> \
   --enforcement disabled
 ```
 
-`--issuer-app-id` is deployment configuration (the `inari-issuer` App's
-numeric App ID), not committed to the repository; obtain it from the App's
-existing installation record. `--enforcement` selects the staged value
-(`disabled` | `evaluate` | `active`; defaults to `disabled`). The script only
-prints the payload — it never calls the GitHub API.
+This existing script prints the payload and does not invoke the GitHub API.
+Obtain the exact App ID from the current verified binding. The accepted stage
+values are disabled, evaluate, and active; default is disabled.
 
-## Staged rollout
+The configured App and actual repository branch policy must be consistent.
+Dedicated/shared App or Source-integration changes do not silently expand the
+namespace or bypass actors. Any necessary change to the canonical payload is
+separately approved implementation, not a hand-edited live workaround.
 
-Rollout is strictly sequential; `src/branch-creation-ruleset.ts`
-(`planRulesetRolloutStage`, `isRulesetRolloutAdvanceValid`) enforces that a
-plan cannot skip a stage:
+## 3. Preflight
+
+An authorized administrator first reads the current live Ruleset inventory and
+records IDs, payloads, and rollback state. Historical Issue comments or this
+runbook's introduction date are not current settings evidence.
+
+Verify the current packaged governed branch-creation path under the exact
+selected App and repository. Earlier #449/#588 certification is historical
+lineage, not a perpetual proof for the latest candidate.
+
+Before evaluate/active, require current exact-source self-dogfood evidence and
+successful authorized advancement of an already-issued branch. A missing
+capability or environment is blocked, not permission to enable optimistically.
+
+## 4. Staged rollout
+
+The canonical stage planner enforces:
 
 ```text
-(not defined) -> disabled -> evaluate -> active
+not defined -> disabled -> evaluate -> active
 ```
 
-| Stage      | Effect                                                                                                                                       |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `disabled` | The Ruleset exists (reviewable in the GitHub UI) but blocks nothing.                                                                         |
-| `evaluate` | GitHub reports what would be blocked without blocking it. Use this to confirm the issuer path is the only creator observed in the namespace. |
-| `active`   | Arbitrary-caller creation in the namespace is denied.                                                                                        |
+Disabled makes the definition inspectable without enforcement. Evaluate
+observes would-be restrictions where the provider supports it. Active enforces
+the accepted restriction. Verify actual provider support and results; do not
+silently skip a stage or treat rejected configuration as installed.
 
-For each stage, an authorized repository administrator:
+At every stage:
 
-1. Generates the payload for that stage with the script above.
-2. Creates the Ruleset (first time) or updates it (subsequent stages) through
-   the GitHub REST Rulesets API (`POST`/`PUT
-/repos/{owner}/{repo}/rulesets`) or the equivalent repository settings UI,
-   using the generated payload as the exact request body.
-3. Confirms the live Ruleset matches the generated payload by fetching it and
-   calling `validateChangeBranchCreationRuleset(fetched, issuerAppId)` from
-   `src/branch-creation-ruleset.ts` — the same `--issuer-app-id` used to
-   generate the payload. `expectedIssuerAppId` is mandatory: a fetched
-   Ruleset that happens to bypass some other Integration, but is otherwise
-   shaped correctly, must never be read as issuer-only.
+1. Generate the exact canonical payload for the intended stage.
+2. Apply it with separately authorized repository administration.
+3. Fetch the live result.
+4. Validate it with validateChangeBranchCreationRuleset and the expected
+   numeric App ID.
+5. Exercise/record the allowed and denied cases appropriate to that stage.
 
-This is a repository-administration action. It is intentionally **not**
-routed through the Inari issuer App, an Agent Session, or any other
-delegated capability: `AGENT_CAPABILITY_AUTHORIZATION.md` §11.6 lists
-"Ruleset modification" as non-delegable by ordinary implementation Runtime
-Authorities.
+Expected App identity is mandatory. A correctly shaped Ruleset that bypasses
+another Integration is not issuer-only enforcement.
 
-**Do not advance to `evaluate` or `active` before #449/#588 exact-source
-self-dogfood certification succeeds against current `main`.** Only
-`disabled` (define the Ruleset without observing or blocking anything) may
-proceed ahead of that certification. `evaluate` already starts recording
-what the live Ruleset would block, and `active` blocks a live `change issue`
-branch creation if the issuer identity, namespace, or bypass configuration
-is wrong; that certification evidence is what establishes the issuer path is
-safe to observe against, let alone enforce.
+Administrative mutation is not delegated to an ordinary Session, Hosted
+caller, or Inari Access effect profile. Their repository visibility or broad
+contents permission is not administration authority.
 
-## Rollback / recovery
+## 5. Acceptance evidence
 
-Rollback is a single immediate step back to `disabled` from any current
-stage (`planRulesetRollback`, `isRulesetRollbackValid`), regardless of which
-rollout stage is currently live:
+Prove that the current Inari Access path can create its canonical branch,
+arbitrary callers are restricted as intended, and authorized updates to an
+already-issued branch are not accidentally captured.
+
+Confirm default-branch and review/check protections remain independent and
+unchanged. Record live Ruleset ID, exact payload, App ID, candidate revision,
+provider results, and rollback configuration without credentials.
+
+Source/Epic namespaces outside the current payload are not covered by
+implication. Report an actual unsupported enforcement gap rather than
+claiming this six-prefix definition proves all possible integration branches.
+
+## 6. Rollback
+
+The canonical rollback moves any installed stage immediately to disabled:
 
 ```text
 active -> disabled
 evaluate -> disabled
 ```
 
-Rollback **updates** the existing Ruleset's `enforcement` field to
-`disabled`; it does not delete the Ruleset. Preserving the definition means a
-repaired issuance path can resume staged rollout (`disabled -> evaluate ->
-active`) without redefining conditions or the bypass actor from scratch.
+Update the existing Ruleset rather than delete it. Preserve its definition and
+App identity so repaired rollout resumes from disabled.
 
-Trigger rollback immediately if, at `evaluate` or `active`:
+Rollback is required if canonical creation fails, legitimate existing-branch
+updates are unexpectedly blocked, or evaluation exposes legitimate creators
+not migrated to the accepted path.
 
-- the issuer App fails to create a canonical branch through the governed
-  `change issue` path (i.e., the bypass actor or namespace is misconfigured);
-- an authorized ordinary push to an already-issued branch is unexpectedly
-  blocked (this would indicate the live Ruleset drifted from the `creation`-
-  only definition validated by `validateChangeBranchCreationRuleset`);
-- `evaluate` reports a legitimate non-issuer creator in the governed
-  namespace that has not yet been migrated to the issuer path.
+Generate the disabled payload with the same App ID, apply it to the existing
+Ruleset, reread, and validate the disabled result. Do not add extra bypass
+actors or weaken unrelated protections to make the test pass.
 
-To roll back:
+## 7. Recovery and current-status reporting
 
-1. Generate the `disabled` payload with the script above, using the same
-   `--issuer-app-id`.
-2. `PUT` it to the existing Ruleset's update endpoint (or toggle enforcement
-   to "Disabled" in the UI).
-3. Confirm the live payload is `disabled` and still passes
-   `validateChangeBranchCreationRuleset(fetched, issuerAppId)`.
+Repair the actual product/configuration cause under separate authority,
+re-certify the exact candidate, and resume the normal staged rollout.
+A provider failure is not a reason to suppress the validator.
 
-Recovery afterward re-enters the staged rollout above from `disabled`; it is
-not a new definition.
-
-## Current status
-
-As of this Ruleset's introduction, the live repository enforcement stage is
-**not defined / `disabled`**. Live rollout to `evaluate` or `active` is
-gated on #449/#588 exact-source self-dogfood certification, per the
-constraint on #223. This document and `src/branch-creation-ruleset.ts` define
-and test the enforcement; they do not themselves enable it.
+This document intentionally makes no assertion about today's live enforcement
+stage. Product definition, tests, historical rollout, and live settings are
+separate evidence. The corresponding operational Issues remain open until
+their actual current acceptance is demonstrated.

@@ -1,62 +1,46 @@
 # XState Change Machine Architecture
 
-Status: normative implementation architecture for Epic #345 and child Issue
-#346, reconciled with the completed #350/#351/#352 leaves by #552. This
-document refines, but does not replace, the product architecture in #188 and
-[`ARCHITECTURE.md`](./ARCHITECTURE.md).
+Status: normative Lifecycle Controller detail under
+[Product Architecture Canon](./ARCHITECTURE.md) and
+[Change Control Plane](./CHANGE_CONTROL_PLANE.md).
+
+This renewal preserves the operation topology, actor boundaries, failure
+semantics, parity and graph-proof requirements established by the earlier
+XState work. It changes identity/deployment references to the accepted
+Source/Implementation and user-owned Runtime architecture. It does not
+replace the machine runtime or claim the target identity migration is complete.
 
 ## 1. Purpose
 
-Inari models governed Change lifecycle state and trusted execution semantics through Change Core, XState operation machines, and bounded adapters.
-
-This document fixes the boundary for implementing the Lifecycle Controller with
-XState v5 without making XState an Authority or state store, and without
-moving repository truth or provider I/O into the machine runtime.
-
-The key rule is:
+Inari models governed Change lifecycle and trusted execution through Change
+Core, XState operation machines, and bounded adapters.
 
 ```text
-GitHub = repository Authority
-Core = deterministic semantic Roles
-XState = Lifecycle Controller implementation
-Adapters = bounded provider/transport I/O
-GitHub projection = observed repository state
+GitHub                  repository authority and observed state
+Repository Canon/Core   deterministic semantic contracts and plans
+XState                  Lifecycle Controller implementation
+Adapters                bounded provider/transport I/O
+Executor                admitted operation composition
 ```
 
-XState is an internal executable statechart implementation. It is not a new
-persistence layer, public API, repository policy engine, or artifact-definition
-owner.
+XState is not a persistence layer, public API, credential broker, repository
+policy engine, or artifact-definition owner.
 
-## 2. Authority model
+## 2. Responsibility model
 
 ### 2.1 Repository Canon and Semantic Artifact Core
 
-Repository Canon and Semantic Artifact Core own the deterministic meaning of
-governed Issue, Branch, and PR artifacts. GitHub remains the repository
-Authority whose evidence is observed and projected.
+Core and repository contracts own effective policy, schema interpretation,
+branch identity, PR title/body/base/head, artifact validation, provenance,
+desired projections, observed/desired comparison, and semantic diagnostics.
 
-They own, among other things:
-
-- effective repository policy;
-- template/schema interpretation;
-- canonical branch identity;
-- PR title/body/base/head semantics;
-- artifact validation;
-- provenance requirements;
-- desired projection planning;
-- observed-vs-desired comparison;
-- bounded semantic diagnostics.
-
-A machine may invoke these functions. It must not independently reimplement their rules in guards, actions, or actor-local helpers.
+Machines invoke these functions. They do not reproduce their rules in private
+guards or actor-local helpers.
 
 ### 2.2 Change Core
 
-Change Core owns the public Change vocabulary and semantic transition contract.
-The Lifecycle Controller implements the execution sequencing for those
-contracts; neither it nor its XState runtime becomes a second repository
-Authority or persisted Change store.
-
-The public lifecycle vocabulary remains:
+Change Core owns the public vocabulary and semantic transition contract.
+The public states remain:
 
 ```text
 DEFINED
@@ -68,110 +52,90 @@ ABORTED
 RECOVERY_REQUIRED
 ```
 
-The currently executable semantic operations are:
+The operation vocabulary remains issue, ready, abort, and the explicitly
+admitted merge composition. A public operation name is not evidence that every
+provider profile is authorized to execute it.
 
-```text
-issue
-ready
-abort
-merge
-```
+Source Change identity and Implementation task/publication identity are
+separate inputs. The controller must not replace the selected Source with the
+Implementation number to satisfy an old equality guard.
 
-`merge` is an explicit Change transition composed over the existing governed
-Semantic PR merge authority. Change admission binds the canonical PR and its
-current head/base; Semantic PR owns merge-policy admission and provider
-mutation; the Change executor performs an authoritative reread and only then
-projects `MERGED`. XState remains the Lifecycle Controller and does not become
-the repository merge-policy or provider-mutation Authority. Inari never merges
-without explicit caller intent.
+### 2.3 Lifecycle Controller
 
-### 2.3 Lifecycle Controller implementation
+XState implements executable legality and control flow:
 
-XState is the current implementation of the Lifecycle Controller. It owns
-executable control flow only:
-
-- lifecycle transition legality;
 - operation sequencing;
-- explicit retry/no-op branches;
-- failure-state routing;
-- compensation routing;
-- recovery routing;
-- required reread and postcondition-verification sequencing;
-- Change-level coordination around the governed Semantic PR merge authority;
-- final typed machine outcome selection.
+- explicit retry and no-op branches;
+- failure routing;
+- compensation and recovery routing;
+- required reread and postcondition-verification order;
+- coordination with the existing Semantic PR merge authority;
+- selection of a bounded typed machine outcome.
 
-It is not an Authority or state store. It does not decide canonical names,
-render artifacts, normalize provider responses, resolve repository policy, or
-define provenance rules.
+It does not decide repository trust, derive artifact values, mint credentials,
+normalize raw provider responses, or become a second state store.
 
 ### 2.4 Adapters
 
-GitHub and transport adapters own bounded external I/O:
+Evidence adapters read bounded provider/owner state. Effect adapters apply
+already-planned operations. Transport adapters move requests/results.
+Public result adapters map machine outcomes into Inari contracts.
 
-- read GitHub evidence;
-- normalize provider responses;
-- apply already-planned effects;
-- dispatch/receive Actions transport;
-- convert bounded machine/Core outcomes into existing public CLI/MCP/Change
-  execution-port results.
-
-Adapters must not add independent lifecycle policy.
+No adapter adds an independent lifecycle rule or converts transport success
+into semantic success.
 
 ### 2.5 Repository truth
 
-GitHub remains the primary observable state store for Change projection under #188.
+An actor snapshot is ephemeral execution state. A new execution initializes
+from current authoritative evidence, not a persisted snapshot that once had
+permission to mutate.
 
-An XState actor snapshot is ephemeral process state. It must not become an authoritative persisted Change record.
+Bounded replay/effect journals may preserve necessary recovery facts. They do
+not replace GitHub Change projection or become an actor-state database.
 
-A newly started execution always admits from current authoritative GitHub-derived projection, not from a previously persisted actor snapshot.
+## 3. Module ownership
 
-## 3. Target module ownership
-
-The migration may reorganize files, but the target ownership is conceptually:
+The following is an ownership illustration, not an instruction to move files
+for directory aesthetics:
 
 ```text
-src/change/
-  contract.ts                public/internal Change vocabulary
-  projection.ts              GitHub evidence -> Change projection
-  planning.ts                pure semantic transition/effect planning
-  recovery.ts                pure recovery classification/planning
-  machine/
-    lifecycle-machine.ts     pure lifecycle legality
-    execution-machine.ts     shared operation execution conventions
-    issue-execution-machine.ts
-    ready-execution-machine.ts
-    abort-execution-machine.ts
-    machine-output.ts        internal typed completion mapping
+Change contract/projection/planning/recovery
+  -> lifecycle machine
+  -> operation-specific machines
+  -> bounded machine outcome
 
-src/change-trusted-executor.ts
-  dependency injection + actor invocation + result mapping
+TrustedChangeExecutor
+  -> dependency injection
+  -> actor invocation
+  -> existing public-result mapping
 
-src/github/*
-  evidence/effect adapters
+provider adapters
+  -> evidence read
+  -> admitted effect
 ```
 
-This layout is illustrative. Ownership boundaries are normative; exact filenames are not.
+Current reference modules include:
 
-### 3.1 Existing code mapping
+- `src/change.ts` for Change contracts, projection/planning, and serialization;
+- `src/change/machine/lifecycle-machine.ts` for executable lifecycle legality;
+- `src/change-trusted-executor.ts` for the stable public adapter;
+- `src/change/machine/trusted-execution-adapter.ts` for binding semantic
+  callbacks and bounded I/O to operation actors.
 
-The converged implementation:
+Semantic Branch/PR planning, provider normalization, Session/remote caller
+admission, and transport protocols remain outside the machine implementation.
 
-- `src/change.ts` remains the source of public Change contract, projection/planning semantics, and canonical serialization.
-- `src/change/machine/lifecycle-machine.ts` is the sole executable lifecycle transition authority; no production transition table mirrors it.
-- `src/change-trusted-executor.ts` is a stable public adapter around the internal operation-machine runtime.
-- `src/change/machine/trusted-execution-adapter.ts` binds Core semantics and bounded I/O to the operation actors without owning their sequencing.
-- Existing projection helpers remain semantic read-model functions outside XState.
-- Existing Semantic Branch and Semantic PR plan functions remain desired-state authorities outside XState.
-- Existing GitHub effect executors remain provider-I/O boundaries outside XState.
-- Actions/MCP/CLI remote contracts remain outside XState.
+Retiring Direct App does not delete a shared machine or planning helper merely
+because that profile historically called it.
 
-## 4. Lifecycle machine
+## 4. Pure lifecycle machine
 
 ### 4.1 Scope
 
-The lifecycle machine is pure. It has no network actors and applies no repository effects.
+The lifecycle machine receives an already-classified public Change state and
+an admitted semantic event. It has no network actor and performs no effect.
 
-Conceptual statechart:
+The existing conceptual transition map is:
 
 ```text
 DEFINED
@@ -182,590 +146,486 @@ DRAFT
   abort -> ABORTED
 
 REVIEW
-  ready -> REVIEW       # idempotent retry
-  merge -> MERGED       # governed Semantic PR merge composition
+  ready -> REVIEW       idempotent request
+  merge -> MERGED       only through governed merge composition
   abort -> ABORTED
 
 ACCEPTED
-  merge -> MERGED       # governed Semantic PR merge composition
+  merge -> MERGED       only through governed merge composition
 
 ABORTED
-  abort -> ABORTED      # idempotent retry
+  abort -> ABORTED      idempotent request
 
 RECOVERY_REQUIRED
-  abort -> ABORTED      # governed cleanup retry when admitted by recovery semantics
+  abort -> ABORTED      only when current recovery semantics admit cleanup
 ```
 
-`ACCEPTED` and `MERGED` remain observation-derived states. `ACCEPTED` admits an
-explicit governed `merge` event; `MERGED` is terminal. A merge event is not a
-synthetic mutation for statechart symmetry: the trusted Change execution path
-must first admit the canonical projection, delegate policy and provider
-mutation to Semantic PR, reread authoritative evidence, and verify the Change
-projection before reporting `MERGED`.
+This table explains the contract. The production machine is the executable
+transition authority; no production copy of the table may compete with it.
+
+`ACCEPTED` requires actual merge-admission evidence. `MERGED` requires actual
+provider state verified after the admitted effect. An internal transition to
+a terminal node is not sufficient proof of either.
 
 ### 4.2 Initialization
 
-The lifecycle machine receives an already-classified current public Change state.
-
-It must not fetch GitHub evidence itself.
-
-Initialization therefore follows:
-
 ```text
-GitHub evidence
-  -> normalization
+current provider/owner evidence
+  -> bounded normalization
   -> Change projection
   -> semantic validation/classification
-  -> lifecycle machine initialization
+  -> lifecycle initialization
 ```
 
-The projection pipeline may produce diagnostics or fail closed before a lifecycle event is admitted.
+Projection may return ambiguity or denial before the machine receives an
+event. Initialization never silently fills missing Source/publication identity
+from an arbitrary child branch or the first PR found.
 
-### 4.3 Event vocabulary
+### 4.3 Events
 
-The internal lifecycle event vocabulary should map directly to semantic operations, for example:
+Internal events map directly to issue, ready, abort, and merge semantics.
+Their spelling is internal, but one event must not accidentally select
+another operation or acquire a new capability.
 
-```ts
-{
-  type: "ISSUE";
-}
-{
-  type: "READY";
-}
-{
-  type: "ABORT";
-}
-{
-  type: "MERGE";
-}
-```
+Machine-local progress events do not become public command names.
 
-Event names are internal implementation details, but there must be a one-to-one semantic mapping to public operations. Machine-local events must not become a competing command vocabulary.
+### 4.4 Parity
 
-### 4.4 Parity requirement
+Test-only expected state/event pairs exhaustively cover the declared public
+combinations. Each must produce a legal transition, an admitted idempotent
+no-op, or deterministic rejection.
 
-The lifecycle parity suite exhaustively compares all current public state/event combinations against a test-only expected set.
+The expected set is a contract oracle in tests, not a second production
+machine. Identity migration must not incidentally change unrelated lifecycle
+legality.
 
-For every combination, the machine must prove one of:
+## 5. Trusted operation topology
 
-- legal transition with identical resulting public state;
-- legal idempotent self-transition/no-op;
-- deterministic rejection with compatible bounded semantics;
-
-No transition semantics may change incidentally during the migration.
-
-## 5. Trusted execution topology
-
-The trusted execution runtime should use one dispatcher plus operation-specific child actors/machines rather than one giant monolithic machine.
-
-Conceptually:
+Use one dispatcher and bounded operation-specific actors rather than one
+unstructured conditional executor or one monolithic machine that owns every
+domain rule.
 
 ```text
-trusted request
-  -> bind trusted requester/issuer context
+admitted request and immutable execution context
   -> dispatch by semantic operation
        -> issue actor
        -> ready actor
-       -> abort actor
-       -> merge coordination -> governed Semantic PR merge authority
-  -> map final internal outcome
-  -> existing trusted/public result contract
+       -> abort/recovery actor
+       -> governed Semantic PR merge coordination
+  -> typed machine outcome
+  -> bounded public execution result
 ```
 
-The dispatcher does not re-decide semantic legality. It selects the operation
-actor or merge coordinator and provides trusted dependencies/context. Merge
-coordination does not duplicate Semantic PR merge admission or provider
-mutation.
+The dispatcher selects an operation implementation and supplies dependencies.
+It does not repeat admission or infer permission from the actor selected.
 
-## 6. Machine context contract
+Admission and the Effect Authorizer remain separate gates. A lifecycle event
+cannot manufacture an installation capability or authorize a provider effect
+missing from the selected execution profile.
 
-Machine context must remain bounded and explicit.
+## 6. Machine context
 
-Recommended categories:
+### 6.1 Immutable identity
 
-### 6.1 Immutable request identity
+Retain the admitted repository, selected Source Change, Implementation/task
+binding when applicable, semantic operation, authenticated requester,
+Executor/provider identity, and bounded request correlation.
 
-- repository identity;
-- root Issue number / Change identity;
-- requested semantic operation;
-- trusted requester identity;
-- trusted issuer identity;
-- request correlation metadata when already part of existing bounded contracts.
-
-These values should not be mutated after actor startup.
+Those fields do not change midway through execution. A repository switch or
+new Source is a different admitted request, not a context patch.
 
 ### 6.2 Current semantic evidence
 
-- normalized current Change projection;
-- projection diagnostics/status;
-- admitted semantic plan;
-- relevant canonical branch/PR identity.
+Context may contain the bounded normalized projection, its status and
+diagnostics, accepted semantic plan, and exact canonical publication identity.
 
-Raw GitHub response bodies must not be retained in machine context.
+Raw GitHub bodies, arbitrary URLs, user credentials, and unbounded exception
+objects do not belong in context.
 
 ### 6.3 Effect evidence
 
-Only bounded evidence needed for deterministic postcondition or compensation logic is retained, for example:
+Retain only the evidence needed for verification or compensation:
 
-- effect kind;
-- canonical target identity;
-- created branch commit SHA/generation evidence;
-- created/updated PR number when part of the bounded result contract.
+- effect kind and exact target;
+- branch creation head/generation;
+- relevant PR identity;
+- classified outcome and allowed correlation;
+- the plan's preconditions/postcondition.
 
-Provider tokens, raw exception objects, unbounded URLs, and full provider payloads are prohibited.
+An effect receipt is not a new source of repository truth. Reread still owns
+verification of current state.
 
-### 6.4 Diagnostics/recovery evidence
+### 6.4 Diagnostics
 
-Store only allowlisted bounded Core/trusted-executor diagnostics required to map a terminal outcome.
+Diagnostics are typed, bounded, and allowlisted. Context is not a log sink.
+Provider response objects and secret-bearing errors must be sanitized at their
+owner boundary before they reach an actor outcome.
 
-Machine context is not a log sink.
+## 7. Actor and service boundaries
 
-## 7. Actor/service boundaries
+### 7.1 Evidence read
 
-Operation actors invoke typed services for external or semantic work. The following responsibilities remain separate.
+Input is the exact admitted repository/subject and bounded query.
+Output is normalized evidence or a classified read failure.
 
-### 7.1 Evidence read actor
+The reader performs I/O through the owner/provider adapter. It does not
+choose lifecycle transitions or determine desired artifact values.
 
-Input: repository + Change identity.
+### 7.2 Projection
 
-Output: bounded normalized repository evidence or a classified read failure.
+Input is bounded normalized evidence plus the relevant Canon.
+Output is Change/semantic projection and diagnostics.
 
-It may call GitHub adapters. It must not classify lifecycle legality itself beyond evidence normalization.
+Projection is deterministic and contains no provider credential acquisition.
 
-### 7.2 Projection actor/function
+### 7.3 Validation and planning
 
-Input: normalized evidence.
+Input is the semantic request, current projection, and accepted context.
+Output is a bounded rejection or an explicit plan with preconditions and
+postconditions.
 
-Output: authoritative `ChangeProjectionResult` or equivalent bounded projection result.
+Reuse the canonical Core, Semantic Branch, and Semantic PR planners. Machine
+guards do not render a parallel PR body or derive another branch name.
 
-This remains a pure Core responsibility where practical.
+### 7.4 Effect
 
-### 7.3 Semantic validation/planning actor/function
+Input is one admitted effect and the trusted execution context.
+Output is bounded effect evidence or a classified failure.
 
-Input: projection + semantic request + effective Core inputs.
+The actor does not add follow-up effects, widen permissions, or retry an
+unknown provider result without the canonical recovery decision.
 
-Output: admitted semantic transition/effect plan or bounded semantic rejection.
+### 7.5 Reread
 
-It must reuse existing Core validators/planners and Semantic Branch/PR plans.
+After a possible mutation, reacquire evidence through the same canonical
+reader boundary. A 2xx response, callback completion, or Relay delivery
+acknowledgment is not the postcondition.
 
-### 7.4 Effect actor
+### 7.6 Verification
 
-Input: one explicit planned effect plus trusted authority context.
-
-Output: bounded effect evidence or classified effect failure.
-
-The effect actor must not invent follow-up effects or reinterpret policy.
-
-### 7.5 Reread actor
-
-After any privileged mutation, repository evidence is read again through the normal evidence boundary.
-
-A mutation response alone is never sufficient proof of successful Change transition.
-
-### 7.6 Verification actor/function
-
-Input: expected semantic postcondition + reread authoritative projection.
-
-Output: verified success or bounded projection-verification failure.
-
-Verification semantics remain Core-owned.
+Compare the expected semantic postcondition with the fresh projection.
+Return verified completion or bounded mismatch/unavailability/recovery.
+Verification performs no compensating mutation on its own.
 
 ## 8. Common execution invariant
 
-Every successful privileged mutation path must follow this shape:
+Every effectful success follows:
 
 ```text
 read
--> project
--> validate/admit
--> plan
--> apply effect(s)
--> reread
--> verify postcondition
--> success
+  -> project
+  -> validate/admit
+  -> plan
+  -> effect
+  -> authoritative reread
+  -> verify postcondition
+  -> success
 ```
 
-No operation may report semantic success merely because the provider API returned 2xx.
+Every failure edge terminates in classified failure, explicit compensation,
+or explicit recovery. There is no generic catch that silently returns success
+or translates an unknown effect into a safe pre-effect retry.
 
-Every failure edge must end in one of:
+A no-op success is permitted only after current evidence proves the requested
+postcondition already holds.
 
-- bounded classified failure;
-- explicit compensation flow;
-- explicit recovery-required flow.
+## 9. Ready machine
 
-There is no generic implicit fallthrough to success or recovery.
-
-## 9. Ready execution machine
-
-Ready is the reference vertical slice.
-
-Conceptual topology:
+Ready remains the small reference vertical slice:
 
 ```text
 reading
--> projecting
--> validating
--> planning
-   -> alreadyReady -> verifyingCurrent -> success
-   -> effectRequired
--> markingReady
--> rereading
--> verifying
--> success
-
-failure states:
-  readFailed
-  preconditionFailed
-  effectFailed
-  verificationFailed
+  -> projecting
+  -> validating
+  -> planning
+       -> alreadyReady
+            -> verifyCurrent
+            -> success
+       -> effectRequired
+            -> markReady
+            -> reread
+            -> verifyReview
+            -> success
 ```
 
-Required behavior:
+Required distinctions:
 
-- DRAFT -> REVIEW applies exactly one planned `MARK_PULL_REQUEST_READY` effect.
-- REVIEW -> REVIEW is explicit idempotent success with no duplicate mutation.
-- Invalid/conflicting/recovery evidence fails before mutation.
-- Success requires reread and healthy canonical REVIEW verification.
+- healthy DRAFT to REVIEW applies the single admitted ready effect;
+- an already healthy REVIEW is a verified no-op;
+- invalid identity, drift, missing evidence, or unauthorized caller fails
+  before effect;
+- failed effect, failed reread, and mismatched postcondition remain different
+  outcomes.
 
-## 10. Abort execution and recovery
+Changing a PR draft flag outside this path does not itself prove that the
+Change is governed and reviewable.
 
-Abort must distinguish normal termination from partial-cleanup retry.
+Source Change ready and Implementation leaf publication are not aliases.
+The caller must supply the correct semantic subject; a task-bound publication
+claim cannot be consumed as a Source ready grant.
 
-Conceptual topology:
+## 10. Abort and recovery
+
+Abort distinguishes intentional termination, already-aborted state, and
+remaining cleanup after a partial failure.
 
 ```text
-reading
--> projecting
--> classifyingAbort
-   -> alreadyAborted -> success
-   -> normalAbort
-   -> cleanupRecovery
+read and project
+  -> classifyAbort
+       -> alreadyAborted: verify existing terminal state
+       -> normalAbort: plan current closure/cleanup
+       -> cleanupRecovery: validate only the remaining safe effect
+```
 
-normalAbort:
-  plan
-  -> closePullRequest
-  -> deleteBranchIfPlanned
+Normal abort:
+
+```text
+plan
+  -> close canonical PR if admitted
+  -> delete canonical branch only if the abort plan permits it
   -> reread
-  -> verifyAborted
+  -> verify ABORTED
+```
 
-cleanupRecovery:
-  validateRemainingCleanup
-  -> deleteRemainingBranchIfSafe
+Recovery:
+
+```text
+current partial projection
+  -> validate remaining cleanup ownership/generation
+  -> apply only that safe remaining effect
   -> reread
-  -> verifyAborted
+  -> verify ABORTED or remain RECOVERY_REQUIRED
 ```
 
-### 10.1 Internal hierarchical recovery states
+### 10.1 Internal recovery hierarchy
 
-The stable public lifecycle remains `RECOVERY_REQUIRED`, but internal execution state may distinguish:
+Internal actor states may distinguish branch-cleanup pending, cleanup unsafe,
+and verification unavailable. Those names are not new public Change states.
+They derive from current evidence and map to the established bounded result.
+
+### 10.2 Destructive safety
+
+A recovery actor must not delete advanced work, another Implementation's
+branch, a mismatched Source publication, or a target selected only by name.
+
+Issuance compensation and ordinary abort cleanup retain their distinct
+contracts. XState does not make provider deletion atomic or justify weakening
+the generation check.
+
+## 11. Issuance Saga
+
+Issuance is one logical operation with multiple provider effects:
 
 ```text
-recoveryRequired.abort.branchCleanupPending
-recoveryRequired.abort.cleanupUnsafe
-recoveryRequired.abort.verification
+bind admitted identity
+  -> validate selected Source and applicable task authority
+  -> read current repository evidence
+  -> project canonical publication
+  -> classify issuance
+       -> existingHealthy: verify and return existing
+       -> createRequired
+            -> admit Semantic Branch/PR plans
+            -> create canonical branch
+            -> retain created generation
+            -> create canonical Draft PR
+            -> reread
+            -> verify DRAFT
 ```
 
-These names are illustrative. The important property is that recovery topology is explicit internally rather than inferred repeatedly from ad hoc executor conditionals.
+The Source integration publication and Implementation leaf publication must
+be explicitly resolved before this sequence. The actor cannot fill a missing
+Source pair with an arbitrary child's branch/PR.
 
-### 10.2 Destructive cleanup safety
-
-A recovery actor may only apply the remaining destructive effect proven safe by current authoritative evidence.
-
-If branch generation/current SHA no longer satisfies the existing compensation/cleanup contract, automatic deletion fails closed and preserves worker data.
-
-XState does not weaken generation-safe deletion semantics or solve provider-side atomicity limitations by itself.
-
-## 11. Issue issuance Saga
-
-Issuance is a logical transaction composed of multiple GitHub effects.
-
-Conceptual topology:
+### 11.1 Partial creation failure
 
 ```text
-bindTrustedIdentity
--> validateRootIssue
--> readAuthoritativeEvidence
--> projectCurrentChange
--> classifyIssuance
-   -> existingHealthyChange -> successExisting
-   -> createRequired
--> admitSemanticPlans
--> createCanonicalBranch
--> recordBranchGenerationEvidence
--> createCanonicalDraftPullRequest
--> reread
--> verifyDraft
--> success
+branch creation succeeded
+  -> PR creation failed or outcome uncertain
+  -> reread partial projection
+  -> plan compensation/reconciliation
+       -> desired publication proven: verify existing result
+       -> exact created branch safe to compensate
+            -> conditional delete
+            -> reread
+            -> verify compensated failure
+       -> unsafe/conflicting/unavailable
+            -> recovery required
 ```
 
-### 11.1 Partial failure
-
-If branch creation succeeds and Draft PR creation fails:
-
-```text
-prCreationFailed
--> rereadPartialProjection
--> planCompensation
-   -> safeToDeleteCreatedBranch
-      -> deleteCreatedBranch
-      -> reread
-      -> verifyCompensated
-      -> compensatedFailure
-   -> unsafeOrAmbiguous
-      -> recoveryRequired
-```
-
-Compensation is never unconditional branch deletion by name.
+Compensation is never unconditional deletion by branch name. Failure after
+sending a create request is not proof the object was not created.
 
 ### 11.2 Idempotency
 
-A healthy existing canonical issued Change is an explicit terminal success path with zero duplicate branch/PR effects.
-
-Partial, duplicate, conflicting, or unavailable evidence is not treated as healthy idempotency and must fail closed or enter governed recovery according to existing Core semantics.
+Healthy existing canonical publication is a zero-duplicate-effect path.
+Partial, duplicate, conflicting, or unavailable observations are not healthy
+idempotency and must not trigger another blind branch/PR creation.
 
 ### 11.3 Artifact semantics
 
-Issuance consumes Semantic Branch and Semantic PR plans. The Saga sequences effects; it does not rederive:
+The Saga consumes canonical Semantic Branch and Semantic PR plans. It does not
+rederive branch/base, PR head/base, title/body, relation meaning, or provenance.
 
-- branch name;
-- branch base;
-- PR head/base;
-- PR title/body;
-- Issue/PR relationship semantics;
-- provenance requirements.
+A renderer or relation-policy change belongs to its domain contract, not a
+machine-local formatting helper.
 
-## 12. Recovery model
+## 12. Recovery classification
 
-`RECOVERY_REQUIRED` is a public statement that repository evidence does not permit safe completion of the requested governed transition without an explicit recovery path.
+Public `RECOVERY_REQUIRED` means that current evidence does not justify safe
+completion of the requested transition without the explicit recovery path.
 
-Internally, hierarchical states should distinguish at least the recovery classes already required by execution behavior:
+Existing internal distinctions include issuance orphan/compensation unsafe,
+abort cleanup pending, and unavailable/mismatched post-effect verification.
+They must be derivable from bounded evidence.
 
-```text
-recoveryRequired.issuance.orphanBranch
-recoveryRequired.issuance.compensationUnsafe
-recoveryRequired.abort.branchCleanupPending
-recoveryRequired.verification
-```
-
-The internal subtype must be derivable from bounded current/effect evidence and must map back to the existing public lifecycle/result contract.
-
-Do not persist the internal subtype as independent repository truth.
-
-A retry starts from fresh GitHub-derived projection and reclassifies the current recovery topology.
+A new process rereads and reclassifies. It does not resume destructive
+permission merely because an old actor snapshot was in a cleanup state.
 
 ## 13. Outcome and error mapping
 
-XState terminal states are internal. Public consumers continue receiving existing Inari contracts such as `ChangeExecutionResult` and `ChangeTrustedExecutorError`.
+Public consumers receive Inari domain results, not XState state-node names.
+An internal discriminated result can distinguish verified success, bounded
+failure, and recovery required while preserving the existing public contract.
 
-The machine runtime should produce an internal discriminated outcome approximately equivalent to:
+Stable diagnostic codes retain their meanings. Secret-bearing provider
+objects do not escape through exception causes or callback failures.
+Transport adapters preserve allowed error evidence without exposing raw
+responses or converting every failure into one generic success envelope.
 
-```ts
-type MachineOutcome =
-  | { kind: "success"; result: BoundedChangeResult }
-  | { kind: "failure"; code: TrustedErrorCode; diagnostics: BoundedDiagnostics }
-  | { kind: "recovery-required"; result: BoundedRecoveryResult };
-```
+A controller test does not prove transport diagnostic preservation. The
+transport must have its own boundary proof.
 
-Exact type names are implementation details.
-
-Required properties:
-
-- existing stable trusted error codes remain meaningful;
-- Core diagnostics remain bounded and allowlisted;
-- secret-bearing/provider objects never escape;
-- machine state-node names are not exposed as public error codes;
-- Actions/CLI/MCP consumers do not need to understand XState.
-
-Issue #263 remains separately responsible for preserving allowed trusted diagnostics across the Actions transport boundary. Typed machine outcomes do not by themselves satisfy #263.
-
-## 14. Rehydration and restart semantics
+## 14. Restart and rehydration
 
 There is no authoritative actor rehydration from persisted snapshots.
 
-A new request/retry follows:
-
 ```text
-fresh request
--> fresh GitHub evidence read
--> fresh projection
--> classify current lifecycle/recovery state
--> start/enter operation machine from that admitted state
+new request or recovery attempt
+  -> fresh owner/provider evidence
+  -> fresh projection
+  -> current admission and recovery classification
+  -> new bounded operation execution
 ```
 
-If an execution process crashes after an effect, the next request detects the resulting GitHub projection and proceeds through existing idempotency/recovery semantics.
+If a process crashes after an effect, repository state and the relevant owner
+fences determine whether to return existing, safely continue, or require
+recovery. Process restart does not reset request identity into unused authority.
 
-This preserves the #188 invariant that GitHub, not a private actor store, is the Change state store.
+Runtime availability, Session lifecycle, Relay delivery, and Change state
+remain different observations during this process.
 
 ## 15. Public API isolation
 
-No public package export may require consumers to depend on XState types.
+Public package contracts must not require `ActorRef`, XState snapshots,
+internal state-node values, or machine objects as repository authority.
 
-Do not export as product contracts:
-
-- `ActorRef`;
-- `Snapshot`;
-- state-node values used only for internal execution phases;
-- machine implementation objects as repository Authority or public semantic
-  contracts.
-
-Public API remains Inari-owned domain types and semantic commands.
-
-This permits future internal machine refactoring or even runtime replacement without breaking callers.
+Consumers use Inari request/result and diagnostic types. Internal actor
+refactoring must not require clients to understand machine implementation
+states or select recovery branches themselves.
 
 ## 16. Dependency policy
 
-Use XState v5, exact-pinned during the migration.
+XState is an internal implementation dependency. Changes to its version or
+execution behavior are explicit reviewed changes with the required parity
+and operation proofs.
 
-Rationale:
-
-- the trusted executor is governance/security-sensitive;
-- exact pinning makes state-runtime changes explicit in review;
-- dependency widening can be reconsidered after migration converges.
-
-Graph/model testing support is development/test-only and must not become a
-Delegator or other runtime trust principal.
+Model/graph tooling remains a test dependency, not a runtime trust principal.
+The architecture does not require a new generic workflow framework or
+replacement state-machine abstraction.
 
 ## 17. Testing architecture
 
-Testing has three distinct layers.
+### 17.1 Lifecycle parity
 
-### 17.1 Lifecycle parity tests
+Keep the expected public state/event pairs in tests only. Exhaustively compare
+accepted transition, no-op, and rejected combinations with the production
+machine. The expected set must come from the accepted contract, not a copy
+computed from the same function under test.
 
-The lifecycle parity suite keeps its expected state/event pairs as test-only data and exhaustively checks them against the production machine.
+### 17.2 Focused operation proof
 
-This prevents a compatibility oracle from becoming a second production authority.
+Use deterministic evidence/effect ports and failure injection for:
 
-### 17.2 Focused operation tests
-
-Each operation machine keeps deterministic fake evidence/effect actors and failure injection for:
-
-- precondition failure;
-- no-op/idempotent retry;
-- effect failure;
+- invalid identity and preconditions;
+- healthy no-op retry;
+- effect rejection and unknown effect outcome;
 - reread failure;
 - verification mismatch;
-- compensation success/failure;
-- unsafe recovery.
+- successful and failed compensation;
+- unsafe recovery;
+- branch-generation change between observations.
 
-These tests assert semantic outputs, not merely final state-node names.
+Assert semantic output and effect count/targets, not merely a terminal
+state-node name.
 
-### 17.3 Model/graph path coverage
+### 17.3 Production graph traversal
 
-After the production machines exist, model/graph traversal consumes those production definitions directly.
+Graph/model traversal consumes production machine definitions. It covers
+reachable execution/recovery edges without adding a handwritten mirror
+machine. An uncovered edge needs a concrete proof or a bounded justified
+exclusion.
 
-It must cover reachable lifecycle/execution/recovery paths without introducing a hand-written mirror machine.
+Graph coverage supplements semantic, provenance, adapter, and security tests;
+it does not replace them.
 
-A new reachable edge must either receive coverage or a bounded documented exclusion.
+### 17.4 Composition and installed boundary
 
-Model coverage supplements, not replaces, semantic/provenance/adapter/security regression tests.
+The actual Executor must invoke these machines with real owner/provider
+adapters. Packed/public-path certification must not substitute a fixture-side
+state machine or pre-create the desired ready/merged condition.
 
-## 18. Migration plan
+The same scenario at a different boundary may be necessary. Repeating the
+same full suite twice at the same revision without a distinct proof is not.
+See [Verification Architecture](./VERIFICATION_ARCHITECTURE.md).
 
-The migration order is normative because it minimizes simultaneous authorities.
+## 18. Migration obligations
 
-### Gate 0 — #346 (complete)
+The existing XState extraction is a foundation to preserve, not work to redo.
+The current architecture renewal requires:
 
-The architecture was merged before runtime migration.
+1. Source/task/publication identity to be supplied consistently by every
+   canonical caller;
+2. local and remote caller evidence to converge before operation execution;
+3. Hosted and retired Direct App code to stop owning parallel sequencing;
+4. public results to preserve bounded failure and recovery evidence;
+5. continuous packed composition to prove the resulting path.
 
-### Phase 1 — #347 lifecycle machine (complete)
+Do not revive the earlier imperative executor or create a second lifecycle
+machine to ease a migration. Retain a bounded adapter only while it feeds the
+same canonical machinery and has an explicit retirement condition.
 
-The pure lifecycle machine owns executable legality, with exhaustive parity
-coverage retained as a regression guard.
+## 19. Non-goals
 
-### Phase 2 — #348 Ready execution (complete)
+This contract does not add a Change database, persist actor snapshots as
+repository truth, change public state names, grant merge permission,
+reimplement artifact semantics, normalize GitHub responses in XState, solve
+provider atomicity, or create an autonomous orchestrator.
 
-The smallest complete privileged operation established the shared
-operation-machine conventions.
-
-### Phase 3 — #349 Abort/recovery (complete)
-
-Normal abort, idempotent terminal retry, and explicit cleanup recovery are
-machine-driven.
-
-### Phase 4 — #350 issuance Saga (complete)
-
-The canonical branch + Draft PR transaction, compensation, generation-safe
-recovery, and issuance idempotency are machine-driven.
-
-### Phase 5 — #351 graph/model coverage (complete)
-
-Structural reachable-path coverage consumes the production machines.
-
-### Phase 6 — #352 convergence (complete)
-
-`TrustedChangeExecutor` is the stable public adapter boundary. Dependency
-injection, actor invocation, Core semantic callbacks, and public-result mapping
-remain in the internal runtime adapter; superseded imperative sequencing and
-duplicate lifecycle-control logic are removed.
-
-At every intermediate phase, supported public behavior must remain compatible.
-
-The XState migration is complete at the current main baseline. #239 remains an
-independent Change dogfood/abort-cleanup gate, and #553 remains the open
-cross-deployment semantic conformance follow-up. Neither is made complete by
-the machine migration or by this documentation update.
-
-### Post-migration — #687 Change merge composition (complete)
-
-Change `merge` is an explicit lifecycle operation over the existing governed
-Semantic PR merge authority (#521). Change admission binds the canonical PR,
-repository identity, and fresh head/base evidence; Semantic PR performs merge
-policy admission and provider mutation; the Change execution path rereads
-authoritative evidence and verifies the canonical Change projection as
-`MERGED`. This composition does not introduce a second merge policy or effect
-engine.
-
-## 19. Explicit non-goals
-
-This architecture does not:
-
-- replace GitHub as Change state store;
-- add a Change database;
-- persist XState actor snapshots as repository truth;
-- change public Change state names;
-- autonomously merge a Change or introduce a second merge-policy/effect engine;
-- move Semantic Artifact rules into machine guards/actions;
-- move GitHub response normalization into XState;
-- redesign Actions transport;
-- solve #263 transport diagnostic loss automatically;
-- solve #343 workflow bootstrap/source-trust behavior;
-- guarantee provider-level atomic compare-and-delete beyond the existing effect contract;
-- redesign CLI or MCP semantic command vocabulary.
+The existence of a merge transition does not authorize an implementation
+agent, Hosted service, or App profile to approve or merge a PR.
 
 ## 20. Review invariants
 
-An implementation PR in #347-#352 should be rejected if it does any of the following:
+Reject changes that:
 
-- persists an actor snapshot as authoritative Change state;
-- duplicates branch/PR semantic derivation inside a machine;
-- treats provider mutation success as semantic success without reread/verification;
-- deletes a branch during compensation without existing safety evidence;
-- exposes XState implementation types through public package contracts;
-- creates operation-specific lifecycle rules that diverge from the canonical lifecycle machine;
-- converts ACCEPTED/MERGED into invented mutation events without separate governance;
-- performs merge-policy admission or provider mutation inside XState instead of
-  delegating to the governed Semantic PR merge authority;
-- reports Change `MERGED` without an authoritative reread and projection
-  verification;
-- adds workflow/adapter policy that competes with Core semantic Roles or the
-  Lifecycle Controller;
-- silently treats #263 or #343 as solved by the XState migration.
+- use a snapshot as current mutation authority;
+- duplicate branch, template, relation, or capability policy in an actor;
+- treat provider success as semantic success without reread;
+- delete during compensation without exact safety evidence;
+- expose machine internals as public product contracts;
+- diverge operation-local legality from the canonical lifecycle machine;
+- fabricate a provider merge capability from a state transition;
+- alias Source Change and Implementation task identity;
+- lose post-effect uncertainty in transport/result mapping;
+- claim graph/unit tests certify a live provider path.
 
 ## 21. Completion condition
 
-The migration is complete when:
+One lifecycle machine owns executable legality. Operation machines own
+sequencing and explicit recovery. Core owns semantic rules and plans.
+Executor/provider adapters own bounded effects and evidence. Every success
+has a verified postcondition, every failure retains its correct ambiguity,
+and public clients remain independent of XState internals.
 
-- one pure lifecycle machine is the executable transition authority;
-- issue/ready/abort trusted sequencing is machine-driven;
-- governed Change merge composes the canonical Semantic PR merge authority and
-  verifies the resulting `MERGED` projection;
-- recovery and compensation paths are explicit and covered;
-- all mutation success paths reread and verify authoritative projection;
-- `TrustedChangeExecutor` no longer contains a competing imperative state machine;
-- Semantic Artifact/Core and adapter authority boundaries remain intact;
-- public Change/CLI/MCP/Actions contracts remain implementation-independent;
-- GitHub remains the sole initial observable Change state store.
-
-At that point, XState is an implementation mechanism for making Inari's
-already-governed semantics executable and mechanically complete, not a new
-Authority, state store, or source of product truth.
+The architecture renewal is certified only when those properties hold through
+the supported local and remote public paths on the exact candidate revision.

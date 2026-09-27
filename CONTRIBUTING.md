@@ -1,76 +1,110 @@
-# Contributing
+# Contributing to Inari
 
-Thanks for your interest in contributing. This project is pre-1.0 — expect
-breaking changes between minor versions until 1.0.
+## Start with the contract
 
-## Before you start
+Read `AGENTS.md`, the organization governance contract, and the applicable
+purpose-specific Skill. The [Product Architecture Canon](./docs/ARCHITECTURE.md)
+and domain guides define the accepted target; the governing Issue or latest
+explicit owner instruction defines the requested work and lifecycle.
 
-- Blank Issues are disabled. Open and discuss one concrete Issue before
-  implementation.
-- Include the Issue number in the branch name: `<type>/<issue-number>-<slug>`
-  (e.g. `feat/42-add-init-command`), where `<type>` is one of `feat`, `fix`,
-  `docs`, `refactor`, `test`, `chore`.
-- Keep a pull request scoped to one closing Issue.
+Do not treat a historical Issue, stale PR description, or current accidental
+behavior as permission to redesign a settled contract. When evidence conflicts,
+identify the exact contradiction and return the architecture decision to the
+owner rather than silently choosing a broader fallback.
 
-## Development setup
+Architecture includes identity, public meaning, credential/trust/state owners,
+compatibility, failure/recovery semantics, deployment guarantees, and proof
+boundaries. Internal functions, files, algorithms, and focused tests remain
+implementation choices within the accepted scope.
 
-Requires Node.js >= 22.13 and [pnpm](https://pnpm.io/) 11.18.0.
+## Environment
 
-```bash
-pnpm install
-pnpm run build
-pnpm test
-pnpm run typecheck
-pnpm run format:check
-pnpm run lint
+Use the repository-supported Node.js version (24 or newer) and package-manager
+contract from package.json. Install the pinned dependency graph:
+
+```sh
+pnpm install --frozen-lockfile
+```
+
+An unsupported local environment does not justify weakening checks or claiming
+CI is green. Record what could and could not be executed.
+
+## Isolated work
+
+Do not implement directly on main. Use the governed branch/worktree and
+current base. Preserve unrelated work. Do not reset, force-push, merge, close,
+or alter live settings without the corresponding explicit authority.
+
+An Implementation leaf is not its Source/Epic integration branch. Cross-Source
+dependencies require physically integrated producer state, not sibling
+worktrees or an Issue closed flag. Standalone work follows its accepted route.
+
+## Implementation boundaries
+
+Implement the accepted gap. Reuse canonical Core, parser, schema, lifecycle,
+port, and storage primitives. Remove duplicate authority for a migrated slice
+rather than leaving both paths active indefinitely.
+
+Source Change identity is distinct from Implementation task/leaf publication.
+Hosted assertion eligibility is distinct from semantic authorization.
+Provider effects stay at Executor, delegation keys at Authority, and Setup
+configuration remains secret-free.
+
+Path scope distinguishes READONLY, WRITE, CREATE, DELETE, and DENY. A naming
+check does not establish task authorization; a valid signature does not prove
+fresh repository state; a provider success does not prove the postcondition.
+
+## Documentation changes
+
+Preserve valid domain detail: inputs/outputs, invariants, threat model,
+state/ownership, failure and recovery, migration, and verification. Remove
+conflicting authority, not useful design information.
+
+Use the [convergence ledger](./docs/ARCHITECTURE_CONVERGENCE.md) to distinguish
+approved target, existing implementation, missing integration, and live proof.
+Do not update historical release/certification records to imply they certified
+a new architecture. Keep generated command/native-template sections aligned
+with their actual producer.
+
+## Validation
+
+During edits run focused checks for the changed contract. After stabilization,
+run canonical verification:
+
+```sh
 pnpm run verify
 ```
 
-## Making changes
+Source, built, installed, process, browser, deterministic-provider, and live
+checks prove different boundaries. Reuse revision-bound artifacts only when
+identity and exclusive producer ownership are established. Do not drop a real
+boundary test because a mock covers similar logic.
 
-1. Create a branch off `main` using the Issue number.
-2. Keep changes focused — a bug fix shouldn't carry along unrelated refactors.
-3. Add or update tests next to the file they cover, as `<name>.test.ts`
-   (or `<name>.test.mjs` under `scripts/`), using `node:test` +
-   `node:assert/strict`.
-4. Run `pnpm run verify` before opening a PR.
-5. Update `README.md` in the same PR as any user-visible behavior change.
-
-## Generated `dist/` output
-
-`dist/**` is build output and is gitignored — it is never committed. The
-npm package builds it at `prepack` time
-([`package.json`](package.json)), and the precompiled `gh` extension
-release builds it as an intermediate step inside
-[`scripts/build-gh-extension-release.sh`](scripts/build-gh-extension-release.sh).
-`pnpm run build` above is still expected locally to verify your change
-compiles, but its `dist/` output should not be included in your commits.
-
-## Commit messages
-
-This repo uses [Conventional Commits](https://www.conventionalcommits.org/):
-`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`.
-
-## Code conventions
-
-- TypeScript, strict mode, ESM (`module: NodeNext`). Relative imports use
-  explicit `.js` extensions (e.g. `./cli.js`), even though the source file is
-  `.ts` — required by NodeNext module resolution.
-- Use full words in identifiers, not abbreviations.
-- Comments explain **why**, not what.
+Report actual command, candidate SHA, environment, result, and limitations.
+Pending, blocked, skipped, stale, and not-run evidence are not pass.
+Documentation-only changes still require their applicable formatting,
+reference, contract, and CI checks; do not mark full verify passed from prose
+inspection alone.
 
 ## Pull requests
 
-- Describe what changed and why.
-- Link exactly one Issue using a closing reference such as `Closes #123`.
-- Keep the pull request template sections.
-- CI (typecheck, lint, test, build, package check) must pass.
-- The `Governance / validate-pr` check enforces the branch-name and
-  linked-Issue contract via the organization-owned reusable workflow in
-  `yohn-jp/.github`, which validates semantics through the published
-  `gh-inari` package.
+Use the repository's current title, branch, template, and routing contracts.
+The PR describes delivered work and actual validation; it does not supply a
+second task authorization or auto-close a Source whose acceptance was not
+proved.
 
-## Reporting bugs / requesting features
+Keep each semantic template section parseable. In particular, Validation
+checklist content is the canonical task-list values; detailed validation prose
+belongs in the appropriate narrative section rather than contaminating the
+checklist field.
 
-Use GitHub Issues. For security issues, see [SECURITY.md](SECURITY.md)
-instead of filing a public issue.
+A PR being created or mergeable is not approval, verified readiness, or merge.
+Review checks the actual diff, authority, architecture, tests, and exact-head
+CI. Architecture, governance, and implementation correctness are all part of
+the delivery contract.
+
+## Security and disclosure
+
+Follow [Security Policy](./SECURITY.md). Never include keys, tokens, OAuth
+codes/verifiers, raw signed request bodies, credential-bearing logs, or private
+provider responses in Issues, PRs, or retained evidence.

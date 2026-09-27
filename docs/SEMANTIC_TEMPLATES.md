@@ -1,66 +1,128 @@
-# Semantic template authority
+# Semantic Template Authoring and Native Projection
 
-Migrated repositories keep editable template contracts under `.github/inari/`. GitHub-native files under `.github/ISSUE_TEMPLATE/` and `.github/PULL_REQUEST_TEMPLATE.md` are generated projections and must not be edited directly.
+Status: authoring/compatibility contract under
+[Product Architecture Canon](./ARCHITECTURE.md) and
+[Semantic Artifact Contracts](./SEMANTIC_ARTIFACT_CONTRACTS.md).
 
-The canonical machine format is JSON. An Issue Form is stored under `.github/inari/issues/<id>.json`. A repository with a single pull-request template uses `.github/inari/pull-request.json`; a repository with multiple pull-request templates uses `.github/inari/pull-requests/<id>.json` instead (plural directory, one file per template). Only files at these exact paths are discovered by `template list`/`template sync`; any other location is written but silently ignored. A contract contains `version`, `kind`, `id`, `name`, optional native metadata, and ordered semantic `sections`. Input sections declare an `id`, type (`string`, `enum`, `array`, or `checklist`), label, requiredness, choices, and constraints. Pull-request headings and fixed documentation are represented only by bounded `headingLevel`, `placeholder`, and documentation section values.
+Repository-owned JSON declares semantics. GitHub-native forms and Markdown
+are generated projections, not parallel authoring authorities. This document
+preserves current discovery/import/synchronization behavior while the
+schema-native target converges through explicit compatibility compilation.
 
-## Issue and Implementation authoring
+## 1. Canonical paths
 
-Ordinary Issue contracts record a problem, request, or decision. Architecture,
-Bug, Feature, Research, and Maintenance forms remain usable without a session
-plan, execution path scopes, branch/base binding, targeted checks,
-postconditions, or authorization.
-
-The `implementation` Issue contract is the separate one-session execution
-contract. Use it when implementation is being prepared, and keep its
-objective, non-goals, selected design, scopes, constraints, prerequisites,
-verification, base, and dependencies in that contract. Creating or editing an
-Implementation does not itself authorize or start a session; the current
-`impl` command surface and #572 authorization evidence define that boundary.
-See [`IMPLEMENTATION_CONTRACT.md`](./IMPLEMENTATION_CONTRACT.md) for the
-normative lifecycle and the exact current `impl` metadata.
-
-Where GitHub native parent/sub-issue support is available, attach an
-Implementation to its immediate source Issue through the provider relationship
-authority. That provider relationship is canonical. A legacy `Parent:` or
-`Parent Epic:` line is compatibility guidance for older Issues only; it is not
-a substitute for provider evidence and does not trigger automatic historical
-reparenting or bulk migration.
-
-The supported relationship shapes are:
+Current semantic template discovery uses:
 
 ```text
-Epic -> Architecture -> Implementation
-Epic -> Bug -> Implementation 1 / Implementation 2
-Feature -> Implementation
+.github/inari/issues/<id>.json
+.github/inari/pull-request.json
+.github/inari/pull-requests/<id>.json
 ```
 
-Pull-request templates describe delivered work, linked work, validation, and
-review context. They do not duplicate the Implementation contract or provide
-a second authorization record. Epic PRs are integration objects; one-session
-Implementation detail belongs to child Issues.
+Use the single PR file or the plural directory model as applicable. A file
+written elsewhere does not become discoverable merely because its JSON is
+valid. Current explicit `--to` outside canonical paths warns about discovery;
+omitting it selects the canonical default.
 
-Generate projections after editing a semantic source:
+Native outputs live under `.github/ISSUE_TEMPLATE/` and the supported PR
+native-template locations. Edit semantic source and regenerate outputs.
+Do not hand-edit generated native files as competing contracts.
+
+## 2. Existing v1 authoring
+
+The current v1 form contains version, kind, identity/name, supported native
+metadata, and ordered semantic sections. Input sections have field identity,
+type, label, requiredness, choices, and accepted constraints. Fixed headings
+and documentation retain bounded rendering metadata.
+
+This serialized vocabulary remains a compatibility input during migration.
+It is not the target second type system alongside JSON Schema.
+The compatibility compiler must preserve existing meaning and native output
+rather than reinterpret old contracts in place.
+
+## 3. Schema-native target
+
+The target contract uses one Draft 2020-12 root object schema plus top-level
+value-authority bindings and bounded presentation metadata. Generic shape,
+requiredness, enums, and constraints belong only to that schema.
+
+Bindings do not duplicate validation keywords. Initial authority pointers are
+direct root properties, not wildcard/nested executable policy. Inari still
+owns bounded derivation, typed relations, domain normalization, and provenance.
+
+Native controls are capability projections. A semantically valid nested value
+may be unsupported by a target; return a bounded failure rather than silently
+flattening or discarding content.
+
+The current v1/native path remains readable until its explicit migration is
+implemented and certified. Documentation alone does not convert repository
+contracts or introduce new accepted serialized fields.
+
+## 4. Source, Implementation, and PR authoring
+
+An ordinary Issue defines a problem, request, or decision. It need not contain
+path scopes, exact base/branch, targeted tests, or Session authorization.
+
+An Implementation is the separate bounded task contract. Its objective,
+non-goals, accepted design, explicit scopes, dependencies, verification, base,
+and branch belong there. Its design field cannot independently amend the
+Product Architecture Canon.
+
+PRs report delivered work, linked task/integration subject, and validation.
+They do not create a second authorization record. An Implementation PR links
+the task; Source/Epic integration PRs represent their own composed outcomes.
+
+Use [Implementation Contract](./IMPLEMENTATION_CONTRACT.md) for exact
+Source/task/Session/publication binding. The old equality between Implementation
+and Source Change must not be copied into templates as a universal relation.
+
+## 5. Parent and dependency representation
+
+Where the provider's supported native parent/sub-issue capability is selected,
+that graph state is canonical parentage. Body Source references and execution
+dependencies retain distinct contract meaning.
+
+Legacy `Parent:` or `Parent Epic:` prose may describe history but does not
+override native evidence or authorize automatic reparenting. Multiple Sources
+do not create multiple implicit integration parents.
+
+Relations are normalized by Core rather than reconstructed from branch names,
+closing-keyword snippets, or UI text in each consumer.
+
+## 6. Generation and checking
+
+Existing product commands are:
 
 ```sh
 inari template sync
 inari template sync --check
 ```
 
-The check mode never writes files and exits non-zero when a committed projection is missing or differs. Generation is byte-stable for unchanged semantic JSON and emits a bounded generated notice in the native file.
+Check mode does not write and returns nonzero when the committed native
+projection is missing or differs. Unchanged semantic input produces stable
+native bytes and the bounded generated notice.
 
-Existing native templates can be bootstrapped into the semantic directory with:
+Generation does not publish, authorize a Session, or grant trust. Agent use
+still obeys active organization governance; these examples do not lift any
+invocation suspension.
+
+## 7. Import
+
+The existing native parser supports explicit import:
 
 ```sh
 inari template import --from .github/ISSUE_TEMPLATE/legacy.yml
 inari template import --from .github/PULL_REQUEST_TEMPLATE.md
 ```
 
-Import uses the supported native parser and fails closed for unsupported or ambiguous constructs. After import, the semantic source is authoritative; native files must be regenerated.
+Unsupported or ambiguous constructs fail closed. After import, semantic
+source owns authoring and native projections must be regenerated. Import is
+not permission to heuristically recover missing intent or embed a duplicate
+full semantic document in hidden comments.
 
-Omitted template selectors use the repository-level
-`.github/inari/template-resolution.yml` configuration when present. Its
-canonical v1 shape is:
+## 8. Template selection
+
+The current `.github/inari/template-resolution.yml` shape is:
 
 ```yaml
 version: 1
@@ -69,19 +131,63 @@ defaults:
   pr: default
 ```
 
-The shared resolver applies explicit selector, configured default, sole
-candidate, interactive TTY selection, and bounded non-interactive failure in
-that order. A configured selector that is invalid or unavailable fails closed.
+The shared resolver uses explicit selector, configured default, sole candidate,
+interactive TTY choice, then bounded non-interactive failure in that order.
+An invalid configured selector fails closed instead of trying another template.
 
-Governed `issue create`/`pr create` against a repository using `.github/inari/` requires the committed native projection to be current: the contract's provenance is bound to the generated native file (matching `templateIdentity.path`), not the semantic JSON, so `inari template sync` must be run and pushed before governed mutations pick up a semantic source change.
+A client must not hard-code a default or silently pick the first candidate.
+Remote/Hosted placement does not change selection meaning.
 
-Omitting `--to` writes to the correct discoverable default. An explicit `--to` outside the discoverable paths above still succeeds but prints a warning, since `template list`'s `semanticTemplates` will not include it.
+## 9. Mutation provenance
 
-For machine input, use the compact semantic view:
+Current governed creation in a repository using semantic templates requires
+its committed native projection to be current. The existing template identity
+provenance binds the generated native path; changing authoring JSON alone does
+not make old native output current.
+
+Synchronize and publish the generated projection before claiming a mutation
+uses the new generation. Schema-native migration must explicitly update this
+producer/consumer contract rather than silently changing its path meaning.
+
+Governance freshness and the current Issue/PR observation identity are separate
+preconditions. A current template cannot justify overwriting a concurrent
+human edit to the artifact.
+
+## 10. Machine input and presentation
+
+Existing compact schema discovery exposes permitted semantic fields without
+fixed Markdown/YAML presentation:
 
 ```sh
 inari issue schema bug --compact --json
 inari pr schema --compact --json
 ```
 
-The compact view contains field identity, type, requiredness, choices, and relevant constraints. Fixed Markdown/YAML presentation is intentionally omitted. Issue/PR creation continues to accept semantic JSON with `--from <file.json>` or `--from -`; rendering and round-trip validation happen before the existing governed GitHub mutation boundary.
+Structured creation accepts semantic JSON through the supported file/stdin
+path. Rendering and round-trip validation happen before provider mutation.
+Derived/fixed values are not caller overrides even when their bytes match.
+
+CLI Canon owns common shell/Help/invocation mechanics. Repository-derived
+schema is still an Inari domain result, not a duplicated static CLI model.
+
+## 11. Observation and reconciliation
+
+Use the shared mdast syntax boundary for headings, fences, lists/tasks, and
+comments. Preserve observed free text from original source slices.
+Keep existing canonical renderers until representation parity is explicitly
+proved. Parsing migration is not permission for arbitrary format rewriting.
+
+Automatic single-artifact reconciliation performs only proven semantics-
+preserving repair. Missing intent or template ambiguity remains blocked.
+Unknown post-effect outcome is not a safe blind retry.
+
+## 12. Verification
+
+Prove exact-path discovery, selection precedence, invalid default rejection,
+import denial, deterministic generation, check-mode non-mutation, current-native
+provenance, compact schema authority, and render/observe round trips.
+
+Schema-native compatibility must preserve old input meaning while eliminating
+parallel shape authority in each migrated slice. Nested values, relation
+binding, free-text preservation, and stale artifact/generation cases need
+explicit proof through the public consumer boundary.

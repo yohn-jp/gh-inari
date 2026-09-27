@@ -1,797 +1,513 @@
 # Semantic Artifact Contracts and Projection Architecture
 
-Status: normative artifact-semantics architecture for completed Epic #278 and
-Issue #279, reconciled with the current responsibility vocabulary by #552.
+Status: normative target under [Product Architecture Canon](./ARCHITECTURE.md).
 
-This document refines the artifact-semantics layer of [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md) and composes with [`NATIVE_MCP_ISSUER_GATEWAY.md`](./NATIVE_MCP_ISSUER_GATEWAY.md). It does not replace the Change lifecycle, Session/App authorization model, issuer identity, or MCP transport boundary defined there.
+This document retains the detailed value-authority, derivation, relation,
+provenance, projection, and reconciliation contracts. JSON Schema Draft
+2020-12 replaces the earlier parallel field-primitive, presence, and generic
+constraint languages. It does not replace Inari domain semantics.
 
-The current v1 semantic-template behavior described in [`SEMANTIC_TEMPLATES.md`](./SEMANTIC_TEMPLATES.md) remains the executable compatibility contract until the migration in this document is implemented.
+Existing serialized contracts remain revision-specific compatibility inputs.
+This documentation change neither migrates repository templates nor certifies
+the schema-native implementation.
 
 ## 1. Purpose
 
-Inari currently has repository-owned semantic JSON under `.github/inari/`, a compiler-generated `CanonicalContract`, semantic artifact loaders/validators, deterministic branch derivation for governed Changes, and a trusted execution path. Those pieces already establish the important principle that GitHub presentation and transport must not become independent policy owners.
+Repository contracts declare meaning and who may determine each value.
+Core compiles accepted input, materializes semantic state, and derives
+supported projections and mutation plans. GitHub presentation and transport
+must not become independent policy owners.
 
-The remaining architectural problem is that the pieces do not yet share one general artifact model:
+The target avoids a pipeline in which semantic authoring must first become a
+native Issue Form and then be parsed back into semantics. Native forms and
+Markdown are projections/adapters, not the source language of the Core.
 
-- semantic-template JSON is still compiled through a generated GitHub-native Issue Form or pull-request template before the canonical IR is produced;
-- `CanonicalContract` is explicitly the compiled result of native template structure and therefore centers `nativeMetadata`, sections, and supplemental constraints;
-- Issue dependencies already exist outside template fields as a representation-independent sidecar;
-- PR-to-Issue linkage is still fundamentally enforced as a body-field closing-keyword constraint;
-- title is still caller metadata with optional native-template prefix semantics;
-- canonical branch naming is owned outside the repository semantic artifact JSON and is composed separately by Change;
-- CLI, MCP, and the trusted executor need a common answer to “what may the caller supply, what does the repository determine, and what will Inari derive?”
-
-The target architecture makes repository-owned semantic contracts the declaration of **meaning and authority**, then deterministically derives accepted input, semantic state, GitHub projection, validation, and execution planning from that declaration.
-
-## 2. Architectural statement
-
-The product pipeline is:
+## 2. Product pipeline
 
 ```text
-Repository Contract
-        |
-        | compile
-        v
-Effective Contract
-        |
-        | accept only declared caller input
-        v
-Semantic Artifact
-        |
-        | project for a target capability set
-        v
-Desired Projection / Projection Plan
-        |
-        | reconcile against observed state
-        v
-Mutation Plan
-        |
-        | trusted execution
-        v
-Observed GitHub State + Execution Evidence
+Repository Artifact Contract + immutable provenance
+  -> Effective Contract + exact caller input schema
+  -> supplied input validation and semantic materialization
+  -> immutable Semantic Artifact
+  -> target-capability Desired Projection
+  -> reconcile bounded Observed Projection
+  -> Mutation Plan with preconditions and postconditions
+  -> admitted Executor effect
+  -> authoritative reread and verified evidence
 ```
 
-The layers are intentionally distinct.
+Repository Contract is authored Canon. Effective Contract is the compiler's
+normalized interpretation for one repository generation. Semantic Artifact is
+a fully validated instance, not a bag of unresolved candidate values.
 
-- **Repository Contract** is repository-owned Canon: the versioned declaration of semantic values, relationships, authority, cardinality, constraints, and projection rules.
-- **Effective Contract** is the compiler-owned, normalized contract for one artifact kind/template and repository generation. It includes the exact caller input schema and all derived/fixed outputs.
-- **Semantic Artifact** is one fully validated/materialized instance after supplied input, derived values, fixed values, defaults, and relations have converged.
-- **Desired Projection** is the deterministic GitHub-facing representation of that semantic artifact for a declared target capability set.
-- **Mutation Plan** is a versioned set of preconditions and effects produced by reconciling desired projection with observed state.
-- **Observed Projection** is structured evidence reconstructed from GitHub state. It is evidence, not semantic policy or repository Authority.
-- **Executor** is the logical trusted component that admits and applies a mutation plan and verifies the resulting projection.
+Desired Projection is pure target-facing state. Observed Projection is
+normalized provider evidence. Mutation Plan is their explicit bounded
+reconciliation; it contains no provider credential or implicit execution.
 
-Names, titles, Markdown bodies, labels, ref names, hidden markers,
-closing-keyword strings, and native GitHub relation objects are representations
-of semantic facts. They are not independent semantic policy owners.
+## 3. Semantic authority hierarchy
 
-## 3. Semantic contract hierarchy
+Inari Core owns the versioned contract language, interpretation, normalization,
+bounded derivation and relations, diagnostics, and plan semantics.
+The repository owns concrete policy choices under its Canon.
 
-For artifact semantics, authority is ordered as follows:
+CLI, MCP, and UI consume compiled contracts and schemas. Executor re-resolves
+current Canon and evidence before mutation. GitHub-native templates, bodies,
+labels, refs, and relation objects are representations or observed facts.
 
-1. Inari Core defines the versioned Contract format, compiler semantics, validation semantics, derivation operations, projection semantics, diagnostics, and plan contracts.
-2. The target repository owns the concrete Repository Contract values under `.github/inari/`.
-3. Effective Contract and Semantic Artifact are compiler/validator products of Core + repository Canon.
-4. CLI and MCP expose discovery, schema, validation, preview, and plan capabilities over Core. They do not own repository-specific rules.
-5. Executor implementations re-resolve current GitHub Authority evidence and
-   invoke the same Core semantic contracts for admission.
-6. GitHub-native templates, bodies, metadata, relations, branches, workflow YAML, and API response shapes are projections or observed evidence.
+An adapter may not turn a repository convention into a hard-coded universal
+Inari rule. A Hosted transport may not keep its own materializer or repository
+semantic database.
 
-No adapter may turn a repository-specific convention into a second hard-coded semantic rule.
+## 4. Schema-native contract
 
-## 4. Core Contract Format
+### 4.1 One data-shape language
 
-### 4.1 The three independent dimensions
+One contract-level Draft 2020-12 root object schema owns generic value shape:
+properties, requiredness, types, enum sets, bounds, nested objects, arrays,
+item shape, uniqueness, and other supported schema constraints.
 
-Every declared semantic value has three orthogonal dimensions:
+Bindings must not duplicate `type`, `required`, enum, cardinality, min/max,
+pattern, defaults, or item shape. The earlier `primitive + presence +
+constraints` model is a versioned compatibility input, not a second target
+schema language.
 
-```text
-semantic type     what the value means and how it is validated
-value authority   who determines the value
-cardinality       how many values may/must exist
-```
+### 4.2 Portable Canon
 
-These dimensions must not be collapsed into one `required` flag, one native UI field type, or one metadata special case.
+Repository Canon remains JSON-serializable and runtime-neutral. TypeScript
+builders, Zod/TypeBox objects, generated validator code, and validator-specific
+keywords are not repository authority.
 
-A normalized value declaration is conceptually:
+The initial runtime implementation can use the accepted Ajv Draft 2020-12
+boundary in strict compilation mode. The library is replaceable internal
+machinery; its errors and options do not become public repository semantics.
 
-```ts
-interface ValueDeclaration {
-  readonly type: SemanticType;
-  readonly authority: ValueAuthority;
-  readonly cardinality: Cardinality;
-  readonly constraints?: SemanticConstraints;
-}
-```
+### 4.3 Hermetic and non-mutating validation
 
-Repository authoring syntax may be more compact, but compilation must converge to this model.
+Meta-validate/compile a repository schema before use. Reject arbitrary network
+or filesystem `$ref` resolution and executable repository validators.
+Local references are allowed only within the immutable admitted contract and
+the supported resolver's complete bounded semantics.
 
-### 4.2 Value authority
+Validation must not coerce types, inject defaults, remove properties, or
+otherwise mutate candidate input. JSON Schema `default` is an annotation.
+Explicit Inari fixed/derived/default materialization, where supported by the
+versioned contract, remains a separate semantic step.
 
-Core v2 defines three initial authority modes.
+Schema compilation and validation failures become stable bounded Inari
+diagnostics, not raw library objects or unbounded candidate echoes.
 
-#### `supplied`
+### 4.4 Top-level bindings
 
-The caller is allowed to provide the semantic value. Cardinality determines whether it is required.
+Bindings address direct root properties using RFC 6901 JSON Pointers, such as
+`/summary` or `/verification`. Nested authority declarations, wildcard paths,
+and a new path-expression DSL are not part of the initial schema-native
+contract.
+
+A binding contains value-authority metadata and bounded, target-neutral
+presentation intent. It does not redefine schema requiredness or validation.
+
+A required property is declared by root `required`; an optional property is
+present in `properties` but not root `required`; an undeclared property is not
+a fake optional/unused field.
+
+### 4.5 Shape illustration
+
+The following illustrates the separation, not a complete serialized Contract
+with identity, provenance, and all required metadata:
 
 ```json
 {
-  "type": "string",
-  "authority": { "kind": "supplied" },
-  "cardinality": { "min": 1, "max": 1 }
-}
-```
-
-A required supplied value appears in the Effective Contract input schema and must be present before the Semantic Artifact can materialize.
-
-#### `derived`
-
-Core deterministically computes the value from other declared semantic values.
-
-```json
-{
-  "type": "branch_name",
-  "authority": {
-    "kind": "derived",
-    "derive": {
-      "op": "format",
-      "template": "{type}/{issue.number}-{slug}"
-    }
-  },
-  "cardinality": { "min": 1, "max": 1 }
-}
-```
-
-A derived value is **not caller input**. Supplying it through CLI, MCP, JSON, or another candidate adapter is an authority violation, even when the supplied bytes equal the derived result. Generation and validation therefore have one authority rather than “caller chooses, validator checks”.
-
-#### `fixed`
-
-The Repository Contract determines a literal value.
-
-```json
-{
-  "type": "branch_name",
-  "authority": {
-    "kind": "fixed",
-    "value": "main"
-  },
-  "cardinality": { "min": 1, "max": 1 }
-}
-```
-
-A fixed value is also excluded from caller input and cannot be overridden.
-
-### 4.3 Unsupported values
-
-Core does not need a fourth `unsupported` authority mode. If an artifact contract does not declare a value or relation, that capability is absent for that contract. Caller attempts to provide an undeclared value fail as unknown/unsupported input.
-
-This is important for repository variance: a repository that does not use PR-to-Issue linkage does not need to declare an optional fake relation merely to disable it.
-
-### 4.4 Cardinality
-
-Canonical cardinality is represented as bounded count semantics:
-
-```ts
-interface Cardinality {
-  readonly min: number;
-  readonly max: number | "many";
-}
-```
-
-Typical projections are:
-
-```text
-required scalar   { min: 1, max: 1 }
-optional scalar   { min: 0, max: 1 }
-optional list     { min: 0, max: "many" }
-non-empty list    { min: 1, max: "many" }
-```
-
-Requiredness is derived from `min`; Core must not maintain a contradictory parallel `required` boolean in the normalized IR.
-
-### 4.5 Semantic types
-
-Core owns a closed, versioned semantic type registry. The initial v2 architecture must support the existing template value semantics plus domain types needed to remove representation-specific special cases.
-
-At minimum the registry must be capable of representing:
-
-- strings and bounded text;
-- enum values;
-- booleans and bounded integers where product contracts require them;
-- checklist/list semantics already supported by v1;
-- `issue_reference` using repository-stable Issue identity;
-- `repository_reference` where a repository itself is a semantic endpoint;
-- `branch_name`;
-- `slug` or an equivalent explicitly validated branch-naming input;
-- typed relation endpoints.
-
-The exact serialized type registry belongs to the Contract Format implementation leaf, but it must remain closed/versioned. Repository contracts do not embed arbitrary executable validators or arbitrary JSON Schema programs.
-
-## 5. Bounded derivation model
-
-Derived values must be deterministic, inspectable, cycle-free, and safe to reproduce in CLI, MCP, Executor admission, and tests.
-
-The initial derivation algebra is deliberately small:
-
-```text
-copy(value-path)
-format(template, referenced value paths)
-```
-
-A repository may also use explicitly versioned Core-owned named derivations in the future, for example a deterministic slugification operation, but repository-defined scripts/functions are not permitted.
-
-`format` rules:
-
-- placeholders reference only declared values or declared scalar members such as `{issue.number}`;
-- placeholder names are resolved by the compiler, not dynamically at runtime;
-- unknown references fail contract compilation;
-- derived-to-derived references are allowed only when the dependency graph is acyclic;
-- derived values are evaluated in topological order;
-- no conditionals, loops, code execution, environment reads, network reads, date/time reads, or natural-language inference exist in the format language;
-- the final value is revalidated against its declared semantic type and constraints;
-- a derivation that cannot produce exactly the declared cardinality fails closed.
-
-This means a repository that wants `{type}/{issue.number}-{slug}` must supply or otherwise deterministically derive `type`, `issue`, and `slug`; Core does not invent missing semantic text.
-
-## 6. Repository variance is a first-class requirement
-
-Core must support different repository contracts without changing Core code.
-
-### 6.1 Deterministic branch repository
-
-A repository such as the current `yohn-jp` set may declare:
-
-```json
-{
-  "values": {
-    "type": {
-      "type": "enum",
-      "authority": { "kind": "supplied" },
-      "cardinality": { "min": 1, "max": 1 },
-      "constraints": { "values": ["feat", "fix", "docs", "refactor", "test", "chore"] }
-    },
-    "issue": {
-      "type": "issue_reference",
-      "authority": { "kind": "supplied" },
-      "cardinality": { "min": 1, "max": 1 }
-    },
-    "slug": {
-      "type": "slug",
-      "authority": { "kind": "supplied" },
-      "cardinality": { "min": 1, "max": 1 }
-    },
-    "branch": {
-      "type": "branch_name",
-      "authority": {
-        "kind": "derived",
-        "derive": {
-          "op": "format",
-          "template": "{type}/{issue.number}-{slug}"
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "summary": { "type": "string", "minLength": 1 },
+      "verification": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "command": { "type": "string" },
+            "outcome": { "type": "string", "enum": ["passed", "failed", "blocked"] }
+          },
+          "required": ["command", "outcome"],
+          "additionalProperties": false
         }
-      },
-      "cardinality": { "min": 1, "max": 1 }
-    }
+      }
+    },
+    "required": ["summary"],
+    "additionalProperties": false
+  },
+  "bindings": {
+    "/summary": { "authority": { "kind": "supplied" } },
+    "/verification": { "authority": { "kind": "supplied" } }
   }
 }
 ```
 
-Effective input contains `type`, `issue`, and `slug`. It does **not** contain `branch`.
+Nested values do not require new Inari field primitives. Nested value shape
+does not authorize nested binding authority or arbitrary new relation kinds.
 
-### 6.2 Caller-named branch repository
+## 5. Value authority
 
-Another repository may instead declare:
+### 5.1 Supplied
 
-```json
-{
-  "values": {
-    "branch": {
-      "type": "branch_name",
-      "authority": { "kind": "supplied" },
-      "cardinality": { "min": 1, "max": 1 }
-    }
-  }
-}
-```
+A supplied value is permitted caller input. Its requiredness and shape come
+from the authoritative schema. The Effective caller schema includes only the
+properties the caller is allowed to supply.
 
-Effective input contains `branch`. No Issue relationship is implied by Core.
+### 5.2 Derived
 
-### 6.3 Required PR-Issue relation
+Core computes a derived value through the declared bounded derivation.
+Caller input must not override it, even when the proposed value equals the
+expected result. Equality of bytes is not authority to choose the value.
 
-A repository may require a PR to implement exactly one Issue:
+### 5.3 Fixed
 
-```json
-{
-  "relations": {
-    "implements": {
-      "target": "issue_reference",
-      "authority": {
-        "kind": "derived",
-        "derive": { "op": "copy", "from": "issue" }
-      },
-      "cardinality": { "min": 1, "max": 1 }
-    }
-  }
-}
-```
+The repository contract determines the fixed value. It is excluded from
+caller input and validated as part of the fully materialized artifact.
 
-The caller supplies `issue`; `implements` is materialized by Core and cannot be independently overridden.
+### 5.4 Platform-owned and absent values
 
-Another repository may make `implements` optional and supplied, or omit it entirely. Core never asserts that all pull requests require Issue linkage.
+Only explicitly supported versioned platform-owned values are supplied by
+their trusted owner. This category is not a license for adapters to invent
+missing values.
 
-## 7. Relation model
+Undeclared properties and unsupported capabilities are rejected rather than
+silently ignored. A repository that does not use a relation need not author a
+fake optional relation to disable it.
 
-Relations are semantic graph edges, not body strings.
+### 5.5 Shape and domain identity
 
-Core must define a typed relation vocabulary with direction and cardinality. The initial Issue/PR architecture needs at least enough vocabulary to express:
+JSON Schema validates instance shape. Inari still owns semantic identity and
+normalization for domain values such as IssueReference, repository identity,
+branch identity, and typed relation endpoints.
 
-- Issue parenthood;
-- Issue dependencies;
-- PR implementation/closing intent toward an Issue;
-- Change/root-Issue composition where the Change model needs to reference artifact semantics.
+Do not replace immutable repository/Issue equality with string-schema
+validation or presentation text comparison.
 
-The stable `IssueReference` identity introduced by the current dependency model is retained as the initial Issue endpoint identity:
+## 6. Bounded derivation
+
+The existing bounded derivation algebra, including admitted `copy` and
+`format` operations, remains Core-owned and versioned. This renewal does not
+add repository scripting or a new expression language.
+
+The compiler resolves declared references and rejects unknown paths. Derived
+dependencies must be acyclic and evaluated in deterministic topological order.
+A format placeholder references an admitted scalar value or declared scalar
+member; it does not perform arbitrary object traversal at runtime.
+
+No loops, conditionals, environment reads, filesystem/network I/O, current-time
+reads, or natural-language inference are introduced into derivation.
+Outputs are revalidated against the authoritative schema and domain rules.
+
+A branch format such as `{type}/{issue.number}-{slug}` requires those inputs
+to exist by declared authority. Core cannot invent a slug from missing intent
+or silently copy a title that the contract did not authorize as input.
+
+Any new named derivation is a versioned Core capability and requires explicit
+approval; it is not arbitrary code supplied by a repository.
+
+## 7. Repository variance
+
+A repository may declare a deterministic branch derived from Issue/type/slug.
+Another supported artifact contract may allow a caller-supplied branch. The
+schema and bindings express the difference; a provider adapter must not impose
+one repository's naming policy on every repository.
+
+Likewise, a PR contract may require, allow, or omit an Issue relationship.
+Inari's governed Implementation workflow has its own relation requirements,
+but the generic artifact language does not universally require every PR to
+close an Issue.
+
+A derived `implements` relation is not independently caller-overridable.
+A supplied relation accepts only its declared endpoints and cardinality.
+Omission does not cause Core to infer a relationship from branch spelling.
+
+## 8. Relations
+
+Relations are semantic graph edges with typed direction, endpoints, and the
+existing bounded cardinality/authority semantics. They are not Markdown body
+strings or arbitrary repository-defined executable behavior.
+
+Stable IssueReference equality remains:
 
 ```text
 repositoryHost + repositoryId + Issue number
 ```
 
-The current owner/name locator remains display/transport metadata rather than equality identity.
+Current owner/name is locator/display metadata. Relation observations must
+preserve unavailable/incomplete/conflicting evidence rather than turn it into
+an empty complete graph.
 
-Canonical contracts store one direction for each fact. Inverse views are derived rather than stored as competing authorities. For example:
+Store one canonical direction for each relation and derive inverse views:
+parent/children, dependsOn/blocks, and implements/implementedBy where the
+existing contract supports them. Do not require both directions as
+independent author input.
 
-```text
-parent        -> children view is derived
-dependsOn     -> blocks view is derived
-implements    -> implementedBy view is derived where useful
-```
+Native provider relationships are canonical where the capability contract
+selects them. Legacy prose or markers remain explicit representation adapters;
+they cannot silently reparent an Issue when native evidence disagrees.
 
-The exact user-facing relation names are frozen by the implementation contract/IR leaf, but the architecture forbids requiring both directions as independent repository input.
+Source membership, native immediate parentage, and execution dependencies are
+different relationships. Multiple Source references do not imply multiple
+integration parents or a serial dependency chain.
 
-## 8. Effective Contract
+## 9. Effective Contract
 
-The Effective Contract is the compiler-owned answer to “what does this repository expect for this artifact?”
+An Effective Contract contains the contract/template identity and version,
+immutable repository/governance provenance, normalized authority and
+relation/derivation plan, exact caller input schema, supported projection
+assumptions, and stable diagnostics.
 
-It contains at least:
+Caller-schema derivation filters the root schema to admitted supplied
+properties, preserves their schemas and requiredness, and excludes values
+owned by fixed/derived/platform bindings.
 
-- contract/version/template identity;
-- repository and immutable governance generation provenance;
-- normalized value/relation declarations;
-- the exact caller input schema;
-- derived/fixed output declarations;
-- projection rules;
-- target capability assumptions when projection behavior depends on them;
-- stable diagnostics/schema version.
+Schema constructs whose projection cannot be proven equivalent must produce
+a bounded unsupported-contract result. Do not drop cross-property constraints
+or unresolved references merely to obtain a convenient caller schema.
 
-Compilation rules for caller input are mechanical:
+Discovery returns enough information for a caller to know what it may supply
+without reverse-engineering native templates. The compiler result is the
+machine-facing input authority; a manually maintained CLI field list is not.
 
-```text
-authority = supplied, min >= 1   -> required input
-authority = supplied, min = 0    -> optional input
-authority = derived              -> excluded from input; reject override
-authority = fixed                -> excluded from input; reject override
-undeclared value/relation        -> reject as unknown/unsupported
-```
+## 10. Materialization
 
-The Effective Contract is the primary machine-facing discovery surface for CLI, MCP, agents, tests, and execution admission. Agents should not need to reverse-engineer authoring JSON or GitHub-native templates to learn required inputs.
+Materialization performs:
 
-## 9. Semantic Artifact materialization
+1. validate the candidate against the Effective caller schema;
+2. normalize admitted supplied domain values;
+3. materialize declared fixed/platform values through their proper owners;
+4. evaluate bounded derived values in dependency order;
+5. validate the complete value document against the same authoritative schema;
+6. validate domain identity, authority, and existing relation semantics;
+7. produce one immutable semantic artifact and its provenance.
 
-Core materializes a Semantic Artifact by:
+The result contains no rejected candidate properties, unresolved required
+values, or silently widened authority. Use the existing candidate-to-canonical
+boundary rather than building a second loader for each interface.
 
-1. validating caller input against the Effective Contract input schema;
-2. normalizing accepted supplied values;
-3. materializing fixed values;
-4. evaluating derived values in deterministic dependency order;
-5. validating every materialized value against semantic type/cardinality/constraints;
-6. materializing and validating typed relations;
-7. producing one immutable canonical semantic instance plus provenance.
+## 11. Markdown representation boundary
 
-A Semantic Artifact contains no rejected candidate values and no unresolved required values.
+One shared mdast/CommonMark/GFM adapter owns Markdown syntax structure and
+source positions. Inari owns field identity, template identity, semantic
+decoding, its reserved marker protocol, and domain diagnostics.
 
-This extends the architectural role already played by the current `ArtifactCandidate -> loadCanonicalArtifact(...)` boundary. The current canonical loader should evolve rather than be duplicated by a second artifact ingestion pipeline.
+Free-text observation uses original source slices between proven structural
+boundaries. Generic AST stringification must not rewrite paragraph breaks,
+literal Markdown, or user formatting while reading the artifact.
 
-## 10. Projection semantics
+Structured headings, lists, task items, fences, and HTML-comment nodes use
+parsed syntax. Do not retain independent regex/fence lexers in artifact,
+native PR-template, and Implementation parsers after migration.
 
-Projection answers how a Semantic Artifact should be represented on a target GitHub capability set.
+Reserved `inari:template` and dependency markers remain bounded, versioned
+Inari metadata. Identifying an HTML node does not authorize arbitrary HTML or
+embedding the full semantic document as a second hidden source of truth.
 
-For each semantic fact, Core chooses the strongest supported representation deterministically:
+Canonical renderers remain in place until a separately approved
+representation change proves byte and semantic parity. Parser migration does
+not automatically authorize renderer migration.
 
-1. a supported GitHub-native semantic property/relation;
-2. a GitHub-recognized machine convention when no stronger supported native representation is available;
-3. title/body/hidden presentation encoding only as a documented compatibility/fallback representation.
+## 12. Capability-driven projection
 
-Examples:
+Projection receives the Effective Contract, Semantic Artifact, and explicit
+target capability set. It deterministically selects the strongest supported
+representation while preserving semantic meaning.
 
-- `summary` may contribute to a derived Issue/PR title;
-- an `implements` relation may project to GitHub-recognized closing-reference text when that is the supported mechanism required to produce closing behavior;
-- parenthood/dependency relations should use a native relation adapter when the target capability adapter declares support, otherwise a documented compatibility representation may be used;
-- semantic content not otherwise represented may render into canonical body sections;
-- branch identity projects to a Git ref name.
+A native relation/property is preferred where supported. A recognized machine
+convention or documented compatibility representation may be selected only
+when the capability contract permits it. No deployment-specific silent
+fallback changes meaning.
 
-Projection capability detection is explicit input to the projector. GitHub.com/GHES differences must not silently change canonical semantics.
+The same semantic fact may intentionally appear on multiple provider surfaces
+for behavior and usability. Those are projections of one fact; disagreement
+is drift, not independent authority.
 
-When the same semantic fact is intentionally projected to more than one GitHub
-surface for behavior and usability, the projections remain one semantic
-contract. Conflicting observed representations are drift.
+Checklist/dropdown/multiline/layout choices are presentation metadata, not
+JSON data types. A nested object can be semantically valid but unsupported by
+a native control. Such a target returns an unsupported-capability diagnostic
+rather than flattening, truncating, or discarding content without proof.
 
-## 11. Desired Projection and Mutation Plan
+Round-trip proof includes value content, authority, relation meaning, and
+relevant native behavior. A renderer that merely produces valid Markdown has
+not proved semantic preservation.
 
-A Desired Projection is pure desired state for GitHub-facing artifacts and relations. It is deterministic for:
+## 13. Desired state and mutation plans
 
-```text
-Effective Contract + Semantic Artifact + target capability set
-```
+A Desired Projection is pure. Reconciliation compares it with bounded current
+observed state to produce a versioned plan containing:
 
-A Mutation Plan is produced by reconciling Desired Projection with a bounded Observed Projection. It is versioned and transport-independent and contains at minimum:
-
-- contract/repository generation identity;
-- semantic artifact identity/digest sufficient to bind the plan to intent;
-- observed-state generation/evidence identity where applicable;
+- repository/contract/governance identity;
+- the semantic artifact or intent digest;
+- relevant observed-state identity;
 - explicit preconditions;
-- ordered effects;
+- ordered bounded effects;
 - expected postconditions;
-- bounded diagnostics/recovery classification.
+- classified diagnostics and recovery conditions.
 
-A plan never embeds GitHub App private keys, installation tokens, workflow filenames, HTTP endpoints, or provider response dumps.
+A plan contains no App key, provider token, arbitrary authenticated client,
+workflow implementation detail, or raw provider response.
 
-CLI/MCP may produce a preview plan when they have enough observed evidence. A preview is useful for UX and agent reasoning but is not itself mutation authorization.
+Preview is useful for humans and agents but is not execution authorization.
+Executor must re-resolve authority and current state before using a plan.
 
-## 12. Executor boundary
+## 14. Observation, freshness, and TOCTOU
 
-`Executor` is a logical architecture role, not a synonym for GitHub Actions Runner.
-The unqualified term is reserved for operation coordination from admitted request
-through verified terminal result. A `ChangeExecutionPort` defines only the
-transport-neutral request/read contract. `ActionsChangeExecutionAdapter` and the
-Direct-App adapter implement that port; they do not own semantic admission or
-Change lifecycle policy. Semantic Issue, Branch, and PR execution remains in the
-explicit `LocalSemantic...Executor` profiles.
+ContractProvenance binds repository identity, trusted ref, immutable tree or
+source identity, source digest, and policy generation. A mutable branch name
+alone is not an immutable generation.
 
-An Executor admits a plan by performing the following sequence:
+Artifact-observation freshness is independent from governance freshness.
+A human may edit an Issue/PR while its template is unchanged. A plan based on
+old body/title/metadata must not overwrite that edit because the schema still
+matches.
 
-```text
-receive versioned plan/request
-        |
-        v
-resolve authoritative repository + Canon generation
-        |
-        v
-recompile Effective Contract with Core
-        |
-        v
-revalidate/materialize semantic intent with the same Core semantic contracts
-        |
-        v
-re-read authoritative bounded GitHub state
-        |
-        v
-validate plan generation + preconditions
-        |
-        v
-apply explicit effects
-        |
-        v
-re-read state and verify postconditions
-        |
-        v
-return bounded execution evidence
-```
+Before an unattended effect, reread the mutation-relevant artifact state and
+compare the admitted identity. Changed state fails stale or is replanned only
+under the operation's explicit contract. A post-effect read failure remains
+possible mutation, not permission for blind replay.
 
-If repository governance or relevant GitHub state changed after preflight, the Executor must not blindly apply the stale plan. It either rejects with a stale-generation/precondition diagnostic or produces a newly validated plan through the same Core path where the operation contract explicitly permits re-planning.
+Observation must not create owner directories, migrate records, or perform
+reconciliation effects merely because it is called from a status page.
 
-The initial hosted deployment remains GitHub Actions because it provides repository-local execution context, observable runs, OIDC identity, and an established trusted execution seam. That is a deployment choice. Core and the plan contract must also remain usable by a future equivalent trusted executor without semantic changes.
+## 15. Single-artifact reconciliation
 
-## 13. CLI and MCP responsibilities
+The automatic reconciler permits only:
 
-CLI and MCP are peer interfaces over Core.
+- a verified no-op;
+- canonical normalization with proven semantic preservation;
+- deterministic legacy recovery where complete current semantics are proven.
 
-They may:
+Missing intent, ambiguous template selection, manual edit, and complete-state
+replacement remain explicit decisions. No LLM or heuristic invents values.
+The reconciler never silently invokes intent-requiring edit/sync operations.
 
-- resolve a target repository;
-- fetch authoritative repository Canon for read/preflight purposes;
-- compile an Effective Contract;
-- return the effective caller input schema;
-- validate semantic input;
-- materialize a Semantic Artifact;
-- render/preview desired GitHub projection;
-- obtain bounded observed state when permitted;
-- create a preview plan;
-- submit semantic intent/plan to the trusted mutation path.
+The public Issue/PR projections share this Core operation. Existing advanced
+check/normalize/sync capabilities are not separate automatic policy engines.
+Repeated reconciliation of a converged artifact is a no-op.
 
-They must not:
+Results distinguish unchanged, reconciled, blocked, safe pre-effect retry,
+and post-effect uncertainty according to the accepted public contract.
+A transport retry flag must not erase the possibility that an effect occurred.
 
-- maintain independent repository-specific regexes/rules;
-- make derived/fixed values caller-overridable;
-- treat successful preflight as mutation authorization;
-- keep a stale repository Canon copy as an execution authority;
-- move policy semantics into MCP tool descriptions or CLI option code.
-
-### 13.1 Repository contract discovery capability
-
-The MCP surface must expose a route semantically equivalent to:
+## 16. Execution boundary
 
 ```text
-resolve repository contract
-    -> contract identity
-    -> immutable governance generation/provenance
-    -> Effective Contract
-    -> caller input schema
-    -> supported/derived/fixed capability summary
+bounded request/plan
+  -> current repository and Canon resolution
+  -> same Effective Contract compilation/materialization
+  -> current provider evidence
+  -> caller/operation and plan-precondition admission
+  -> explicit bounded provider effects
+  -> authoritative reread
+  -> semantic postcondition verification
 ```
 
-The exact MCP tool name belongs to the native MCP tool catalog, but the capability is architectural, not optional.
+Normal mutations use the user-owned Admission/Executor path. Hosted relays
+assertion and request, not a separately materialized semantic plan from its
+own repository cache. A retained local pure API may compile supplied data
+without gaining provider authority.
 
-An agent must be able to ask “what input is accepted for creating or changing this artifact in this repository?” before it constructs the mutation request.
+If generation changed, Executor rejects stale evidence or explicitly
+revalidates under the supported replan contract. It never treats a plan from
+generation A as authorized under generation B by default.
 
-The same capability should be available to CLI schema/discovery commands through the same Core compiler.
+## 17. CLI, MCP, and UI
 
-### 13.2 Preflight versus admission
+Interfaces may expose contract discovery, input schema, validation,
+materialization, rendering, observation, preview, and admitted execution.
+They do not maintain repository-specific regexes, derived/fixed overrides,
+parallel native parsers, or stale policy copies as authority.
 
-```text
-CLI/MCP preflight
-  purpose: UX, discovery, early rejection, plan preview
-  authority: current repository evidence + Core
-  security effect: none
+Hosted MCP transports calls to the user's Runtime. It does not interpret
+repository artifacts or maintain a work projection backend. An optional remote
+UI uses the same authenticated Runtime APIs as local presentation.
 
-Executor admission
-  purpose: authorize one external state transition against authoritative current state
-  authority: re-resolved repository evidence + same Core + execution identity
-  security effect: mutation may proceed only after success
-```
+Common CLI command/help/Skill mechanics move to CLI Canon. Repository-derived
+input schemas remain domain results consumed by handlers, not duplicated
+static CLI definitions.
 
-This distinction prevents MCP from becoming a shadow policy/security engine while still making it genuinely useful to agents.
+## 18. Relationship to Change
 
-## 14. Provenance and TOCTOU
+Change owns Source lifecycle and publication/recovery composition. Artifact
+Core owns the meaning of Issue/PR/branch values and relations. Change asks the
+artifact domain for desired projections, then adds lifecycle preconditions and
+sequences the resulting effects.
 
-Every Effective Contract and plan must bind to immutable governance generation evidence.
+Implementation task and Source Change identity remain distinct throughout
+materialization, PR relationships, branch projection, and evidence. A generic
+artifact contract's optional relation does not override the stricter governed
+task contract applicable to a specific operation.
 
-The current `ContractProvenance` model already carries repository identity, trusted ref, root tree SHA, source SHA/digest, and policy provenance. The target architecture should reuse/generalize that concept rather than invent a second generation identity.
+Neither domain creates a second persistent artifact/Change database.
 
-At minimum, discovery/preflight returns enough information to identify:
+## 19. Current implementation seams
 
-```text
-repository identity
-trusted ref
-immutable repository/governance generation
-contract identity/version
-contract/source digest(s)
-```
+`src/semantic-template.ts` is the v1 authoring/compatibility boundary.
+`src/contract/ir.ts` and current artifact-contract/effective-contract modules
+provide existing representation and authority foundations.
+`src/artifact.ts` owns candidate loading and existing-artifact composition.
 
-Mutation admission compares the request/plan generation to newly resolved authoritative generation. A ref name such as `main` alone is not sufficient because it is mutable.
+`src/contract/issue-reference.ts` retains stable Issue identity.
+Branch policy and `src/branch-naming.ts` retain canonical naming mechanics;
+repository values are not duplicated in provider code.
+`src/change.ts` consumes artifact projection within lifecycle planning.
 
-If the generation changed, identical semantic input may be revalidated only by the Executor/Core path under an explicitly defined retry/replan contract. A plan produced under generation A is never silently treated as valid under generation B.
+Provider modules observe capabilities/evidence and apply admitted effects.
+They do not define repository values, parsing semantics, or a parallel
+Effective Contract.
 
-## 15. Relationship to Change
+These are observation/migration entry points, not claims that the entire
+schema-native target already exists. Code and tests on the candidate revision
+must establish each completed seam.
 
-This architecture does not remove `Change`.
+## 20. Compatibility and migration
 
-`Change` continues to own:
+Preserve v1 semantic-template/native-template behavior through a deterministic
+compiler while introducing the schema runtime, schema-native Contract,
+Effective caller schema, and full materialization.
 
-- work lifecycle (`DEFINED`, `DRAFT`, `REVIEW`, and terminal/recovery states);
-- root-Issue Change identity;
-- requester/issuer/implementer/reviewer/merger provenance;
-- transition authorization and sequencing;
-- issuance idempotency, compensation, and recovery;
-- publication/review lifecycle policy.
+Then migrate capability projection/observation and the remaining artifact and
+Implementation syntax readers onto the shared mdast boundary. Preserve
+free-text content and renderer behavior independently.
 
-Artifact Contracts own what Issue/PR/branch projections mean and how repository policy determines their semantic values.
+Add fresh artifact identity and single-artifact reconciliation, and converge
+CLI/MCP discovery to the same compiler results. Native template generation
+remains a projection, not a required semantic round-trip.
 
-The intended convergence is:
+Each migrated slice removes its duplicate authority. A compatibility adapter
+has an exact accepted input version, canonical output, supported consumer,
+proof, and retirement condition. It does not sustain an obsolete engine.
 
-```text
-Change transition
-      |
-      | asks Artifact Core for canonical artifact/branch semantics
-      v
-Semantic Artifact + Desired Projection
-      |
-      | Change adds lifecycle transition semantics/preconditions
-      v
-Mutation Plan / Change effects
-      |
-      v
-Trusted Executor
-```
+## 21. Verification
 
-The existing Change planner/effect model is therefore a foundation for the generalized plan/executor boundary, not a competing system.
+Required contract proof covers malformed schemas, forbidden external refs,
+non-mutating validation, supplied/fixed/derived override rejection, required
+property filtering, nested object/array values, bounded derivation cycles,
+unknown references, relation identity, and target capability rejection.
 
-The current Change invariant that its canonical branch is Issue-derived is a **Change/repository-policy choice for the current deployment**, not a universal Core Artifact Contract invariant. The generic Contract Format must still permit a repository/artifact model whose branch name is supplied.
+Representation proof covers headings inside fences, list/task syntax,
+comments, preserved free-text slices, legacy marker validation, and existing
+canonical renderer round trips.
 
-## 16. Current-code mapping
+Reconciliation proof covers no-op, semantics-preserving repair, incomplete or
+ambiguous input, concurrent artifact edits, changed governance, effect failure,
+post-effect unknown outcome, and safe retry classification.
 
-### `src/semantic-template.ts`
+Composed proof must traverse actual public source/built/installed boundaries
+and provider-shaped adapters. A schema unit test does not prove GitHub
+projection, and a Markdown snapshot does not prove authorization.
 
-**Current:** repository JSON authoring model plus native projection compiler path.
+## 22. Non-goals and review gate
 
-**Target:** compatibility parser/authoring adapter for v1, then Repository Contract v2 ingestion/projection support. The long-term compiler must not require a native template round-trip to define semantic IR.
-
-### `src/contract/ir.ts`
-
-**Current:** compiler-generated IR of native Issue/PR template structure, native metadata, sections, supplemental constraints, provenance, and optional branch governance.
-
-**Target:** either a versioned v2 IR or a clearly separated Artifact Contract IR. The implementation architecture must make the new semantic value/authority/cardinality/relation model primary and retain native render metadata only in a projection-specific layer.
-
-### `src/artifact.ts`
-
-**Current:** candidate adapters, canonical loader, render/parse, prepare/create validation, existing-artifact projection, metadata handling, and dependency sidecar integration.
-
-**Target:** retain the candidate -> canonical boundary and reconciliation machinery, but materialize a full Semantic Artifact. Metadata/dependency special cases converge into declared semantic values/relations or projection metadata where appropriate.
-
-### `src/contract/issue-reference.ts`
-
-**Current:** stable representation-independent Issue identity and `blockedBy` / `blocks` normalization.
-
-**Target:** retain `IssueReference` identity. Generalize dependency-specific relation handling into the common typed relation model, with inverse views derived rather than independently authored.
-
-### `src/branch-naming.ts`
-
-**Current:** Core's sole executable branch grammar, deterministic `type/issue-number-slug` derivation, Issue-title normalization, and inverse-compatible branch recognition for current repositories.
-
-**Target:** retain the Core naming rule while moving the declaration of whether/how branch is derived into repository Canon. Provider/deployment adapters consume its result and do not maintain a second branch grammar.
-
-### `branch-naming-authority.mjs`
-
-**Current:** compatibility package entrypoint that re-exports `src/branch-naming.ts`'s compiled Core implementation.
-
-**Target:** retain only while external governance consumers migrate to the `gh-inari/branch-naming` Core subpath; it contains no independent naming or recognition logic.
-
-### `src/change.ts`
-
-**Current:** transport-independent Change contract, canonical branch derivation composition, transition planning, effects, projection/admission validation, issuance and recovery semantics.
-
-**Target:** retain the Change lifecycle contract and consume Artifact Contract
-derivation/projection instead of independently owning artifact title/body/branch
-policy where those semantics have moved to the Artifact Contract.
-
-### `src/github/*`
-
-**Current:** repository resolution/provenance reads, GitHub artifact adapters, trusted Change sequencing, issuer authorization, and effect application.
-
-**Target:** split cleanly into observed-projection/capability adapters and Executor/effect adapters. Provider code reports capability/evidence and applies already admitted effects; it does not define semantic policy.
-
-### `docs/SEMANTIC_TEMPLATES.md`
-
-**Current:** authoritative description of v1 semantic template JSON and generated native templates.
-
-**Target:** remains migration documentation until v2 ships, then becomes compatibility/authoring migration guidance or is replaced by Artifact Contract authoring documentation.
-
-### `docs/CHANGE_CONTROL_PLANE.md`
-
-**Current:** authoritative Change lifecycle and execution-control architecture.
-
-**Target:** remains authoritative for Change. This document refines the artifact semantics that Change composes.
-
-### `docs/NATIVE_MCP_ISSUER_GATEWAY.md`
-
-**Current:** reconciled MCP protocol/transport adapter and Session/App bridge
-architecture. Hosted gateway authentication, OIDC-as-trust-root, and
-Actions-required execution are superseded.
-
-**Target:** remains the transport/deployment reference. Its MCP tools consume
-Effective Contracts and plans from this architecture rather than acquiring
-semantic policy ownership.
-
-## 17. Compatibility and migration
-
-Migration is additive and staged; no flag day is required.
-
-### Phase 0 — architecture gate
-
-This document and #278 are complete. Do not implement #161/#272/#273 as
-independent new policy owners before the decomposition is fixed.
-
-### Phase 1 — Contract IR and compiler
-
-Introduce the v2 Artifact Contract/Effective Contract model and deterministic authority/cardinality/derivation validation without changing external GitHub mutation behavior.
-
-Current v1 semantic templates remain accepted through a compatibility compiler that maps only semantics it can represent without guessing.
-
-### Phase 2 — input schema and semantic materialization
-
-Make schema/validate/render paths consume Effective Contract and Semantic Artifact. Preserve current CLI behavior where compatible; expose authority violations explicitly when callers attempt to supply newly derived/fixed values.
-
-### Phase 3 — Issue relations
-
-Move dependency/parent semantics into the common relation layer. Preserve the existing dependency marker only as an observation/backward-compatibility projection where required. Add native relation adapters only behind explicit capability detection.
-
-### Phase 4 — PR identity/linkage projection
-
-Move title derivation and PR-to-Issue semantic linkage into Artifact Contract projection. Closing-keyword body text becomes a projection of the relation, not the relation authority.
-
-### Phase 5 — branch projection and Change convergence
-
-Move the repository declaration of branch authority/derivation into the Artifact Contract. Reuse current branch grammar and Change identity semantics for repositories that declare the current deterministic form. Change consumes the resulting branch projection.
-
-### Phase 6 — CLI/MCP discovery and plan handoff
-
-Expose Effective Contract discovery/schema and plan preview through CLI/MCP using one Core implementation. Do not put repository policy in protocol handlers.
-
-### Phase 7 — Executor admission convergence
-
-Make trusted execution re-resolve the same Contract generation and admit/revalidate the common plan model before applying GitHub effects. Preserve Actions as the primary deployment while keeping the Core/plan boundary transport-independent.
-
-### Phase 8 — repository/organization consumer migration
-
-Migrate organization CI/governance consumers to the new Core result and delete
-duplicated title/branch/relation validation only after an equivalent Core
-semantic contract exists.
-
-## 18. Issue disposition after this document
-
-After merge, #278 should be decomposed into bounded implementation leaves. At minimum the work graph should cover:
-
-1. Artifact Contract/Effective Contract IR and compiler;
-2. authority/cardinality/derivation validation and effective input schema;
-3. typed relation model and Issue projection/observation;
-4. PR title/linkage projection/observation;
-5. branch authority/derivation migration and Change consumption;
-6. desired projection + plan contract convergence;
-7. CLI/MCP repository-contract discovery and preflight;
-8. Executor admission/revalidation convergence;
-9. organization CI/governance consumer migration.
-
-Existing issues are then dispositioned against those leaves:
-
-- #157 is completed foundation and its semantic behavior must be preserved;
-- #161 is absorbed into the typed relation / Issue observation work rather than
-  becoming a separate lifecycle policy owner;
-- #272 is absorbed into PR identity/title projection work;
-- #273 is absorbed into branch authority/derivation work;
-- #275 remains an independent projection-renderer correctness bug and may proceed separately.
-
-## 19. Normative invariants
-
-The following are non-negotiable for implementations derived from #278:
-
-- Repository-owned Canon contains repository-specific semantic choices.
-- Core owns the Contract language and interpretation, not concrete repository policy values.
-- Core does not universally require an Issue in branch identity or an Issue relation on pull requests.
-- Supplied, derived, and fixed authority are exclusive for one value in one Effective Contract.
-- Derived/fixed values are rejected as caller overrides.
-- Cardinality is independent of authority and represented without contradictory requiredness flags in normalized IR.
-- Derivation is bounded, deterministic, cycle-free, non-executable, and revalidated against output type.
-- Relations are semantic edges with stable endpoint identity; inverse views are derived.
-- Effective Contract is the machine discovery authority for caller input.
-- CLI/MCP and Executor use the same Core compiler/validator semantics.
-- CLI/MCP preflight never substitutes for Executor mutation admission.
-- Mutation admission re-resolves immutable governance generation and current state.
-- Desired/observed GitHub representations are projections/evidence, not
-  semantic policy owners.
-- Plan/evidence contracts are transport-independent and credential-free.
-- GitHub Actions is an Executor deployment, not a Core primitive.
-- Change lifecycle and artifact semantics remain distinct and composable.
-- Migration preserves current valid behavior until the replacement authority exists and is proven.
-
-## 20. Non-goals
-
-This architecture does not define:
-
-- arbitrary repository scripting or executable policy;
-- natural-language derivation, summarization, or LLM inference;
-- a universal branch grammar for every Inari repository;
-- a universal requirement that every PR close/implement an Issue;
-- a graph database or separate persistent artifact state store;
-- a new Change lifecycle or authorization model;
-- a new GitHub App reviewer/merge authority;
-- MCP-specific semantic policy;
-- a requirement that all mutations execute specifically on GitHub Actions forever;
-- a flag-day rewrite of v1 templates or historical GitHub artifacts.
-
-## 21. Decision summary
-
-The architectural center is **Core + repository Canon + versioned plan**, not CLI, MCP, workflow YAML, GitHub-native templates, or Runner.
-
-```text
-Repository chooses semantics
-        |
-Core compiles what may be supplied and what must be derived/fixed
-        |
-CLI/MCP let humans and agents discover and validate that contract
-        |
-Core materializes semantic intent and a deterministic projection/plan
-        |
-Trusted Executor re-resolves the same authority and current state
-        |
-GitHub effects are applied and verified
-```
-
-This division gives MCP real value without turning it into a policy authority, preserves GitHub Actions as a useful trusted execution boundary without making Runner the product architecture, and allows different repositories to choose different Issue/PR/branch semantics while sharing one deterministic Inari Core.
+Do not introduce arbitrary executable repository policy, a second hidden
+semantic document, universal branch grammar, mandatory Issue linkage for all
+PRs, generic graph database, Hosted materializer, new lifecycle engine, or
+speculative provider plugin system.
+
+Reviewers must be able to trace each fact to one schema/domain owner, each
+projection to its capability contract, each plan to current provenance, and
+each successful effect to reread verification. Ambiguity requires a bounded
+contract correction, not an adapter-local policy decision.

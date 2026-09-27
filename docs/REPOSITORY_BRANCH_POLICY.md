@@ -1,101 +1,217 @@
-# Repository branch policy
+# Repository Branch Policy and Integration Routing
 
-Status: foundation for Source #1100 (Implementation #1111). Consumer migration: #1112 (local Session/Admission/setup) and #1113 (Change/provider, see below).
+Status: normative naming/routing contract under
+[Product Architecture Canon](./ARCHITECTURE.md).
 
-Ordinary Change/Implementation branch spelling is governed by the target repository, not by a product-wide convention. Branch spelling is naming evidence only: it never establishes parentage, authorization, GitHub permissions, or branch protection.
+Ordinary branch spelling is governed by the target repository. Spelling is
+identity/consistency evidence, never parentage, authorization, provider
+permission, or branch protection. Source Change and Implementation task
+publication remain separate even when their branches use related conventions.
 
-## Policy source
+## 1. Policy source
 
-The policy is the existing PR policy `branch` rule (`.github/inari/pr-policy.yml`, or `.inari/pr-policy.yml`), read from the repository's provider-resolved default branch. There is no second policy file.
+Use the existing PR policy branch rule in `.github/inari/pr-policy.yml` or
+`.inari/pr-policy.yml`, acquired from the provider-resolved default branch.
+There is no second branch-policy file.
 
 ```yaml
 version: 1
 sections: []
 branch:
-  pattern: "^(story|bug)/[0-9]+-[a-z0-9-]+$" # required; validates supplied names
-  format: "{type}/{issueNumber}-{slug}" # optional; bounded derivation
-  types: [story, bug] # required only when format uses {type}
+  pattern: "^(story|bug)/[0-9]+-[a-z0-9-]+$"
+  format: "{type}/{issueNumber}-{slug}"
+  types: [story, bug]
 ```
 
-- `pattern` validates supplied names. It is never inverted into a generated name.
-- `format` is the only way policy generates a name. Literals use `[A-Za-z0-9._/-]`. Placeholders are `{issueNumber}` (required, once), `{slug}` and `{type}` (each at most once). `{type}` requires a closed `types` list, and `types` requires `{type}`.
-- `format` and `types` are additive. Historical records that carry only `pattern` keep their meaning.
+Pattern validates supplied names; it is never inverted to generate a name.
+Format is the explicit bounded derivation. It contains `{issueNumber}` once
+and may contain `{slug}` and `{type}` at most once. Type requires the closed
+types list and vice versa. Literal characters obey the existing safe format
+grammar.
 
-## Public API
+Pattern-only historical policy retains its meaning. Missing derivation does
+not justify guessing a type/slug or falling back to a universal convention.
 
-`src/repository-branch-policy.ts` (pure Core):
+## 2. Pure Core API
 
-| Symbol                                                                                    | Purpose                                                                                                                                              |
-| ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RepositoryBranchPolicy` (`version: 1`, `kind: "repository-branch-policy"`)               | Rule bound to `generation` (repository, default-branch `ref`, `treeSha`, policy source fingerprint) and `defaultBranch` (equal to `generation.ref`). |
-| `createRepositoryBranchPolicy({ generation, rule? })`                                     | Validates a generation and rule. Returns `{ status: "available", policy }` or a `denied` result.                                                     |
-| `validateRepositoryBranchPolicyRule(rule)`                                                | Validates a rule through the canonical PR policy parser.                                                                                             |
-| `resolveImplementationBranch({ policy, target, binding?, naming?, observedGeneration? })` | Resolves the branch for one Implementation. It uses the exact binding first, then the bounded `format`.                                              |
-| `evaluateRepositoryBranch({ policy, target, branch, binding?, observedGeneration? })`     | Checks a supplied branch against the exact binding, or against the pattern and the format for this Implementation number.                            |
-| `ImplementationBranchBinding`                                                             | Exact expected-branch evidence: `{ repository: { repositoryHost, repositoryId }, implementation, branch }`.                                          |
-| `RepositoryBranchDecision`                                                                | `bound` (with versioned `RepositoryBranchEvidence`), `action-required`, or `denied`.                                                                 |
-| `RESERVED_BRANCH_NAMESPACES`                                                              | `epic/`, `issue/`, `release/`. These are never ordinary Change branches.                                                                             |
+`src/repository-branch-policy.ts` owns:
 
-`src/governance.ts`: `acquireRepositoryBranchPolicy(adapter)` reads the default-branch generation and the PR policy. It returns an `available` policy (with or without a rule) or a `BRANCH_POLICY_INVALID` denial. Source acquisition failures still throw `GovernanceError`.
+- RepositoryBranchPolicy, version 1 and kind repository-branch-policy;
+- createRepositoryBranchPolicy and validateRepositoryBranchPolicyRule;
+- resolveImplementationBranch and evaluateRepositoryBranch;
+- ImplementationBranchBinding and RepositoryBranchEvidence;
+- the bound/action-required/denied decision contract;
+- reserved namespaces `epic/`, `issue/`, and `release/`.
 
-`src/branch-naming.ts` (formatter grammar): `validateBranchFormatRule`, `renderBranchFormat`, `matchBranchFormat`, `validateBranchSpelling`, `normalizeBranchSlug`, and `LEGACY_CHANGE_BRANCH_RULE`.
+The policy binds repository identity, default-branch ref, tree SHA, and source
+fingerprint. `defaultBranch` agrees with the generation's ref. An exact
+ImplementationBranchBinding names repository, Implementation, and branch.
 
-### Decision outcomes
+Resolution uses exact accepted binding first, then admitted format. Evaluation
+checks the exact binding or the pattern/format for the specified Implementation.
+A name alone cannot establish that it is the correct task branch.
 
-| Status            | Code                             | Meaning                                                                                                                 |
-| ----------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `action-required` | `BRANCH_POLICY_MISSING`          | No rule and no exact binding. Supply the exact branch or declare a rule.                                                |
-| `action-required` | `BRANCH_POLICY_NOT_DERIVABLE`    | The rule has only a pattern, or the supplied name is not this Implementation's formatted name. Supply the exact branch. |
-| `action-required` | `BRANCH_NAMING_INPUT_REQUIRED`   | The format needs `slug` or `type` input that was not supplied.                                                          |
-| `denied`          | `BRANCH_POLICY_INVALID`          | The rule, generation, version, or default-branch binding is malformed.                                                  |
-| `denied`          | `BRANCH_POLICY_STALE`            | `observedGeneration` differs from the policy generation.                                                                |
-| `denied`          | `BRANCH_REPOSITORY_UNBOUND`      | The policy has no repository ID, or the target identity is missing.                                                     |
-| `denied`          | `BRANCH_REPOSITORY_MISMATCH`     | The policy, target, or binding repository differs.                                                                      |
-| `denied`          | `BRANCH_IMPLEMENTATION_MISMATCH` | The binding is for a different Implementation.                                                                          |
-| `denied`          | `BRANCH_BINDING_MISMATCH`        | The supplied branch is not the exact bound branch.                                                                      |
-| `denied`          | `BRANCH_NAME_INVALID`            | The name is not safe Git branch spelling.                                                                               |
-| `denied`          | `BRANCH_NAME_RESERVED`           | The name is the default branch or in a reserved namespace.                                                              |
-| `denied`          | `BRANCH_NAMING_INVALID`          | The `slug` or `type` input is malformed or outside `types`.                                                             |
-| `denied`          | `BRANCH_POLICY_MISMATCH`         | The declared pattern rejects the name.                                                                                  |
+`acquireRepositoryBranchPolicy` in `src/governance.ts` reads the same existing
+policy/generation. Acquisition failure remains a GovernanceError; invalid
+rule/generation is a bounded denial, not an absent permissive policy.
 
-## Legacy compatibility adapters
+## 3. Formatter and safe spelling
 
-These keep their signatures and behavior for historical contracts, signed records, and reserved routing. They are not the rule for new ordinary Change naming.
+`src/branch-naming.ts` owns validateBranchFormatRule, renderBranchFormat,
+matchBranchFormat, validateBranchSpelling, and normalizeBranchSlug.
 
-- `src/branch-naming.ts`: `CANONICAL_BRANCH_TYPES`, `BRANCH_TYPES`, `DEFAULT_BRANCH_NAME`, `validateBranchName`, `recognizeBranchName`, `recognizeBranchNamingForIssue`, `branchBelongsToRootIssue`, `deriveBranchNamingFromIssueTitle`, `deriveNamingFromIssueTitle`, `deriveBranchName`, `deriveCanonicalBranchName`, `recognizeCanonicalBranchName`, and the integration helpers (`recognizeIntegrationBranchName`, `deriveIssueIntegrationBranchName`, `deriveEpicIntegrationBranchName`, and their aliases).
-- `LEGACY_CHANGE_BRANCH_RULE` expresses the historical `<feat|fix|docs|refactor|test|chore>/<issue>-<slug>` convention as a policy rule. It applies only when a caller passes it explicitly.
-- `src/governance.ts`: `resolveRepositoryBranchGovernance` returns only the bare rule.
+Provider adapters validate repository-neutral safe spelling plus equality to
+the admitted branch. They do not maintain a second repository naming regex.
+A literal such as `main` is not universally special across repositories;
+default/base restrictions use actual current evidence.
 
-## Change and provider propagation (#1113)
+Reserved namespace grammar remains explicit. Malformed `issue/`, `epic/`, or
+`release/` input cannot fall through as an ordinary valid branch merely
+because the repository regex is broad.
 
-New Implementation-native execution consumes the exact admitted branch end to end. Provider adapters and capability records check only repository-neutral safe spelling (`validateBranchSpelling`) plus exact equality to the authorized subject; they are not a second naming authority.
+## 4. Decision diagnostics
 
-- `GitHubChangeStateProjector` acquires the policy through the existing governance reader (`acquireRepositoryBranchPolicy`) for an Implementation Issue and resolves its exact branch with `resolveImplementationBranch` (exact contract binding first). It threads the resulting `RepositoryBranchEvidence` into Core projection as `branchEvidence`, with the provider-resolved default branch as `baseBranch`. A denial, a foreign contract repository, or a policy generation whose default branch differs from the provider default fails closed. Without exact evidence (non-Implementation Issue, or action-required policy), the historical title-derived path applies unchanged.
-- `projectChangeFromGitHubEvidence` accepts `branchEvidence` in place of `naming`/`branchGovernance` (they are mutually exclusive). It re-evaluates the evidence through `evaluateRepositoryBranch` against the Change repository and root Implementation and requires `baseBranch` to equal the evidence default branch. `deriveCanonicalBranchIdentity` remains only for legacy callers without policy evidence.
-- `capability.ts`: `branch.create.branch`, `branch.advance.branch`, and `pullRequest.create.head` are exact safe targets; `pullRequest.create.base` is a safe provider branch and may be a non-`main` default branch. No branch literal (including `main`) is universally refused; default/base denial uses actual evidence. `capability-provenance.ts` applies the same safe-spelling rule to branch/head/base subjects.
-- `branch-advance.ts` and `git-data-capability.ts` validate safe spelling. Branch advance refuses the authoritative default branch (the Runtime Authority policy ref) and the Implementation base branch; exact admission binding, compare-and-swap, path scope, and provenance are unchanged.
-- `implementation-change-identity.ts` accepts a safe, non-reserved Implementation branch that differs from its base and equals the contract, Change projection, Session capability, and execution evidence.
-- `integration-routing.ts`: ordinary Implementation heads and the default branch are exact governed evidence (safe spelling, outside `epic/`, `issue/`, `release/`, not the default/base branch). Spelling never establishes or refutes Implementation identity; exact head/base equality binds the route. Reserved `epic/` and `issue/` routing keeps its canonical grammar. An already-projected route re-validates to itself.
+Action-required outcomes preserve:
 
-`test/repository-branch-policy-certification.test.mjs` certifies an alternative convention (`story/<n>-<slug>`) on a `trunk` default through Session → Admission → Executor → PR publication and branch advance, and proves that wrong repository, Implementation, branch, and stale generation fail before any provider mutation.
+```text
+BRANCH_POLICY_MISSING
+BRANCH_POLICY_NOT_DERIVABLE
+BRANCH_NAMING_INPUT_REQUIRED
+```
 
-## Caller inventory
+These require explicit policy/binding or missing allowed naming input. They
+are not instructions to invent values.
 
-This inventory comes from targeted symbol references at base `18fb72ef`. P1 callers belong to #1112 and P2 callers to #1113. Other callers are reserved routing or historical-record paths and stay on the legacy adapters.
+Denied outcomes preserve:
 
-| Caller                                                                                               | Legacy symbols used                                                                                                                  | Owner                                                                     |
-| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `src/local-control/session-launcher.ts:210-213`                                                      | `recognizeBranchName`, `CANONICAL_BRANCH_TYPES`                                                                                      | P1 #1112                                                                  |
-| `src/local-application-state.ts:113,189-202`                                                         | `CANONICAL_BRANCH_TYPES` (setup display pattern), `recognizeBranchName`, `DEFAULT_BRANCH_NAME`                                       | P1 #1112                                                                  |
-| `src/change.ts:1643` (canonical branch derivation)                                                   | `deriveBranchName` plus pattern-only `branchGovernance`                                                                              | #1113: legacy only; `branchEvidence` for new execution                    |
-| `src/github/change-state-projector.ts:136,226,281,741`                                               | `deriveBranchNamingFromIssueTitle`, `recognizeBranchNamingForIssue`, `branchBelongsToRootIssue`, `resolveRepositoryBranchGovernance` | #1113: legacy only; policy evidence for Implementations                   |
-| `src/hosted-endpoint-work-reader.ts:199`                                                             | `resolveRepositoryBranchGovernance`                                                                                                  | P2 #1113                                                                  |
-| `src/semantic-branch-projection.ts:460`                                                              | comment only (does not derive)                                                                                                       | none                                                                      |
-| `src/branch-creation-ruleset.ts:56,61`                                                               | `CANONICAL_BRANCH_TYPES`, `DEFAULT_BRANCH_NAME` (gh-inari's own ruleset)                                                             | retained (repository's own convention)                                    |
-| `src/release-pr-publication.ts:21`                                                                   | `DEFAULT_BRANCH_NAME`                                                                                                                | retained (release routing)                                                |
-| `src/integration-routing.ts:210,228,382,628`                                                         | `validateBranchName`, `recognizeBranchName`, `DEFAULT_BRANCH_NAME`                                                                   | #1113: reserved `epic/`/`issue/` routing and absent-default fallback only |
-| `src/implementation-contract.ts:813,824`                                                             | `validateBranchName` (reserved-namespace checks)                                                                                     | retained                                                                  |
-| `src/implementation-change-identity.ts:301,306`                                                      | `validateBranchName`, `recognizeBranchName`                                                                                          | migrated #1113 (safe spelling)                                            |
-| `src/agent-authority/branch-advance.ts:222`, `capability.ts:115,119`, `capability-provenance.ts:348` | `validateBranchName`                                                                                                                 | migrated #1113 (safe spelling)                                            |
-| `src/legacy-artifact-convergence.ts:490,724`                                                         | `validateBranchName`                                                                                                                 | retained (historical artifacts)                                           |
-| `src/github/git-data-capability.ts:432`                                                              | `validateBranchName`                                                                                                                 | migrated #1113 (safe spelling)                                            |
+```text
+BRANCH_POLICY_INVALID
+BRANCH_POLICY_STALE
+BRANCH_REPOSITORY_UNBOUND
+BRANCH_REPOSITORY_MISMATCH
+BRANCH_IMPLEMENTATION_MISMATCH
+BRANCH_BINDING_MISMATCH
+BRANCH_NAME_INVALID
+BRANCH_NAME_RESERVED
+BRANCH_NAMING_INVALID
+BRANCH_POLICY_MISMATCH
+```
+
+Malformed generation/default ref is invalid. Different observed generation is
+stale. Wrong repository, task, exact bound branch, spelling, reserved target,
+type/slug, or pattern remains a specific denial.
+
+Diagnostics retain stable machine meaning and bounded safe details. A generic
+CLI error or progress indicator must not erase the actual mismatch.
+
+## 5. Source/task propagation
+
+The current repository policy foundations project exact Implementation branch
+evidence through Session, Admission, Executor, and publication. The target
+retains that evidence while separating the selected Source Change identity.
+
+`GitHubChangeStateProjector` acquires policy through canonical governance.
+Core `projectChangeFromGitHubEvidence` consumes policy evidence and rechecks
+its identity/generation. Existing `branchEvidence` and legacy naming inputs
+are not simultaneous independent authorities.
+
+The older assumption that the projected Change root always equals the task
+Implementation must be migrated explicitly. Do not fix a Source operation by
+silently renaming it to the task or assigning it an arbitrary child branch.
+Source publication/integration and leaf publication have distinct bindings.
+
+## 6. Exact advancement and provider targets
+
+Branch-create/advance and PR head/base capability targets use safe spelling
+and exact admitted identity. Advancement refuses the current authoritative
+default and task base where prohibited by its contract, not only the string
+`main`.
+
+Compare-and-swap, protected paths, task WRITE/CREATE/DELETE scope, provenance,
+and current authorization remain required. Admitted branch policy does not
+grant provider effects or permission to modify integration branches.
+
+`src/agent-authority/branch-advance.ts`, capability/provenance modules, and
+`src/github/git-data-capability.ts` consume canonical targets. They must not
+reintroduce a fixed six-prefix grammar for every repository.
+
+## 7. Integration topology
+
+The accepted Issue-integration model is:
+
+```text
+Implementation leaf -> Source Issue integration -> Epic integration -> default
+```
+
+An ordinary leaf uses its accepted task branch. Source integration uses
+`issue/<source-number>-<slug>`, and Epic integration uses
+`epic/<epic-number>-<slug>` where the selected repository contract supports
+that model. `impl:` is an Issue title class, not a new `impl/*` branch class.
+
+Routing derives from canonical relationships and accepted base metadata.
+Branch names validate identity/consistency after that decision. Multiple
+Source references are not multiple implicit parents.
+
+A Source integration branch is not an implementation worktree. A leaf PR
+proves the bounded task, a Source PR proves its composed capability, and an
+Epic PR proves the composed product change. Neither downstream proof is
+inferred from the number of child merges.
+
+## 8. Standalone and legacy routes
+
+Standalone work does not manufacture an Epic or Source integration branch.
+Use its explicit accepted route and prove the Source/task/publication join.
+Missing identity remains action-required/denied.
+
+Existing in-flight legacy direct-to-Epic topology is not silently rerouted.
+Any supported old representation is explicitly classified and adapted into
+the canonical model; it does not authorize a competing new execution path.
+
+An already-projected valid route must revalidate to itself. Cross-Source,
+cross-Epic, default/base mismatch, or layer skipping is rejected where the
+selected topology requires those layers.
+
+## 9. Compatibility inventory
+
+Existing historical helpers such as recognizeBranchName,
+recognizeBranchNamingForIssue, branchBelongsToRootIssue, deriveBranchName,
+deriveCanonicalBranchName, and the integration helpers may remain for
+versioned historical records or reserved routing.
+
+LEGACY_CHANGE_BRANCH_RULE explicitly represents the historical six-prefix
+convention. It is used only when passed as the accepted compatibility rule,
+not as an ambient fallback. resolveRepositoryBranchGovernance remains the
+legacy bare-rule adapter.
+
+Old line-number inventories are historical evidence. The causal migration
+seams are local Session launch/setup, Change projection, capability targets,
+branch advance, integration routing, release routing, and legacy artifact
+readers. Each must have one naming owner after its slice migrates.
+
+Hosted work-reader naming logic is retired with that semantic backend; it is
+not a second consumer to preserve indefinitely.
+
+## 10. Rulesets and shared governance
+
+Naming policy does not enforce provider branch creation. The actual Ruleset
+is a separately administered boundary described in
+[Branch Creation Ruleset Operations](./BRANCH_CREATION_RULESET_OPERATIONS.md).
+
+Shared organization validation consumes canonical Inari routing rather than
+copying its semantics into YAML/shell. Generated consumer governance remains
+generated, and shared workflows use their accepted `@main` contract.
+Do not repair a consumer by forking the provider or skipping checks.
+
+## 11. Verification
+
+Preserve alternative naming and non-main default coverage, including the
+existing `story/<n>-<slug>` on `trunk` certification. Prove exact binding,
+missing format/input, malformed/reserved spelling, stale policy generation,
+wrong repository/task/branch, and default/base protection.
+
+Prove Source/task separation, multiple Sources without implicit parent,
+standalone publication, each integration role, layer-skipping denial,
+legacy-route compatibility, and no provider mutation on naming/admission
+failure.
+
+A matching branch regex is not proof of correct authorization or integration.

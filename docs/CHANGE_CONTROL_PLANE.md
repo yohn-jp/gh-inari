@@ -1,1008 +1,659 @@
 # Inari Governed Change Control Plane
 
-Status: historical Change-control-plane architecture for Epic #188. Change
-lifecycle and publication invariants remain normative; the current
-responsibility, identity, credential, and deployment vocabulary is defined by
-[`ARCHITECTURE.md`](./ARCHITECTURE.md) and the Session/App boundary by
-[`AGENT_CAPABILITY_AUTHORIZATION.md`](./AGENT_CAPABILITY_AUTHORIZATION.md).
+Status: normative domain contract under
+[Product Architecture Canon](./ARCHITECTURE.md).
+
+This document preserves the detailed lifecycle, publication, idempotency,
+compensation, provenance, and recovery contract. It replaces the former
+Implementation-root identity and independent deployment assumptions with the
+approved Source Change / Implementation task separation.
+
+The target is not a claim that every current producer and consumer has already
+migrated. In particular, the Local #1213 binding correction is not proof of
+complete standalone and Source-integration publication conformance.
 
 ## 1. Purpose
 
-Inari is evolving from a governed GitHub CLI into a deterministic governance control plane for repository Changes.
+Inari governs the meaning and publication of repository work, not only the
+format of Issue and PR bodies. A Change gives a Source outcome a deterministic
+lifecycle projected from its governed repository artifacts and evidence.
 
-The product already treats repository-native Issue Forms and pull request templates as deterministic typed contracts, validates structured semantic input, renders canonical GitHub artifacts, and fails closed when governance cannot be resolved safely. The next architectural step is to govern how implementation work is published to GitHub, not only the shape of individual Issue or pull request artifacts.
+An Implementation is a bounded execution task contributing to that outcome.
+Its authorization, Session, leaf branch, leaf PR, and evidence are distinct
+from the Source Change and any Source integration publication.
 
-The central abstraction is `Change`.
+The domain supplies one answer to what exists, what transition is permitted,
+what effects are required, and how completion or uncertainty is verified.
+It does not introduce a fourth persistent GitHub object or a private Change
+database.
 
-A Change is the governed execution identity that connects one
-Implementation-bearing execution to one canonical remote branch and one
-canonical pull request. A source Issue may have multiple independent
-Implementation children. A new Change is rooted in exactly one such
-Implementation; older Issue-rooted Changes remain readable under an explicit
-compatibility rule. A Change is issued when implementation begins, remains
-observable while work proceeds, becomes reviewable through an explicit
-governed transition, and terminates through merge or abort.
+## 2. Product model and responsibilities
 
-This document defines the product model, lifecycle, authority boundaries, caller interfaces, trusted execution path, security model, failure semantics, provenance, and migration constraints for that control plane.
+GitHub owns repository state. Repository Canon supplies concrete governed
+contracts and policy. Semantic Core resolves, validates, projects, plans, and
+classifies bounded results.
 
-This document remains the Change lifecycle/publication reference for those
-boundaries. It does not define the current responsibility vocabulary and does
-not replace executable semantic templates, schemas, validators, command
-metadata, repository Rulesets, or tests. Where a rule can be expressed and
-enforced mechanically, the executable contract remains canonical and this
-document describes its intended role.
+Admission authenticates the caller profile and authorizes its requested
+semantic operation. Executor coordinates the admitted operation with the
+existing Lifecycle Controller, evidence reader, Effect Authorizer, provider
+adapter, and postcondition verifier.
 
-## 2. Product definition
-
-The target product definition is:
-
-> Inari is a deterministic governance control plane for GitHub repository Changes.
-
-Inari is not defined as GitHub Actions, a GitHub App, a CLI, or a Web application. Those are separate roles.
-
-- **Inari Core** implements deterministic semantic contracts, policy
-  resolution, canonicalization, projection, planning, and diagnostics.
-- **Lifecycle Controller** owns Change lifecycle sequencing, retry,
-  compensation, recovery, and postcondition-verification control flow. XState
-  is its current implementation technology.
-- **Inari CLI** is the canonical human- and agent-facing client surface.
-- **GitHub Actions** is an Actions compatibility Deployment Profile: a
-  Runner Runtime Host plus workflow Transport and deployment adapter.
-- **Inari GitHub App** is the App Principal used by the Credential Broker and
-  Effect Authorizer to apply already-planned provider effects.
-- **GitHub** is the repository Authority and observable state store for Issue,
-  branch, PR, CI, review, and merge state.
-- **MCP, Direct App, CLI, GitHub-native UI adapters, or a future service** may
-  bind the same execution semantics as client, protocol, ingress, or
-  deployment adapters without becoming semantic or repository Authorities.
-
-The architecture separates three concerns that must not collapse into one another:
-
-```text
-semantic roles         deployment profile      provider principal
---------------         ------------------      -----------------
-Inari Core + XState    Actions compatibility   App Principal
-```
-
-The Lifecycle Controller sequences a transition plan. The App Principal and
-Effect Authorizer admit bounded provider effects. Neither Actions nor the App
-defines the meaning of a Change.
+Inari Access is the provider identity, not the requester, reviewer, semantic
+policy engine, or repository authority. CLI, MCP, Console, and Relay are
+interfaces/transports. No remote network placement creates a second Change
+engine.
 
 ## 3. Why Change exists
 
-Today, Issue, branch, and pull request can be created as independent artifacts by human or agent callers. Even when Inari validates Issue and PR contracts, publication authority remains distributed.
+Source intent, implementation execution, publication, reviewability, and
+integration are different facts. Creating an Issue does not start execution;
+creating a branch alone does not establish a canonical Change; a PR becoming
+non-draft does not prove governance; and merging a leaf does not prove Source
+acceptance.
 
-- A caller may choose a remote branch name before Inari sees the pull request.
-- The person who implements the change often becomes the PR author merely because they invoked `pr create`.
-- GitHub then prevents that PR author from formally approving the same PR.
-- Governance such as branch naming remains advisory unless every caller reproduces it correctly.
+Change binds lifecycle decisions to canonical repository observations and
+explicit publication identity. This removes the need for callers to invent
+branch/PR identities, duplicate readiness rules, or guess whether a failed
+create request should be retried.
 
-These are symptoms of the same missing abstraction: publication of repository work is not yet a governed transition.
+Proposal publication identity remains distinct from implementation commit
+authorship. The App may publish the proposal while the commits retain the
+actual author's provenance and review remains independent.
 
-Instead of treating branch creation and PR creation as unrelated user actions,
-Inari treats them as projections of one semantic operation: issue a Change for
-one authorized Implementation.
+## 4. Identity and cardinality
 
-```text
-source Issue #568
-    |
-    | native parent/sub-issue
-    v
-Implementation #679
-    |
-    | issue Change
-    v
-Change(root = #679)
-    +-- canonical branch
-    `-- canonical Draft PR
-```
+### 4.1 Repository
 
-The Implementation Issue number is the Change root for new execution. No
-independent Change ID namespace is introduced. Existing Issue-rooted Change
-projections retain their original root as historical compatibility evidence.
+Security identity is `repositoryHost + repositoryId`. Current `nameWithOwner`
+is a locator and display value. Rename or name reuse cannot rebind an old
+Change to a different repository. A transfer requires current installation
+and repository-binding evidence, not an assumed continuation of access.
 
-## 4. Core domain model
+### 4.2 Source Issue
 
-### 4.1 Ordinary Issue and Implementation
+A Source records a problem, requested capability, or accepted decision and its
+acceptance criteria. It may exist without an Implementation or issued Change.
 
-An ordinary Issue represents intent, requirement, defect, architecture
-decision, maintenance request, or other governed work definition. It is a
-source/tracker record, not a session execution authority.
+A Source may have multiple contributing Implementations. Its completion must
+be evaluated against composed evidence, not inferred from child count or the
+last merged PR.
 
-An ordinary Issue may exist indefinitely without an Implementation or active
-Change. Creating an Issue does not imply implementation has started. One
-ordinary Issue may have zero or more independent Implementation children.
+### 4.3 Change
+
+The canonical target identity is:
 
 ```text
-ordinary Issue -> Implementation cardinality: 0..many
-Implementation -> new Change cardinality: 0..1 active canonical Change
+Change = immutable repository identity + selected canonical Source Issue
 ```
 
-An Implementation is the existing first-class one-session contract. Its
-canonical body, authorization record, base evidence, and execution scope
-remain owned by the Implementation authorities described in
-[`IMPLEMENTATION_CONTRACT.md`](./IMPLEMENTATION_CONTRACT.md). This document
-does not introduce another Implementation or Session model.
+No independent Change ID namespace is introduced. The selected Source is
+explicit; the first Source listed in an Implementation is not automatically
+primary.
 
-### 4.2 Change
+The active canonical publication pair belongs to that Change. Conflicting
+pairs are ambiguity, not a choice for the client to make heuristically.
 
-A Change represents the governed execution identity for implementing one
-Implementation.
+### 4.4 Implementation
 
-A Change is not a fourth persistent GitHub object. It is semantic state derived from canonical GitHub projections and governed metadata.
+The Implementation owns a bounded task contract and current authorization:
+repository identity, Implementation Issue, governed-body digest, and explicit
+base evidence. Its Session task stays the Implementation.
 
-The identity for new Implementation-native execution is:
+An Implementation may name multiple canonical Sources. That set narrows which
+Source operations may be requested, but it does not create multiple implicit
+integration parents or permit arbitrary PR targeting.
+
+### 4.5 Session
+
+A local Session binding carries the Implementation task, permitted claims,
+validity, Authority evidence, and signed branch/Implementation observations.
+A requested Source must be in both its signed Source set and the current
+Implementation contract's Source set.
+
+Adding a Source later does not widen an issued Session. Removing a Source
+prevents subsequent Source operations. Task/body/base/branch freshness remain
+separate checks.
+
+The existing task-bound `change.implement` compatibility claim serves only
+Implementation publication and branch-side composition. It cannot authorize
+an Implementation-root `change.issue/show/ready/abort/merge` operation.
+
+### 4.6 Publication roles
+
+Keep three publication roles distinguishable:
 
 ```text
-Change identity = repository identity + Implementation Issue number
+Implementation leaf publication
+  exact task branch + leaf PR + execution evidence
+
+Source Change publication/integration
+  exact Source branch + Source PR + composed acceptance evidence
+
+Epic integration
+  composed Source outcomes + Epic PR + product certification
 ```
 
-Existing historical Changes retain this compatibility identity:
+An Issue-integration topology resolves Implementation leaf to Source branch,
+Source branch to Epic branch, and Epic branch to the governed default branch.
+Standalone work uses its explicit supported routing contract without
+manufacturing an Epic.
 
-```text
-historical Change identity = repository identity + original ordinary Issue number
-```
+A missing standalone Source/publication join is not repaired by treating the
+Implementation number as Source, selecting an arbitrary child PR, or copying
+one leaf's branch into the Source publication slot. Its canonical binding must
+be established by the relevant implementation and certified.
 
-The latter is never silently reinterpreted as a child Implementation. The
-full cross-artifact binding and the fail-closed compatibility classification
-are defined by [`IMPLEMENTATION_CONTRACT.md`](./IMPLEMENTATION_CONTRACT.md)
-and its pure Core projection.
+### 4.7 Historical data
 
-### 4.3 Canonical branch
+Stored historical Change identity is read under its recorded version and
+original root. A reader does not silently reinterpret an Implementation-root
+record as a Source-root record merely because relationships now exist.
 
-Every issued active Change has exactly one canonical remote branch.
+Bounded historical observation/adoption may remain. A compatibility reader
+must produce an explicit canonical or historical classification and must not
+preserve an independent old execution engine.
 
-The branch name is a deterministic projection computed by Inari from governed inputs. Human and agent callers do not supply the canonical branch name as free-form authority.
+## 5. Domain invariants
 
-The exact naming grammar remains executable repository governance, not prose in this document.
+A Source may be inert in the backlog. An active issued Change has exactly the
+canonical publication required by its role and routing contract. A branch and
+PR are its projections, not independent semantic authorities.
 
-> Inari determines the canonical remote branch identity for a governed
-> Implementation-rooted Change.
+Implementation authorization, task, leaf branch/PR, and execution evidence
+must agree. Source lifecycle authority and leaf publication authority must not
+be confused. Sibling Implementations cannot overwrite each other's identities
+or be selected as substitutes for Source acceptance.
 
-### 4.4 Canonical pull request
+Canonical names and desired artifacts are derived by the appropriate Core
+contracts. Callers do not acquire authority by supplying already-matching
+bytes. Native relationship and accepted integration metadata determine
+routing; branch grammar only checks consistency.
 
-Every issued active Change has exactly one canonical pull request.
+Issuance is create-or-return-existing and logically transactional. Partial,
+conflicting, or unavailable evidence is classified explicitly. Destructive
+cleanup is limited to the exact admitted object and generation.
 
-The canonical PR is created as Draft during Change issuance. It exists from the beginning of implementation rather than being created after implementation is complete.
+All normal mutations use Executor-owned Inari Access capability. Success
+requires authoritative reread and semantic postcondition verification.
+Requester, App actor, author, reviewer, approver, and merger remain distinct.
 
-The canonical PR author is the issuer identity, normally the Inari GitHub App, not necessarily the implementation author.
-
-```text
-proposal publication identity != implementation authorship
-```
-
-Commit authorship and other Git provenance continue to record who authored implementation commits.
-
-## 5. Normative invariants
-
-The following invariants are architectural requirements.
-
-- Every new Change has exactly one Implementation root.
-- An ordinary source Issue may exist without an Implementation or issued Change.
-- Historical Issue-rooted Changes remain readable under an explicit
-  compatibility mode and are never silently reinterpreted.
-- An Implementation has at most one current authorization, one active Change,
-  one canonical branch, and one canonical PR identity.
-- Every issued active Change has exactly one canonical branch.
-- Every issued active Change has exactly one canonical PR.
-- Branch and PR are projections of one Change, not independent authorities.
-- Canonical branch naming is computed by Inari.
-- Canonical branch creation is issuer-controlled.
-- Ordinary updates to an already-issued working branch remain worker-controlled in the initial model.
-- Canonical PR creation is issuer-controlled at the semantic layer.
-- Noncanonical PRs may physically exist but must not become merge-admissible governed Changes.
-- Change issuance is a logical transaction even though GitHub requires multiple API effects.
-- Change issuance is idempotent.
-- Partial or conflicting state fails closed.
-- Draft represents implementation state.
-- Ready represents admission to review.
-- PR author represents proposal publication authority, not implementation authorship.
-- A canonical PR's semantic `implements` relation and recognized closing
-  reference target the execution Implementation; source Issues are not a
-  substitute execution target.
-- Session task and `change.implement` capability claims target the
-  Implementation Issue and remain bound to its current authorization digest.
-- Execution evidence and conformance target the same Implementation and
-  authorization digest as the Change.
-- Source Issue closure is a separate explicit terminalization operation and is
-  never inferred from Change or PR state.
-- Issuer and reviewer are separate authorities.
-- Human and agent callers never receive GitHub App private keys or installation tokens.
-- Requester, issuer, implementer, reviewer, and merger identities remain distinguishable.
-- Pure deterministic operations remain local-capable.
-- Privileged repository transitions use a trusted Change Executor reached
-  through the transport-neutral `ChangeExecutionPort`.
-- Actions workflow YAML is a deployment adapter, not a semantic policy owner or
-  repository Authority.
-- GitHub is the repository Authority and state store for Change projection.
-- A separate persistent Change database is not introduced without a demonstrated requirement.
-- Existing semantic template authority remains authoritative for Issue and PR artifact contracts.
-- Humans and agents share the same semantic Change contract.
-- GUI-only operation is not acceptable.
-
-## 6. Change lifecycle
-
-The lifecycle is defined by the Change contract and controlled operationally by
-the Lifecycle Controller. It is projected onto GitHub-native states where
-possible; XState is not a second state store or repository Authority.
+## 6. Lifecycle
 
 ```text
 DEFINED
-   |
-   | issue
-   v
-DRAFT
-   |
-   | ready
-   v
-REVIEW
-   |
-   | policy satisfied
-   v
-ACCEPTED
-   |
-   | merge
-   v
-MERGED
+  -> issue -> DRAFT
+  -> ready -> REVIEW
+  -> actual policy evidence -> ACCEPTED
+  -> explicit admitted merge -> MERGED
 
 DRAFT / REVIEW
-   |
-   | abort
-   v
-ABORTED
+  -> admitted abort -> ABORTED
 
-unrecoverable projection drift
-   |
-   v
-RECOVERY_REQUIRED
+partial/unsafe/unverifiable state
+  -> RECOVERY_REQUIRED
 ```
 
-The final machine-state names may differ, but these semantics are fixed.
+This is a semantic overview, not a replacement production transition table.
+The canonical lifecycle machine and Core contract determine legal events.
 
 ### 6.1 DEFINED
 
-A governed Issue exists, but no active Change has been issued. There is no requirement for a canonical branch or PR.
+The governed Source exists but no active canonical Change publication is
+issued. No branch or PR is required merely because the Issue exists.
 
 ### 6.2 DRAFT
 
-Change issuance completed successfully. Both canonical branch and canonical Draft PR exist. Implementation may proceed.
-
-GitHub Draft PR state is intentionally reused as the visible projection of this phase.
+The canonical branch and Draft PR required by the selected publication role
+exist consistently. A branch without its PR or a PR with contradictory
+identity is not healthy DRAFT.
 
 ### 6.3 REVIEW
 
-The Change has passed the governed `ready` transition. The canonical PR is Ready for review.
-
-The transition is not merely a raw GitHub UI toggle. Inari validates the Change projection and required governance preconditions before admitting the Change to review.
+The governed ready transition has been admitted and its canonical publication
+is verified as reviewable. REVIEW is not review approval or successful CI.
 
 ### 6.4 ACCEPTED
 
-Required reviews, status checks, governance checks, and merge-admission policy are satisfied.
-
-Whether ACCEPTED is materialized or derived at read time is an implementation detail. Reviewability and merge admissibility remain distinct semantics.
+The required current checks, reviews, governance, and merge-policy conditions
+are actually satisfied. A cached green badge or a child PR's checks cannot
+prove the current composed candidate accepted.
 
 ### 6.5 MERGED
 
-The canonical PR has been merged under repository policy. Post-merge branch cleanup is separate from the semantic identity of the completed Change.
+The canonical PR has actually merged under the admitted policy and its final
+state has been reread. Post-merge branch cleanup is separate from the semantic
+identity of the completed Change.
 
 ### 6.6 ABORTED
 
-The Change is intentionally stopped without merge. Abort behavior must preserve enough provenance to explain that the Change existed and was intentionally terminated.
+The admitted operation intentionally terminated the Change without merge.
+Enough bounded provenance remains to distinguish intentional termination from
+an absent or unreadable object.
 
 ### 6.7 RECOVERY_REQUIRED
 
-GitHub effects are not atomic. If a privileged operation partially succeeds and compensation cannot restore a valid canonical projection, Inari fails closed and exposes an explicit recovery-required state.
+Current evidence does not justify safe completion without the explicit
+recovery path. It is not permission to reset state, delete arbitrary branches,
+or retry all provider operations.
 
-## 7. Change issuance
+## 7. Issuance
 
-The semantic operation is conceptually:
+A compliant issuance operation performs:
 
-```text
-inari change issue <issue>
-```
+1. resolve immutable repository and current governance generation;
+2. resolve the selected Source and applicable Implementation/caller authority;
+3. validate the current task contract, Source membership, and execution scope;
+4. resolve the exact publication role, base, branch, and PR relationship;
+5. read current GitHub evidence for existing or conflicting publication;
+6. return an already healthy canonical Change without duplicate effects, or
+   admit the explicit creation plan;
+7. create the canonical branch through the bounded provider effect;
+8. retain its exact created head/generation;
+9. create the canonical Draft PR from the admitted semantic plan;
+10. reread and verify both artifacts against the planned postcondition;
+11. return verified DRAFT or the appropriate bounded failure/recovery result.
 
-The public command spelling is not fixed by this document. The operation is.
+The public spelling is owned by the command contract. The architecture does
+not add a new command solely to describe this composition.
 
-A compliant Implementation-native issuance transition performs these semantic
-steps:
+Publication of an Implementation leaf is not implemented by first pretending
+that the Implementation is a Source Change. The bounded #1213 compatibility
+path must preserve that distinction while the wider publication composition
+converges.
 
-- Resolve target repository and governance generation.
-- Read the source Issue relationship and current Implementation Issue.
-- Resolve and validate the Implementation contract and current authorization
-  evidence.
-- Verify that the Implementation is eligible for Change issuance.
-- Use an existing Issue-rooted Change only through the explicit historical
-  compatibility rule; never reinterpret it as the Implementation Change.
-- Determine the target base branch.
-- Compute the canonical branch name from the Implementation-rooted Change.
-- Inspect existing GitHub state for prior issuance or inconsistency.
-- Create the canonical remote branch through the Effect Authorizer and App Principal provider boundary.
-- Create the canonical Draft PR through the Effect Authorizer and App Principal provider boundary.
-- Verify that the resulting branch and PR match the planned Change.
-- Return one bounded machine-readable Change result.
+## 8. Idempotency and duplicates
 
-The user-visible operation succeeds only when branch and Draft PR are both established consistently.
+A repeated issuance can create the absent canonical publication, return an
+existing healthy one, or reject/classify partial and conflicting evidence.
+It cannot create a second canonical PR because the first response was lost.
 
-## 8. Idempotency
+An unavailable read is not absence. Multiple plausible PRs are not resolved
+by oldest/newest/first matching name unless the actual canonical contract
+expressly identifies one from current evidence.
 
-Authoritative remote operations must be retry-safe because Actions, network calls, clients, and users can all retry.
+An idempotency key is evidence for correlation, not a substitute for correct
+provider state, identity, and effect fencing. A repeated request with changed
+semantic content is not the same request.
 
-Issuance therefore uses create-or-return-existing semantics, not blind create semantics.
+## 9. Compensation and partial effects
 
-A repeated issuance request has only these valid outcomes:
-
-- The canonical Change does not exist, so create it.
-- The canonical Change already exists and matches all invariants, so return it deterministically.
-- Partial, conflicting, or ambiguous state exists, so fail closed with a structured inconsistency or recovery diagnostic.
-
-A retry must never create a second canonical PR merely because the first request already succeeded.
-
-## 9. Compensation and recovery
-
-GitHub does not provide an atomic transaction spanning ref creation and PR creation.
-
-The initial compensation model is:
+GitHub effects spanning branch and PR creation are not one atomic transaction.
+The controller therefore preserves explicit Saga and recovery behavior.
 
 ```text
-create canonical branch
-    |
-    +-- failure -> no Change issued
-    |
-    `-- success
-          |
-          v
-    create Draft PR
-          |
-          +-- success -> verify projection -> Change issued
-          |
-          `-- failure -> compensate branch creation
+create branch
+  -> definite pre-effect failure: no issuance
+  -> success: retain created generation
+       -> create Draft PR
+            -> verified pair: DRAFT
+            -> failure/unknown: reread before compensation or retry
 ```
 
-If compensation succeeds, issuance fails without leaving an orphan canonical branch.
+If current evidence proves the exact created branch is safe to compensate,
+the compensation plan can remove it conditionally. If compensation succeeds,
+issuance returns a classified failure with no orphan canonical publication.
+If unsafe, failed, or unverifiable, return RECOVERY_REQUIRED.
 
-If compensation fails, Inari reports `RECOVERY_REQUIRED` or equivalent structured failure and preserves exact evidence needed for bounded repair.
+### 9.1 Generation-safe deletion
 
-Recovery is itself governed and deterministic. Hidden cleanup that guesses caller intent is rejected.
+The existing compensation contract retains the SHA returned by branch
+creation and requires a fresh observation of the same generation. The
+provider adapter must use the available conditional deletion primitive; a
+read followed by unconditional delete is not an equivalent guarantee.
 
-Issuance compensation retains the commit SHA returned by canonical branch creation and
-plans a SHA-conditional `DELETE_BRANCH` effect. Core permits that effect only when a
-fresh branch observation still identifies the same commit generation. GitHub's REST
-Delete reference endpoint has no compare-and-delete parameter; the Actions adapter
-therefore uses GraphQL `updateRefs` with `beforeOid` and the zero OID when the
-repository node ID is available. If that provider-native primitive is unavailable or
-fails, it sends no unsafe delete request and remains in `RECOVERY_REQUIRED`.
-Confirmed absence is idempotent and may converge without a mutation. This conditional
-compensation semantics is distinct from ordinary governed Abort cleanup, whose
-canonical-branch delete effect has the lifecycle policy intended for Abort.
+The existing implementation uses GraphQL `updateRefs` with `beforeOid` and
+the zero OID when the repository node ID is available. Its safe failure is no
+unsafe deletion when the conditional primitive is unavailable or rejected.
+This is an implementation reference, not permission to introduce a second
+provider helper or weaken that check during migration.
 
-## 10. Branch authority model
+Confirmed absence can be an idempotent compensated result without mutation.
+A branch that has advanced is not automatically deleted to make issuance
+appear atomic.
 
-The initial architecture governs branch birth, not every branch update.
+### 9.2 Compensation versus abort
+
+Issuance compensation concerns the exact generation created by that failed
+issuance. Abort concerns the current canonical Change and its admitted cleanup
+policy. Their plans and evidence must not be substituted for one another.
+
+### 9.3 Unknown PR creation
+
+When PR creation may have succeeded, first reread canonical identity and
+postcondition. A timeout cannot justify deleting its branch or creating
+another PR before that ambiguity is resolved.
+
+## 10. Branch authority
 
 ### 10.1 Creation
 
-Canonical remote branch creation is issuer-controlled.
+Canonical remote branch birth is an admitted Inari effect. Repository-owned
+branch policy defines its identity; provider protection enforces the
+configured creation boundary where available.
 
-Where GitHub Rulesets can enforce `Restrict creations`, the issuer identity should be the allowed or bypass actor for the governed namespace. `src/branch-creation-ruleset.ts` and [`BRANCH_CREATION_RULESET_OPERATIONS.md`](./BRANCH_CREATION_RULESET_OPERATIONS.md) own the exact Ruleset definition, staged rollout, and rollback/recovery procedure for #223.
+`src/branch-creation-ruleset.ts` and
+[Branch Creation Ruleset Operations](./BRANCH_CREATION_RULESET_OPERATIONS.md)
+define the actual supported enforcement and rollback contract. A document or
+compiled definition is not evidence that a live Ruleset is enabled.
 
-```text
-caller creates arbitrary new remote branch -> denied
-Inari issues canonical branch             -> allowed
-```
+### 10.2 Advancement
 
-The objective is capability control rather than post-hoc naming validation.
+An Implementation updates only its admitted leaf branch and current
+head/generation under the accepted scope. The canonical `branch.advance`
+contract must not acquire permission for sibling branches, Source integration
+branches, or default-branch writes by filename or prefix similarity.
 
-### 10.2 Updates
-
-Ordinary fast-forward pushes to an already-issued working branch remain available to workers in the initial architecture.
-
-```text
-edit -> commit -> push -> edit -> commit -> push
-```
-
-The architecture explicitly rejects routing every feature-branch push through the issuer in the first version. A future policy may strengthen publication authority only if a concrete requirement justifies the added friction.
+The local edit/commit workflow and physical worktree isolation remain outside
+this domain. The target does not route every local filesystem operation
+through Inari, nor require Actions for every branch update.
 
 ### 10.3 Deletion
 
-Branch deletion is a lifecycle and governance concern distinct from creation and update. Implementation must define cleanup behavior while preserving merged or aborted Change provenance.
+Deletion is an explicit lifecycle effect with ownership and generation
+conditions. Merge cleanup, abort cleanup, and issuance compensation remain
+different purposes. None may infer permission from a stale branch name alone.
 
-Issuance compensation and Abort are separate lifecycle responsibilities:
-compensation may delete only the exact issuer-created generation, while Abort
-uses the ordinary governed cleanup effect. A branch that advanced after
-issuance is never automatically deleted by compensation.
+## 11. PR authority and provenance
 
-## 11. PR authority model
+### 11.1 Canonical publication
 
-GitHub does not provide an exact symmetric native rule equivalent to branch `Restrict creations` that makes all PR creation exclusive to one GitHub App.
-
-Canonical PR issuer control is therefore enforced semantically and at merge admission.
-
-### 11.1 Canonical PR creation
-
-The trusted executor creates the canonical Draft PR using the Inari GitHub App identity immediately after branch issuance.
-
-Humans and agents therefore have no normal need to run direct `pr create` for governed Changes.
+Executor publishes the admitted PR under Inari Access. Desired title, body,
+head/base, relationships, and provenance come from canonical semantic plans.
+The provider adapter does not invent omitted values.
 
 ### 11.2 Noncanonical PRs
 
-A user may still be technically capable of creating a PR from an existing branch. Such a PR is not canonical merely because it exists.
+Physical existence is not semantic conformance. The provenance/merge path
+checks the exact repository, publication role, Source/task relation,
+branch/base, PR identity, contract generation, authorization evidence, and
+expected proposal identity where the contract requires it.
 
-A required Change-provenance check should validate at least:
+A leaf PR names its Implementation. A Source integration PR names its Source.
+An Epic PR names its integration outcome. One relation cannot substitute for
+another simply because all use Issue numbers.
 
-- Implementation root identity and its source Issue references.
-- Canonical branch identity.
-- Canonical base branch.
-- Canonical PR identity for the Change.
-- The PR semantic `implements` relation and recognized closing reference target
-  the Implementation, not only a source Issue.
-- The current Implementation authorization digest and execution evidence.
-- Expected issuer or proposal-author identity where applicable.
-- Valid governed PR contract.
-- Absence of conflicting canonical projections.
+### 11.3 Conflicting claims
 
-A noncanonical PR may be visible but must not become merge-admissible as the governed Change.
+If multiple artifacts claim canonical identity, or a PR's body, native
+relationships, branch, and admission evidence disagree, return a bounded
+conflict. Do not repair by choosing an arbitrary artifact or silently
+reparenting Issues.
 
-```text
-physical creation prevention: not always complete
-canonical merge admission:    enforceable
-```
+## 12. Draft-at-issuance and reviewability
 
-## 12. Draft-at-issuance semantics
+Draft publication fixes the canonical proposal identity and makes active work
+observable before it becomes reviewable. The initial artifact contains only
+values that its contract can validly derive/materialize at that phase.
 
-Creating the PR as Draft at Change issuance is a central design decision.
+The ready transition requires the applicable summary, validation, acceptance,
+and canonical artifact evidence before reviewability is reported. Missing
+intent is not filled by an automated reconciler or an LLM repair heuristic.
 
-It provides these properties:
+Source integration readiness is evaluated on the composed Source candidate.
+A healthy leaf Draft/ready PR is not automatically healthy Source publication.
 
-- Issue, branch, and PR identity are fixed before implementation diverges.
-- GitHub's PR list becomes an observable list of active Changes.
-- Proposal authorship can be neutral issuer infrastructure from the beginning.
-- Review readiness becomes an explicit lifecycle transition rather than being conflated with PR creation.
+## 13. Separation of duties
 
 ```text
-Draft PR = implementation state
-Ready PR = review-admitted state
+requester       authenticated Session or remote/local subject
+proposal actor  Inari Access under Executor custody
+commit author   actual implementation provenance
+reviewer        independent admitted review identity
+merger          actor permitted by repository policy and explicit intent
 ```
 
-The initial Draft PR may contain only information derivable before
-implementation, such as the Implementation root, source/tracker references,
-target, status, and governed placeholders. Its canonical `implements` and
-closing-reference target is the Implementation; source Issues do not become
-execution authority because they are mentioned in the PR.
+The App does not approve its own PR. The initial Inari Access effect profile
+is not a review/merge grant. Existing semantic merge composition is not an
+instruction to widen the App permission set or fall back to a user's token.
 
-The `ready` transition may canonicalize or complete implementation summary, validation evidence, acceptance evidence, and other required PR semantics before changing GitHub's Draft state.
+Repository policy decides the required independence. This renewal does not
+invent a new most-recent-pusher rule or relax an existing required review.
 
-## 13. Review separation and self-review
+## 14. Authority boundaries
 
-GitHub does not allow a PR author to approve their own PR.
+The Source owns the requested outcome and acceptance. The Implementation owns
+bounded task delivery. Core owns semantic meaning. Admission owns caller and
+operation admission. Executor owns the provider-effect composition and
+credential boundary. GitHub owns observed repository state and enforcement.
 
-In this architecture, the canonical PR author represents the authority that published the proposal, not the developer who wrote the code.
+Control/Console orchestrate explicitly available owner actions. Hosted
+attests identity/eligibility and relays. No one layer silently absorbs review,
+merge, trust-root approval, or unrelated local execution authority.
+
+## 15. Human and agent interfaces
+
+CLI, MCP, and UI expose the same semantic operations with bounded structured
+input/output. Common CLI mechanics converge to CLI Canon; product operation
+meaning stays in Inari.
+
+Remote clients invoke Inari only. The public Relay URL is not shell access,
+a generic HTTP proxy, a raw GitHub operation endpoint, or a file browser.
+
+Pure rendering/validation of supplied data can run without a Session. Private
+repository reads require the applicable read admission and provider evidence;
+read-only does not mean anonymously accessible.
+
+## 16. Common execution pipeline
 
 ```text
-requester       = human or agent execution identity
-issuer          = inari-issuer[bot]
-commit author   = human or coding-agent provenance
-PR author       = inari-issuer[bot]
-reviewer        = human or independent review agent
-merger          = permitted actor under repository policy
+resolve current owner/provider evidence
+  -> normalize observation
+  -> project semantic state
+  -> authenticate and admit caller/operation
+  -> plan exact effects and preconditions
+  -> execute bounded provider effects
+  -> authoritative reread
+  -> verify expected semantic postcondition
+  -> bounded result or explicit recovery
 ```
 
-A human implementer can therefore formally review and approve an issuer-authored PR without losing implementation attribution.
+Pre-admission provider reads use an Executor-owned read capability. Admission
+receives evidence, not its token. Effect scope is chosen only from the admitted
+plan, not from the breadth of the installed App.
 
-The issuer must not approve the PR it creates.
+Governance generation, artifact observation identity, branch head, and
+credential/binding generation are separate freshness conditions.
 
-The initial architecture should not rely on a rule requiring the reviewer to differ from the most recent pusher when the intended workflow permits the human implementer to push and then perform formal review. A future stronger-independence policy must redesign update publication authority explicitly.
+## 17. Remote transport
 
-## 14. Authority separation
+The normal remote path is Hosted authentication/assertion plus Relay into the
+user-owned Runtime. Hosted verifies the caller's Inari Access user scope
+transiently and sends only the signed request-bound eligibility evidence.
 
-The architecture distinguishes these authorities.
+Runtime verifies the configured issuer, subject, repository, App/installation,
+Relay target, time, and replay/request binding, then performs its own semantic
+admission. Eligibility does not grant all write capabilities.
 
-### 14.1 Intent authority
+No independent Direct App executor or Hosted repository engine remains the
+target. Transport loss does not authorize execution elsewhere or through an
+ambient credential.
 
-The governed Issue defines requested work and accepted scope.
+## 18. Actions and workflow integration
 
-### 14.2 Semantic policy authority
+Workflow code may invoke supported public Inari contracts and supply its
+explicitly authorized transport/runtime context. It must not maintain
+parallel branch, template, relationship, lifecycle, or permission policy.
 
-Inari Core defines deterministic Change semantics, policy resolution, canonical projection rules, transition validity, and diagnostics.
+A retained Actions adapter must be a bounded adapter into the accepted
+execution architecture, not a second privileged engine preserved for
+compatibility. Historical dispatch examples remain historical evidence, not
+the normal cloud-client path.
 
-### 14.3 Request authority
+Shared workflow references follow repository governance, including the
+organization's `@main` requirement. This document does not authorize a
+consumer fork or noncanonical workflow pin as a migration shortcut.
 
-The authenticated human or agent requests a semantic transition without receiving App Principal Provider Credentials.
+## 19. Inari Access
 
-### 14.4 Issuance authority
+The App's installation credential is held only by Executor's broker. The
+broker issues the minimum repository/effect capability and does not return a
+reusable token or unrestricted authenticated client.
 
-The Inari GitHub App is the privileged mutation identity for canonical branch and PR issuance.
+The user authorization profile used by Hosted is distinct from installation
+execution. Its OAuth token is not forwarded to Runtime. Neither App identity
+nor token possession replaces semantic admission.
 
-### 14.5 Execution authority
+See [Inari Access](./INARI_ISSUER_APP.md) for detailed permission, scope,
+credential, and evidence boundaries.
 
-Workers implement code in their local or session environment and may update already-issued working branches under initial policy.
+## 20. Provenance and diagnostics
 
-### 14.6 Review authority
+A bounded result identifies the repository, Source, task/authorization where
+applicable, operation, caller profile, current governance revision,
+publication role, exact branch/head/base, Executor/App/installation, and
+verified result or recovery condition.
 
-Humans or independent review agents evaluate the proposal. They are not the issuer identity.
+Remote evidence can reference the trusted assertion issuer and request
+identity without retaining signed raw payloads. Local evidence can reference
+the Authority and Session without exposing private signing material.
 
-### 14.7 Merge authority
-
-Repository policy, Rulesets, status checks, reviews, and permitted actors determine merge admissibility and execution.
-
-No single bot should silently collapse issuer, reviewer, and merge authority into one principal.
-
-## 15. Human and agent interface
-
-GitHub App credentials are not a user interface. The caller-facing interface is a semantic Inari request surface.
-
-### 15.1 Canonical CLI
-
-The `inari` executable remains the canonical human- and agent-facing client.
-
-Candidate semantic operations include:
-
-```text
-inari change issue <issue>
-inari change show <issue>
-inari change ready <issue>
-inari change abort <issue>
-```
-
-Exact public syntax must be defined through the canonical command authority when implemented.
-
-Agents should request semantic operations, not low-level effects such as creating Git refs or pull requests directly.
-
-### 15.2 Machine-readable contract
-
-Every semantic operation intended for agent or automation use must provide deterministic structured input and output with bounded diagnostics.
-
-A successful issuance result should be capable of expressing at least:
-
-```json
-{
-  "change": 189,
-  "issue": 189,
-  "branch": "<canonical branch>",
-  "pullRequest": 123,
-  "state": "draft"
-}
-```
-
-The exact schema belongs to executable contract authority.
-
-### 15.3 GUI
-
-A dedicated GUI is not required for the initial product. GitHub already provides rich visualization of Issues, Draft and Ready PRs, review, checks, and merge state.
-
-Future human-oriented adapters may include Issue comment commands, GitHub App surfaces, or other GitHub-native controls. They must invoke the same semantic transition contract rather than implement parallel business logic.
-
-### 15.4 MCP
-
-MCP is a natural future first-class adapter for coding agents.
-
-An MCP surface should expose semantic tools such as `change.issue`, `change.show`, `change.ready`, and `change.abort`, not raw privileged GitHub mutation primitives.
-
-MCP remains a client or adapter. It does not become an alternative Change authority.
-
-## 16. Local operations versus authoritative transitions
-
-Not every Inari operation belongs in Actions.
-
-Pure deterministic operations remain local-capable, including schema discovery, validation, rendering, explain diagnostics, canonical checks, and canonical reads where privileged credentials are not required.
-
-Privileged repository transitions use a trusted execution path because they
-apply already-planned effects through the Effect Authorizer as the App
-Principal. The path may be Direct App, MCP/App, or Actions compatibility; the
-deployment profile does not change semantic execution.
-
-```text
-pure deterministic computation     authoritative repository mutation
-------------------------------     ---------------------------------
-local Inari Core                   trusted Change Executor
-```
-
-The architecture does not turn Inari into an "everything is a GitHub Action" product.
-
-## 17. Remote execution transport
-
-The historical first implementation used GitHub Actions `workflow_dispatch` or
-an equivalent GitHub-native dispatch mechanism as the remote execution
-transport. Actions remains a supported compatibility profile, not a required
-semantic or trust layer.
-
-That choice is hidden behind the semantic CLI or client surface.
-
-Bad public contract:
-
-```text
-gh workflow run inari-change.yml -f operation=issue -f issue=189
-```
-
-Desired public contract:
-
-```text
-inari change issue 189
-```
-
-### 17.1 Actions dogfood
-
-With `gh auth login` completed for the target repository, run the installed
-CLI or the package entrypoint from the repository checkout:
-
-```bash
-npx --yes gh-inari change issue 189 --repository yohn-jp/gh-inari --json
-# or: inari change issue 189 --repository yohn-jp/gh-inari --json
-inari change show 189 --repository yohn-jp/gh-inari --json
-gh pr view "$(inari change show 189 --repository yohn-jp/gh-inari --json | jq -r .pullRequest)" --json headRefName,isDraft,author
-```
-
-The first command dispatches the protected Actions deployment adapter. The
-trusted Executor keeps App Principal credentials inside the protected
-credential boundary, creates the canonical branch and Draft PR, and returns
-only the bounded Change projection. `ready` and `abort` use the same semantic
-path; no #223 ruleset enforcement is required for this historical dogfood.
-
-Workflow filename, dispatch input shape, job structure, and token-generation details are implementation concerns.
-
-The transport may later be replaced or supplemented by MCP, a GitHub App event handler, a remote service, or another executor without changing Change semantics.
-
-## 18. GitHub Actions role
-
-GitHub Actions is the compatibility Deployment Profile because it provides a
-repository-native Runtime Host, auditable Transport, secret confinement,
-repository scoping, and no separate always-on service requirement. The Runner
-is not a semantic or repository Authority; Direct App and MCP/App profiles
-must reach the same Executor and Lifecycle Controller semantics.
-
-Actions YAML must remain thin.
-
-A trusted workflow should conceptually:
-
-- Identify the requester and semantic transition.
-- Invoke Inari Core to resolve and validate a transition.
-- Obtain a short-lived GitHub App installation token in trusted execution.
-- Apply the planned effects through the GitHub adapter.
-- Verify the resulting projection through Inari Core.
-- Publish bounded structured result or evidence.
-
-The workflow must not contain an independent handwritten naming policy, PR schema, state machine, or governance rule that competes with Inari Core.
-
-## 19. GitHub App role
-
-The Inari GitHub App is the App Principal for provider access, not a frontend,
-repository Authority, Session Authenticator, or semantic Executor.
-
-It provides least-privilege, auditable, short-lived mutation capability for trusted execution.
-
-Human and agent clients must not receive:
-
-- The GitHub App private key.
-- Installation tokens.
-- Reusable privileged bearer credentials.
-- Direct capability to impersonate the issuer outside trusted execution.
-
-App permissions are limited to effects required by the implemented transition set and expanded only for explicit capabilities.
-
-## 20. Requester authentication and provenance
-
-Requester identity and mutation identity are intentionally different.
-
-The CLI should continue using the caller's existing GitHub authentication context rather than introducing a second long-lived credential store merely for Inari.
-
-The system must preserve enough identity to answer both of these questions:
-
-- Who requested this transition?
-- Which authority applied the governed effect?
-
-Provenance should distinguish at least:
-
-- Repository, source Issue references, and the Implementation root.
-- Current Implementation authorization identity and governed body digest.
-- Requested transition.
-- Requester identity.
-- Request source or client class where useful.
-- Issuer identity.
-- Resulting canonical branch and PR.
-- Governance generation or contract identity where applicable.
-- Workflow or execution evidence sufficient for audit.
-- Implementation commit provenance.
-- Review and merge actors.
-
-No single author field should collapse these roles.
+Diagnostic categories distinguish resolution, trust, Session/subject
+admission, planning, provider effect, reread, and verification failures.
+A generic transport success must not erase a downstream denied/failed result.
 
 ## 21. Security model
 
-The privileged boundary is the trusted executor plus GitHub App credentials.
+### 21.1 Trusted code and credentials
 
-### 21.1 No privileged credentials in untrusted execution
+Provider credentials never enter untrusted agent shells, fork jobs,
+PR-controlled execution, browser storage, Relay payload persistence, or
+retained certification evidence. A trusted executor must not load arbitrary
+repository-controlled code under its App credentials.
 
-App private keys and installation tokens must not be exposed to arbitrary coding-agent shells, PR jobs, fork code, or untrusted repository content.
+### 21.2 Protected authority sources
 
-### 21.2 Do not execute untrusted PR code with App Principal Provider Credentials
+Trust, policy, and privileged execution definitions require their repository
+protection. An agent-controlled working branch is not an authority source.
+A broad WRITE scope does not permit self-escalation through those paths.
 
-A privileged workflow must not check out and execute arbitrary PR-controlled code under App Principal Provider Credentials merely because a PR event triggered it.
+### 21.3 Least privilege
 
-Unsafe `pull_request_target`-style trust patterns are rejected unless the trust boundary is explicitly proven.
+Publication does not imply administration, secret management, review, or
+merge authority. Provider permission names are not semantic capabilities.
 
-### 21.3 Protect the authority path
+### 21.4 Fail-closed behavior
 
-If untrusted code can modify the privileged workflow or the code it executes, the issuer boundary is meaningless.
+Unknown identity, stale evidence, missing authorization, unreadable policy,
+conflicting publication, or unsafe compensation is a bounded denial/recovery
+result, not an invitation to try a broader credential.
 
-Privileged workflow definitions, canonical Inari execution dependencies, App configuration, and governance files that define issuer behavior must receive protection appropriate to their privilege.
+### 21.5 Hosted trust
 
-Exact enforcement may use CODEOWNERS, required review, required checks, Rulesets, immutable reusable workflow references, or equivalent mechanisms.
-
-### 21.4 Least privilege
-
-Issuance authority does not imply review approval authority, administration authority, arbitrary secret access, or unrestricted repository mutation.
-
-### 21.5 Fail closed
-
-When requester authorization, governance generation, canonical identity, or resulting projection cannot be proven, privileged mutation does not proceed by guessing.
+A configured Hosted signer is trusted for attested identity/eligibility facts.
+Its signature does not prove an honest issuer or supply missing Runtime
+subject authorization. A malicious signer is a threat explicitly described
+in [Caller Authentication](./AGENT_CAPABILITY_AUTHORIZATION.md).
 
 ## 22. State derivation and drift
 
-Change reconstruction must be deterministic from governed GitHub evidence.
+A reader deterministically distinguishes absent/unissued publication, one
+healthy active Change, terminal historical state, and conflicting or
+unavailable evidence. It does not treat provider unavailability as absence.
 
-A compliant reader should be able to derive whether Issue #N has:
+Observation describes evidence; semantic projection interprets it with
+current Canon. Reconciliation produces a bounded plan, not immediate provider
+mutation. A stale artifact or changed generation invalidates a previous plan.
 
-- No active Change.
-- One healthy canonical Change.
-- A merged or aborted historical Change.
-- Ambiguous or conflicting projections requiring attention.
+## 23. Ready admission
 
-If multiple candidate PRs or branches plausibly claim canonical identity and no deterministic authority resolves them, Inari reports ambiguity rather than choosing heuristically.
+Before ready, verify as applicable:
 
-This extends Inari's existing canonical-read and fail-closed principles.
+- selected Source and task authority remain current;
+- canonical publication role, branch/base, PR and provenance agree;
+- the PR semantic contract is valid/current or can be safely reconciled;
+- required implementation, validation, and acceptance evidence exists;
+- no unresolved projection drift or unsafe partial state remains.
 
-## 23. Ready transition
-
-`ready` is a governed Change transition, not merely an alias for a GitHub API call.
-
-Before moving Draft to Ready, Inari validates the relevant transition preconditions, including as applicable:
-
-- Root Issue remains governed and valid.
-- Canonical branch identity remains correct.
-- Canonical PR identity and issuer provenance remain correct.
-- Target base remains valid.
-- PR semantic contract is canonical or can be deterministically synchronized.
-- Required implementation, validation, and acceptance evidence is present under repository policy.
-- No unreconciled Change projection drift exists.
-
-After successful validation, the trusted executor changes the PR to Ready and verifies resulting state.
+Apply the admitted ready effect and reread REVIEW. A GitHub UI draft toggle
+outside these checks is not proof that those conditions hold.
 
 ## 24. Merge admission
 
-Inari does not replace GitHub Rulesets, required checks, or review policy. The Change architecture composes with them.
+Merge requires explicit caller intent, exact current PR/head/base identity,
+canonical provenance, required checks/reviews, and repository merge policy.
+Change composition delegates policy and provider work to the existing
+Semantic PR merge authority; it does not implement another merge engine.
 
-```text
-canonical Change provenance
-          +
-repository CI and security checks
-          +
-required reviews
-          +
-repository merge policy
-          =
-merge admission
-```
+A semantic transition is not an App credential grant. If the selected
+execution boundary cannot lawfully perform merge, it returns a bounded
+unsupported/denied result or the existing external human action, never an
+implicit user-token fallback.
 
-The governed `change merge` semantic operation coordinates the canonical Change
-PR through the existing Semantic PR merge authority, but it must not bypass
-repository-native admission policy.
+`MERGED` is reported only after authoritative reread. Source or Epic closure
+remains its own acceptance decision and cannot be inferred from one leaf merge.
 
 ## 25. Product boundaries
 
-### 25.1 Inari
+Inari owns repository contracts, canonical publication, semantic lifecycle,
+provenance, admission, and bounded provider planning/execution.
+Nawabari owns local worktree/process/filesystem isolation.
+Mottainai owns agent scheduling and context orchestration.
+Wabachi may provide design/architecture evidence without taking over Inari
+lifecycle. Verification projections do not make another product the Source
+completion authority.
 
-Inari owns governed GitHub Change semantics, including:
+## 26. Compatibility
 
-- Issue and PR semantic contracts.
-- Change identity.
-- Canonical remote branch projection.
-- Issuance, ready, abort, and merge-admission semantics.
-- GitHub-side provenance and governance validation.
-- Authoritative transition planning.
+Compatibility is directional: old data may be interpreted by an explicit
+versioned reader and adopted only when identity and semantics are proven.
+An old execution architecture is not retained merely because its serialized
+format still needs to be read.
 
-### 25.2 Nawabari
+Direct App selection and independent Hosted semantic/provider execution are
+retired. Shared Core and effect helpers remain when the canonical Executor
+uses them. No migration silently destroys user keys, owner state, active
+Sessions, or historical provenance.
 
-Nawabari owns local Git, worktree, session isolation, ownership, and physical execution safety.
+## 27. Convergence sequence
 
-Inari may provide Nawabari the canonical remote branch identity. It does not take ownership of Nawabari's local worktree or session model.
+Freeze Source/task/publication identity before changing consumers. Establish
+current common Admission and owner binding. Route local and remote inputs to
+the same semantic operation composition. Prove standalone and Issue/Epic
+integration publication independently.
 
-### 25.3 Mottainai
+Preserve the existing Saga, ready, abort, and merge-policy contracts while
+replacing only their obsolete identity/transport composition. Remove old
+execution entry points after replacement public-path proof. Enable live
+provider enforcement only after the governed path and recovery are verified.
 
-Mottainai owns agent orchestration, task delegation, context, and execution coordination.
+## 28. Verification matrix
 
-Mottainai may request or consume an Inari Change. It does not define Change naming, PR provenance, or repository governance semantics.
+The required proof classes include:
 
-The intended flow is:
+- absent, existing healthy, duplicate, and conflicting publication;
+- two sibling Implementations under one Source without identity collision;
+- multiple Sources without implicit primary or arbitrary PR base;
+- stale/removed Source, changed authorization digest, and wrong branch/head;
+- successful branch plus failed/unknown PR creation;
+- safe conditional compensation and advanced-branch preservation;
+- ready/no-op/invalid readiness;
+- normal abort, partial cleanup, unsafe recovery, and already-aborted retry;
+- exact-head merge admission and denied provider authority;
+- local and remote admission parity with bounded diagnostic preservation;
+- installed public-path composition and separate live enforcement proof.
 
-```text
-Issue
-  |
-  v
-Inari issues Change
-  |
-  +--> canonical branch + Draft PR
-  |
-  v
-Nawabari establishes local execution session/worktree
-  |
-  v
-Mottainai or coding agent implements
-  |
-  v
-Inari validates ready transition
-  |
-  v
-review / checks / merge policy
-```
+Unit/graph proof does not establish packed or live behavior. Revision-bound
+artifact reuse and distinct suite ownership are described in
+[Verification Architecture](./VERIFICATION_ARCHITECTURE.md).
 
-## 26. Existing behavior and compatibility
+## 29. Rejected shortcuts
 
-Inari currently provides direct governed Issue and PR mutation commands through the local CLI.
+Do not use a new Change for every newly opened Issue, a private lifecycle
+database, branch names as parentage authority, a second Hosted executor,
+a blanket App grant for every visible repository, unconditional cleanup,
+workflow-local semantic policy, or a user credential fallback to make an
+unsupported effect succeed.
 
-The new architecture is introduced incrementally rather than breaking all existing callers immediately.
+Do not flatten Source, task, leaf PR, integration PR, and Session into one
+identity solely to simplify a validator.
 
-Migration may temporarily support both current direct artifact-level mutation
-operations and new authoritative Change transitions. Compatibility is
-directional: the long-term governed implementation workflow converges on
-Implementation authorization followed by Change issuance rather than
-preserving two equivalent canonical ways to create the same branch and PR
-lifecycle.
+## 30. Architecture amendment and completion
 
-Historical Issue-rooted Changes remain readable and recoverable using their
-original root, branch, PR, and lifecycle evidence. They are not upgraded by
-matching a source Issue or by a prose `Parent:` line. A caller that asks to
-continue such work as Implementation-native must supply fresh evidence for a
-new Implementation-rooted Change; missing, mixed, or contradictory evidence
-is a fail-closed compatibility result.
+This document is subordinate to the Product Architecture Canon. Implementation
+workers may refactor internal functions and actor wiring within these
+contracts, but may not alter identities, permission/custody, cleanup safety,
+compatibility, or public failure meaning without architecture-owner approval.
 
-Existing branch-preflight capabilities remain useful as compatibility and diagnostic behavior. The target architecture moves canonical branch identity earlier, from validating a caller-chosen branch before PR creation to deriving and issuing the canonical branch as part of Change creation.
-
-## 27. Migration strategy
-
-Implementation begins only after this architecture is merged and the
-Implementation-native lifecycle is decomposed into bounded Issues.
-
-The dependency order is:
-
-- Define the Implementation-native identity binding before widening downstream
-  Change/Session behavior: Implementation authorization, Change root, Session
-  task/capability, branch, PR relation, execution evidence, and source
-  terminalization.
-- Preserve the existing machine-readable Change identity, state, transition
-  requests, transition plans, and diagnostics in Inari Core, with historical
-  Issue-rooted compatibility kept explicit.
-- Add deterministic Change read and projection from governed GitHub evidence.
-- Define issuance planning, idempotency, conflict detection, and recovery semantics independent of transport.
-- Establish the least-privilege GitHub App issuer boundary.
-- Implement the trusted Actions executor as a thin projection of Inari Core plans.
-- Add the CLI remote-request adapter while hiding workflow transport details.
-- Enable branch-creation enforcement only after the issuer path is proven and recoverable.
-- Enforce canonical Draft PR provenance and merge admission.
-- Add governed ready and abort transitions.
-- Add MCP or GitHub-native adapters only as projections of the same semantic contract.
-- Roll out repository-by-repository after dogfooding proves recovery and operational usability.
-
-This ordering establishes semantics before privileged automation.
-
-## 28. Explicit non-goals
-
-The initial architecture does not include:
-
-- Making Issue creation issuer-only.
-- Routing every working-branch push through Actions.
-- Exposing GitHub App credentials directly to agents or humans.
-- Making the App Principal approve its own PRs.
-- Replacing GitHub with a proprietary Change database.
-- Creating a standalone always-on HTTP service before it is needed.
-- Requiring a custom Web GUI.
-- Making workflow YAML the semantic source of truth.
-- Embedding Mottainai orchestration semantics into Inari.
-- Owning Nawabari's local worktree or session lifecycle.
-- Using LLM or free-form inference to determine canonical governance state.
-- Weakening fail-closed behavior to recover from ambiguous GitHub state automatically.
-- Fixing final command spelling or wire transport in architectural prose before executable contracts are designed.
-
-## 29. Rejected alternatives
-
-### 29.1 Keep Inari as a local direct-mutation CLI
-
-Rejected because publication authority remains distributed and privileged issuer identity would have to be exposed to every execution environment.
-
-### 29.2 Route every push through Actions
-
-Rejected for the initial architecture because it would make the ordinary edit, commit, and push loop unnecessarily expensive and slow.
-
-### 29.3 Make GitHub Actions the product authority
-
-Rejected because workflow YAML would become a second business-logic contract,
-compete with Core/Lifecycle Controller semantics, and lock Inari to one
-deployment profile.
-
-### 29.4 Expose the GitHub App directly to agents
-
-Rejected because App credentials are privileged capability, not a caller interface.
-
-### 29.5 Build a dedicated GUI first
-
-Rejected because agents require deterministic machine interfaces and GitHub already provides state visualization.
-
-### 29.6 Build a standalone HTTP service first
-
-Rejected because Actions can provide the initial trusted remote boundary without additional server operations.
-
-### 29.7 Create a Change whenever an Issue opens
-
-Rejected because backlog Issues should remain inert. Change issuance represents work beginning, not intent merely existing.
-
-### 29.8 Persist a separate Change database immediately
-
-Rejected because duplicated lifecycle state creates drift before a need for separate persistence has been demonstrated.
-
-## 30. Architectural consequences
-
-The existing Inari principle is:
-
-```text
-semantic contract
-   -> validate
-   -> canonical projection
-   -> governed mutation
-```
-
-The extended principle is:
-
-```text
-semantic Change
-   -> validate transition
-   -> canonical effect plan
-   -> privileged governed mutation
-   -> verify GitHub projection
-```
-
-Issue Forms and PR templates remain repository-contract projections for their
-artifacts; the Semantic Artifact Core owns their deterministic interpretation.
-Change composes those contracts into a lifecycle rather than replacing them.
-
-The largest operational consequence is that a dedicated trusted execution path and GitHub App become part of Inari deployment.
-
-The largest product benefit is that branch naming, proposal authorship, and lifecycle publication stop depending on every human or coding agent voluntarily reproducing governance rules.
-
-## 31. Review gate
-
-Before implementation decomposition, reviewers should be able to answer yes to all of these questions:
-
-- Is `Change` clearly distinct from Issue, branch, and PR while being deterministically projected through them?
-- Is source Issue -> Implementation -> Change cardinality unambiguous for new
-  execution, with historical Issue-rooted compatibility explicit and
-  fail-closed?
-- Does one current Implementation authorization digest bind the Change root,
-  Session task/capability, branch, PR relation, execution evidence, and
-  conformance?
-- Can two Implementation children of one source Issue be proven unable to
-  alias one Change, branch, PR, or Session execution identity?
-- Does the canonical PR relation/closing reference target the Implementation
-  rather than a broader source Issue?
-- Are abort, supersession, completion, review rework, merge, and explicit
-  source terminalization identities specified without adding a second
-  lifecycle authority?
-- Is branch creation authority separated from ordinary branch update authority?
-- Is canonical PR provenance enforceable even though GitHub cannot prevent every manual PR creation?
-- Is Draft-at-issuance justified as lifecycle state rather than automation convenience?
-- Can an implementation author formally review an issuer-authored PR without erasing commit provenance?
-- Are requester, issuer, implementer, reviewer, and merger identities distinct?
-- Are Core semantic Roles and the Lifecycle Controller clearly separated from
-  the Actions deployment profile and App Principal/Effect Authorizer?
-- Can humans and agents use the same semantic request model without a GUI dependency?
-- Are App credentials confined to trusted execution?
-- Are issuance retries idempotent?
-- Are partial failures compensated or surfaced explicitly as recovery-required?
-- Does the initial architecture avoid a duplicate Change database?
-- Are Nawabari and Mottainai boundaries preserved?
-- Is migration staged so enforcement is enabled only after the governed path is proven?
-
-If any answer is unclear, implementation Issues must not invent missing policy independently. The architecture must be amended first.
-
-## 32. Epic relationship
-
-This document implements the documentation gate in Epic #188 through Issue #189.
-
-After this document is merged, Epic #188 is decomposed into independently executable implementation Issues derived from this architecture. The Epic remains the roadmap and tracking authority. This document remains the architectural boundary authority. Executable schemas, validators, tests, Rulesets, and command metadata remain the mechanical authorities for their respective contracts.
+Completion requires the contracts above to hold on the exact composed
+candidate and at the advertised public/provider boundaries. This renewal
+establishes the target; it does not close any Issue or certify deployment.
