@@ -1,101 +1,57 @@
 ---
 name: inari
 description: |
-  Governed GitHub Issue, pull request, Change, and template workflows for this
-  repository. Use when creating or editing an Issue/PR that must satisfy
-  repository governance, or when inspecting/repairing an existing Issue/PR's
-  governance state. Prefer this over raw `gh` for those operations.
+  Route governed GitHub Issue, pull request, template, and Change work to
+  Inari's canonical contracts and installed guidance, subject to repository
+  execution policy. Use when authoring or inspecting governed artifacts.
 ---
 
 # Inari
 
-Inari (`inari`, installed from the `gh-inari` npm package) is this
-repository's governed GitHub CLI. It turns Issue Forms and pull request
-templates into deterministic typed contracts, validates structured input,
-renders canonical Markdown, and mutates GitHub only after contract,
-input, and rendered artifact have all passed validation.
+Inari (`inari`, from the `gh-inari` package) exposes deterministic repository
+contracts and bounded governed operations. `gh-inari` is the same public
+executable's npm alias, not a separate execution engine.
 
-`inari` is the canonical executable for agents and humans. `gh-inari` is the
-direct npm package alias; both resolve to the standalone Inari entrypoint.
+## Start with repository authority
 
-## When to use
+Read the repository's AGENTS and applicable execution policy first. An active
+restriction or suspension of Inari invocation takes precedence over the
+operational examples here. This Skill never grants permission to bypass it.
 
-Prefer `inari` over raw `gh` for:
+For this repository, [Product Architecture Canon](../../docs/ARCHITECTURE.md)
+owns the target and [Implementation Contract](../../docs/IMPLEMENTATION_CONTRACT.md)
+owns bounded task/Source relationships. Architecture changes require explicit
+owner/design-review approval; implementation choices stay within the accepted
+contract.
 
-- Creating a governed Issue or PR (schema, validate, render, create).
-- Reading the governance classification of an existing Issue or PR.
-- Bounded discovery of existing Issues or pull requests by state, page, limit,
-  and (for pull requests) exact head/base branch.
-- Repairing an invalid or non-normalized Issue or PR.
-- Reconciling an existing Issue's native parent (sub-issue) or blocked-by
-  relationships instead of hand-editing relationship prose.
-- Syncing semantic template contracts to their GitHub-native projections.
-- Issuing, inspecting, reviewing, or stopping a governed Change through the
-  semantic Change command surface.
+## Route to current guidance
 
-Raw `gh` remains the direct tool for anything outside that surface (e.g.
-project searching, commenting, or other operations Inari does not govern).
-For bounded Issue/PR discovery, use Inari's `issue list` and `pr list`
-commands. Inari rejects commands it does not own and never forwards caller
-argv to another executable.
+When repository policy permits Inari invocation, use installed `inari skill`
+and `inari skill <scenario>` for the versioned operational playbook, and
+`inari <domain> --help` for exact current grammar. Do not copy a static
+subcommand list, invent flags, or assume the latest target is implemented in
+an older package.
 
-## Issue versus Implementation
+Relevant workflows include governed artifact schema/validation/rendering,
+creation, bounded observation/discovery, semantics-preserving reconciliation,
+native relationship handling, and template synchronization.
 
-An ordinary Issue is a problem, request, or decision record. Keep ordinary
-Issue authoring lightweight; do not require session path scopes, branch/base
-binding, targeted checks, postconditions, or authorization before the Issue is
-ready to exist.
+An ordinary Issue describes intent/outcome. An Implementation separately owns
+task scope, base/branch, dependencies, verification, and authorization.
+Source Change, task, Session, leaf PR, and integration PR are not one identity.
 
-When a concrete implementation session is being prepared, create a separate
-Implementation Issue with the governed template:
+## Preserve boundaries
 
-```bash
-inari issue create --template implementation
-```
+Interfaces use the same Core and admitted owner ports. Hosted authenticates
+and relays, not a second semantic/provider engine. Remote access gives no
+shell, raw provider proxy, user-token forwarding, or automatic App write grant.
 
-The Implementation owns the one-session objective, selected design, explicit
-scope, constraints, verification, and execution dependencies. Use the
-normative [Issue and Implementation governance contract](../../docs/IMPLEMENTATION_CONTRACT.md)
-for the lifecycle and relationship rules.
+Do not manufacture a capability for a read, infer parentage from branch names,
+weaken protected paths, or report provider/transport success as verified
+semantic completion. Use the canonical bounded diagnostic/recovery result.
 
-The current `impl` namespace has exactly these operations:
+## End at the requested lifecycle
 
-```text
-inari impl plan <number>
-inari impl show <number>
-inari impl validate <number>
-inari impl authorize <number>
-inari impl inspect <number>
-```
-
-`plan` is a non-authoritative preview, `show` and `inspect` project current
-state, `validate` is non-mutating validation, and `authorize` produces the
-existing Core authorization evidence without a GitHub mutation. Each command
-uses the current metadata options `--repository <repository>`, `--from
-<path>`, and repeatable `--capability <id>` (with global `--help` and `--json`
-controls). There is no `impl create`, `impl edit`, `impl start`, `impl complete`,
-or `impl ready` command.
-
-Where GitHub supports native parent/sub-issue relationships, use that provider
-relationship as canonical for the Issue hierarchy. A prose `Parent:` or
-`Parent Epic:` line is compatibility guidance for older artifacts only; it
-does not authorize or trigger historical reparenting.
-
-## How to proceed
-
-Do not guess the workflow steps or flags here. Ask Inari directly:
-
-```bash
-inari skill              # list bounded operational playbooks (scenarios)
-inari skill <scenario>   # print one playbook's exact workflow and invariants
-inari issue --help       # exact Issue subcommand syntax
-inari pr --help          # exact PR subcommand syntax
-inari change --help      # exact Change subcommand syntax
-inari template --help    # exact template subcommand syntax
-```
-
-`inari skill` is the authoritative, versioned source for scenario playbooks
-(authoring an Issue/PR, inspecting governance state, repairing an invalid
-artifact, and related flows). This file intentionally does not duplicate
-those playbooks or any leaf-command flags — they drift independently of this
-static file, so always resolve them live through the commands above.
+Read-only audit/review does not authorize edits. PR publication does not
+authorize merge or Issue closure. Report exact candidate and executed checks;
+pending, stale, blocked, and not-run evidence are not pass.

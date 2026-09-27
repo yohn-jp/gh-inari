@@ -1,6 +1,7 @@
-# Inari Access GitHub App profile
+# Inari Access GitHub App Profile
 
-This document is the canonical public profile copy for the Inari GitHub App.
+Canonical public profile copy for the Inari GitHub App. Detailed contracts are
+in [Inari Access](./INARI_ISSUER_APP.md).
 
 ## App name
 
@@ -10,44 +11,43 @@ This document is the canonical public profile copy for the Inari GitHub App.
 
 **Governed GitHub access for AI agents and automated runtimes.**
 
-Inari Access is the GitHub App used by Inari to perform explicitly authorized
-repository operations without giving agents or runtimes a reusable GitHub
-credential.
+Inari Access supplies the GitHub identity used by Inari for explicitly
+authorized repository operations without giving agents reusable GitHub
+credentials.
 
-### What it does
+## What it does
 
-Inari separates **intent**, **authorization**, and **execution**. Repository
-policy and Inari determine which operation is allowed; Inari Access provides
-the GitHub identity used to perform the resulting authorized operation.
+Inari separates intent, caller authentication, authorization, and execution.
+Repository policy and Inari determine permission. Inari Access supplies the
+bounded provider identity for the admitted operation.
 
-The App is used to:
+The App supports repository evidence reads and authorized branch/pull-request
+publication lifecycle. Installation is the GitHub-side permission ceiling,
+not a grant for every caller to exercise it.
 
-- read repository evidence required for authorization;
-- obtain short-lived, repository-scoped GitHub credentials inside Inari's
-  trusted runtime;
-- create and delete governed branches;
-- create, mark ready, or close governed pull requests; and
-- apply only the GitHub permissions required for the authorized operation.
+## Credential boundaries
 
-### Security model
+App private keys and installation credentials stay inside the user-owned
+Executor. Agents do not receive them.
 
-Inari Access is deliberately not a general-purpose GitHub credential for an
-agent.
+The approved remote target uses this App's user authorization profile at
+Hosted. Hosted verifies caller and repository eligibility transiently and
+relays a signed bounded assertion, not the user token. User authentication
+and installation execution retain separate credential custody.
 
-Credentials are scoped to the selected repository and operation, remain
-inside the trusted credential boundary, and are discarded after use. Agents
-do not receive the App private key or installation access tokens.
+This target must be implemented and certified before advertised as deployed
+capability. It does not introduce a separate Identity App or Hosted provider
+execution service.
 
-The App does not approve reviews or merge pull requests. Human review,
-repository protection, and merge policy remain independent authorization
-boundaries.
+## Independent review
 
-### Why install it?
+The initial App effect profile does not approve or merge PRs. Human review,
+repository protection, and merge policy remain independent. Commit authorship
+is distinct from App proposal publication.
 
-Install Inari Access on repositories where Inari should be able to execute
-governed GitHub operations. Installation defines the GitHub-side permission
-ceiling; Inari's own authorization model further constrains which operations
-may actually be performed.
+## Why install it?
 
-For the implementation and trust-boundary contract, see
-[Inari App Principal and Effect Authorizer](./INARI_ISSUER_APP.md).
+Install Inari Access on repositories where Inari should perform governed
+operations. A dedicated App separates App-key custody per repository;
+explicit manual/shared App use remains supported through the same verified
+binding model without per-repository key copies.

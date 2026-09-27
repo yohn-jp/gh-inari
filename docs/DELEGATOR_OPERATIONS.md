@@ -1,108 +1,94 @@
-# Delegator operations runbook
+# Delegator Operations Runbook
 
-This is the operator runbook for the Delegator lifecycle. It is
-subordinate to and must be read with the normative
-[Agent Capability Authorization architecture](./AGENT_CAPABILITY_AUTHORIZATION.md),
-especially sections 5–7, 12, and 18–19. It does not define another key,
-trust, Session, or capability schema.
+Status: operator procedure under [Product Architecture Canon](./ARCHITECTURE.md)
+and [Caller Authentication](./AGENT_CAPABILITY_AUTHORIZATION.md).
 
-The public CLI and repository artifacts still contain compatibility names from
-the Runtime Authority contract. Those stable names are called out explicitly
-in the compatibility inventory at the end of this runbook.
+This runbook preserves key generation, trust publication, readiness, rotation,
+revocation, backup, and recovery. Runtime Authority is the existing public/wire
+name for the Delegator. Terminology changes do not rewrite committed records,
+signatures, paths, or diagnostics.
 
-## Operating model
+Examples describe existing product operations. Use installed Help for exact
+syntax and obey the active organization policy for who may invoke them.
+Documentation does not remove the current agent-use suspension.
 
-The supported lifecycle is:
+## 1. Operating model
 
 ```text
-local key generation
-  -> canonical public record construction
-  -> local materialization for a governed trust-root change
-  -> Delegator Governance PR and protected-ref merge
-  -> per-runtime (authority id, private key) provisioning
-  -> canonical protected-ref readiness probe
-  -> initiating Runtime signing and bounded Change request
+Authority-owned key generation or exact-identity adoption
+  -> canonical public trust record
+  -> operator-controlled trust-root worktree
+  -> governed trust publication
+  -> independent human review and protected-ref merge
+  -> protected-ref reread and signer readiness
+  -> bounded local delegation or admitted provenance signing
   -> overlap rotation or governed revocation
 ```
 
+Authority may prepare private custody before repository trust exists. That
+preparation does not authorize delegated work before trust/readiness succeed.
+Requiring execution readiness to enroll the first key would create a bootstrap
+cycle.
+
+The protected canonical ref is the repository trust source. A working branch,
+local file, matching secret, or healthy process is not trust.
+
+## 2. Formats and custody
+
+The current signing key is Ed25519 with PKCS#8 PEM private representation.
+Private files use the owner storage contract, including restrictive ownership,
+`0600` files and private `0700` directories where those modes apply.
+
+The public JWK contains only `kty`, `crv`, and `x`. The public fingerprint is
+diagnostic identity data, not a replacement for current trust. Private JWK
+`d` must never enter a public record.
+
+The public record remains:
+
 ```text
-protected main: .github/inari/authorities/*.json (public trust)
-                         |
-                         v
-Runtime A: (authority id A, private key A)
-Runtime B: (authority id B, private key B)
-                         |
-                         v
-       initiating Runtime signed bounded provenance record
-                         |
-                         v
-trusted executor: read signature.kid and resolve matching public record
+.github/inari/authorities/<authority-id>.json
 ```
 
-The repository's protected default branch is the trust root. A working branch,
-local checkout, or deployment secret is not authority by itself.
+It contains public identity, active/disabled status, validity, maximum Session
+TTL, and semantic capability ceiling. Exact versioned schema and canonical
+serialization remain in the Delegator implementation.
 
-## Formats and ownership
+Authority custody is Authority-ID-scoped in the multi-identity target.
+Repository configuration references public ID/fingerprint only. A shared
+Authority may be trusted independently by multiple repositories without
+copying its key into repository directories.
 
-- Delegator keys are Ed25519. The private key is PKCS#8 PEM and is a long-lived
-  Runtime/signer secret. The compatibility default local path is
-  `~/.config/inari/runtime-authority.pem`; generated files use owner-only
-  permissions (`0600`) in private directories (`0700`).
-- The public key is a JWK containing only `{ "kty": "OKP", "crv":
-"Ed25519", "x": "..." }`. `x` is unpadded base64url Ed25519 public-key
-  material. It is safe to publish in the trust record.
-- The canonical public record is
-  `.github/inari/authorities/<authority-id>.json`. It includes the key,
-  active/disabled status, validity window, `maxSessionTtlSeconds`, and the
-  semantic `capabilityCeiling`.
-- The authority ID (`kid`) is a stable lowercase identifier. The public
-  identity fingerprint printed by Inari is `sha256:` over the canonical public
-  JWK; it is diagnostic identity data, not a replacement for repository trust.
+The compatibility path `~/.config/inari/runtime-authority.pem` may remain a
+verified adoption input. It is not a cross-component binding or permission to
+bypass the owner store.
 
-The Delegator private key belongs only to the Runtime/signer trust domain. It is
-never an App credential, GitHub credential, Session credential, or Agent
-credential. The signer may hold it transiently to produce a signature. The
-executor receives only the signed record and resolves the public key from the
-canonical protected ref.
+A Delegator key is not an App key, user token, Session key, Control mTLS key,
+or Relay transport key. Executor receives signed evidence/public identity,
+never this private material.
 
-For fresh Change issuance, the initiating Runtime creates this record with its
-own `(authority id, private key)` pair and includes the resulting
-`signedProvenanceRecord` in the bounded Change request. The executor never
-creates a replacement record or derives an authority ID from deployment
-configuration.
+## 3. Existing explicit CLI operations
 
-## CLI surface
-
-These are the current command-contract commands. Add `--json` for bounded
-machine-readable output.
+These are product reference examples, not instructions for an agent to ignore
+repository governance:
 
 ```sh
-# Generate a local keypair. This never writes repository trust.
 inari authority generate --private-key runtime-a.pem --json
 
-# Construct the canonical public record from that key; no JWK hand-editing.
 inari authority bootstrap \
   --private-key runtime-a.pem \
-  --authority-id runtime-a-2026-09 \
+  --authority-id runtime-a \
   --output runtime-a-authority.json \
-  --not-before 2026-09-13T00:00:00Z \
   --max-session-ttl-seconds 7200 \
   --capability change.implement \
   --capability change.ready \
   --json
 
-# Materialize the public record in the local trust-root worktree.
 inari authority register --from runtime-a-authority.json --json
-
-# Add a distinct active record during overlap rotation.
 inari authority rotate --from rotation.json --json
+inari authority revoke runtime-a --json
 
-# Disable an exact existing record; this is idempotent and does not delete it.
-inari authority revoke runtime-a-2026-09 --json
-
-# Verify a local signer key against canonical protected-ref trust.
 inari authority readiness \
-  --authority-id runtime-a-2026-09 \
+  --authority-id runtime-a \
   --private-key runtime-a.pem \
   --probe-issue 522 \
   --session-ttl-seconds 7200 \
@@ -110,83 +96,70 @@ inari authority readiness \
   --json
 ```
 
-`authority bootstrap` writes one canonical Delegator public record to `--output` and
-reports that repository trust and deployment binding were unchanged. It
-accepts exactly one of `--private-key` or `--public-key`; the latter reads an
-explicit public JWK. `--not-after` is optional and omitted means `null`. The
-bootstrap output must remain outside `.github/inari/authorities`; use
-`authority register` for the explicit local trust-root materialization step.
+Select actual probe Issue, validity, and capabilities for the target. An
+example Issue number is not operational authorization.
 
-`authority generate`, `bootstrap`, `register`, `rotate`, and `revoke` do not
-open, merge, or mutate a GitHub PR and do not write a GitHub Environment.
+Bootstrap accepts exactly one admitted private-key or public-key input and
+writes a canonical public record outside the trust directory. Register is
+the explicit local materialization step. Omitted supported `notAfter` retains
+the existing null representation, not an exemption from Session TTL checks.
 
-## First bootstrap from zero trusted authorities
+Generate/bootstrap/register/rotate/revoke do not themselves approve, merge,
+or mutate a GitHub PR, configure an Environment, or establish trust. Setup
+publication is a separate owner-authorized action.
 
-Use an operator-controlled worktree based on the current protected default
-branch. The first public key has no authority until its record is merged.
+## 4. First bootstrap
 
-1. Generate the private key locally with `authority generate`. Keep the file
-   under Runtime-owner control and make an encrypted offline backup before
-   continuing.
-2. Run `authority bootstrap` with an operator-selected ID, validity window,
-   TTL ceiling, and explicit semantic capability ceiling. Inspect the resulting
-   public record and its `sha256:` fingerprint.
-3. In the dedicated trust-root worktree, run `authority register --from` on
-   the prepared record. Review the exact diff. Only the public record may be
-   committed; the private PEM must remain outside repository contents.
-4. Push the trust-root branch and open the repository's governed PR. Use
-   `inari pr schema` / `inari pr create` for the repository-native PR contract
-   where those commands are used. The existing `Runtime Authority Governance`
-   check name and
-   an independent human approval are required by the repository Ruleset.
-5. Do not configure the signer secret before the trust-root PR is merged. After
-   merge, confirm the record exists on the protected default branch, is active,
-   and is within its validity window.
-6. Provision the initiating Runtime with this authority's exact `(authority
-id, private key)` pair and run readiness from that Runtime's secure
-   environment. Readiness must be `state: "ready"` before fresh Change
-   issuance or dogfood. Do not configure the pair as repository-wide Change
-   executor settings.
+Start from the current protected default branch in an operator-owned isolated
+worktree. Keep private material outside repository contents.
 
-Possession of the generated key never approves its own registration. A local
-record on a feature branch is a review input, not canonical trust.
+1. Generate or adopt the exact Authority key under its owner.
+2. Choose identity, validity, maximum TTL, and narrow capability ceiling.
+3. Construct and inspect the canonical public record and fingerprint.
+4. Materialize only that public record in the trust-root worktree.
+5. Publish through the governed trust PR path and retain its public identity.
+6. Obtain actual required governance checks and independent human approval.
+7. After merge, reread the protected ref and exact active record.
+8. Run readiness under the selected Authority owner and intended operation.
+9. Only then admit normal delegated work.
 
-## Trust-root PR sequence
+Possession of a new key never approves its registration. Setup publication
+reports human wait, not connected/ready. Actual Ruleset enforcement is checked
+separately; a validator or this runbook does not prove live protection enabled.
 
-Trust-root changes are versioned Git state:
+## 5. Trust-root transitions
 
-```text
-prepare public record -> register in operator worktree -> inspect diff
--> Delegator Governance check (the existing `Runtime Authority Governance` check)
--> independent approval
--> merge to protected default branch -> verify canonical ref and policy SHA
-```
+The existing transition validator requires new records active, rejects
+deletion/reactivation, permits revocation as active to disabled, and separates
+creation/overlap from revocation transitions.
 
-The governance validator requires new records to be active, rejects deletion,
-rejects reactivation, permits revocation only as `active -> disabled`, and
-rejects mixing creation and revocation in one trust-root transition. Keep
-creation/overlap and revocation as separate PR phases.
+Keep those as distinct governed phases. Reread the exact public record before
+mutation. Setup reruns must not change a registered key, ID, validity, or
+ceiling under the guise of idempotent adoption. A conflict requires explicit
+rotation/repair, not overwrite permission.
 
-## Per-runtime signer provisioning (#518)
+## 6. Signer provisioning and local composition
 
-Each independently operated Runtime is provisioned with its own pair, owned by
-that Runtime deployment operator. If the readiness command reads environment
-variables, the names below are scoped to that Runtime process or deployment;
-they are not repository-global Change executor configuration:
+Authority holds the selected ID/private-key pair. Existing variables
+`INARI_RUNTIME_AUTHORITY_ID` and `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` remain
+compatibility provisioning inputs where supported. They belong to that owner
+process, not an agent child or repository-global Executor setting.
 
-| Name                                  | Kind                  | Value and ownership                                                    |
-| ------------------------------------- | --------------------- | ---------------------------------------------------------------------- |
-| `INARI_RUNTIME_AUTHORITY_ID`          | Runtime configuration | Exact canonical authority ID selected by this initiating Runtime.      |
-| `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` | Runtime secret        | The matching PKCS#8 Ed25519 PEM; held only by this initiating Runtime. |
+A secret being present does not prove it matches current trust. Readiness
+derives and compares public identity without printing the key.
 
-The trusted executor receives only the resulting signed provenance record. It
-does not receive either private key or a repository-global authority ID. The
-direct App path, Actions path, MCP path, Agent Session, and effect adapter
-remain private-key-free.
+Setup/CLI use AuthoritySigningPort and public observations. Admission retains
+the signed local Session binding. Executor uses its own Inari Access
+credentials. Neither owner acquires the other's key.
 
-GitHub does not reveal a secret after registration. Therefore, do not use
-“secret exists” as readiness evidence. Run the readiness command inside the
-approved signer environment with its exact variables:
+Remote placement does not change custody. Initial remote Control support does
+not add a general remotely callable Authority signing service.
+
+## 7. Readiness
+
+Normal delegation/provenance requires the exact active/current protected-ref
+record, matching parseable owner key, permitted TTL/capability intent, current
+repository policy/binding, and a successful bounded signer probe.
 
 ```sh
 inari authority readiness --environment \
@@ -196,266 +169,156 @@ inari authority readiness --environment \
   --json
 ```
 
-`--environment` reads the initiating Runtime's
-`INARI_RUNTIME_AUTHORITY_ID` and `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY` without
-printing either value. The command resolves the repository's protected
-default branch, confirms the record is active/current, derives the public key
-from the private key, compares the public identity exactly, checks optional
-TTL/capability intent, and runs a bounded `change.issue` sign-and-verify probe.
-It returns only public identity, protected-ref provenance, the probe result,
-and stable failure diagnostics.
+The existing probe resolves protected-ref evidence, compares derived public
+identity, checks validity and operation intent, and returns only public
+identity, policy/ref evidence, bounded probe outcome, and diagnostics.
 
-## Readiness and release prerequisites
+A working-branch record, old policy SHA, healthy process, or prior successful
+probe is not indefinitely current authorization. Unavailable trust fails
+closed rather than permitting unbounded cached trust.
 
-Fresh `change issue` / self-dogfood / release certification requires all of:
+## 8. Planned overlap rotation
 
-- an active, currently valid Runtime record on the canonical protected ref;
-- the initiating Runtime's configured authority ID;
-- that Runtime's parseable PKCS#8 Ed25519 private key whose derived public JWK
-  exactly matches the canonical record;
-- a TTL and semantic capability ceiling that admit the intended operation; and
-- a successful bounded signer probe.
-
-Canonical trust is re-resolved for the signing/execution request. A local
-feature-branch record, an old policy SHA, or a matching secret with an unknown
-public key is not sufficient.
-
-## Planned overlap rotation
-
-Use two distinct authority IDs and keep the old and new records trusted during
-the migration:
+Use distinct candidate B while A remains the working identity:
 
 ```text
-A = current active authority
-B = newly generated authority
-
-1. generate B private key
-2. bootstrap B's public record and register/PR it as a new active record
-3. merge the B trust PR; confirm A+B are both canonical and active
-4. provision the matching B key and ID to Runtime B
-5. run readiness from Runtime B and observe a bounded successful signing probe
-   for B
-6. create a separate revoke PR for A and merge it
-7. run readiness again and verify A is inactive under current trust
-8. securely retire A's private-key copies under operator policy
+prepare B
+  -> publish and independently approve/merge B
+  -> verify A+B current trust
+  -> select/provision B at its owner
+  -> prove B readiness and normal operation
+  -> separately revoke A through governance
+  -> reread and confirm A rejected
+  -> retire private copies under operator policy
 ```
 
-`authority rotate --from rotation.json` is the existing overlap materializer;
-its envelope names `currentAuthorityId` and contains the already prepared
-`nextAuthority` public record. It adds B without rewriting A. Do not activate B
-before B is trusted, and do not revoke A until the deployed signer has moved to
-B and readiness has succeeded.
-
-Before step 4 (activating B) and before step 6 (revoking A), run readiness with
-`--rotation-phase` from the deployment that will perform that step:
+The existing rotation envelope names `currentAuthorityId` and prepared
+`nextAuthority`; it adds B without rewriting A.
 
 ```sh
-# before binding/activating B (step 4)
 inari authority readiness --environment --rotation-phase activate \
   --current-authority-id A --probe-issue 522 --json
 
-# before revoking A (step 6), run from Runtime B
 inari authority readiness --environment --rotation-phase revoke \
   --current-authority-id A --probe-issue 522 --json
 ```
 
-This checks B's readiness against canonical trust and, for `revoke`, confirms
-the deployment's configured signer has already moved to B before A may be
-revoked. A `blocked` rotation order is a hard stop: do not revoke A while the
-signer is still bound to A.
+A blocked rotation order is a hard stop. Never revoke A while the deployed
+signer depends on it. Before revocation, failed migration may restore the last
+approved A binding; it does not justify changing A's key or widening its ceiling.
 
-If migration fails before A is revoked, leave A active, restore the last known
-working A deployment binding, and investigate. Do not replace A's local file
-and call that rotation: a new key is a new cryptographic identity.
+## 9. Revocation and compromise
 
-## Emergency revocation and compromise response
+Use the governed revocation procedure and its independent emergency/human
+approval boundary. Reread trust and prove subsequent admission rejects the
+affected identity. Revocation does not undo completed provider effects.
 
-For suspected compromise, revoke the affected ID immediately through the
-governed trust-root path with `authority revoke <authority-id>`. Merge the
-revocation under the required review/emergency procedure, then confirm that
-current-trust verification rejects the old authority. Removing or disabling
-the record invalidates outstanding Runtime certificates on subsequent current
-trust checks; there is no central revocation database.
+Local Session closure, App rotation, Relay rotation, and Hosted signer
+revocation remain separate. For planned retirement retain disabled public
+history. For a lost key create a new identity; public data cannot recover the
+private key. For ID/key mismatch stop signing and inspect actual binding.
 
-- **Planned retirement:** follow overlap rotation, then revoke and retire the
-  old key. Never delete the old public record; disabled history is governance
-  evidence.
-- **Lost or unrecoverable key:** the public record is not recoverable into a
-  private key. Generate a new key and ID, add it through overlap governance if
-  possible, bind it, verify it, then revoke the unusable old ID.
-- **Deleted Environment secret:** restore the Environment copy from the
-  operator's encrypted backup, then rerun readiness. Secret restoration alone
-  does not establish trust.
-- **Authority disabled while deployed:** stop fresh signing, restore a valid
-  approved binding only if the authority is intentionally still trusted, or
-  generate/bind a replacement and perform overlap recovery. Do not bypass the
-  canonical ref.
-- **Unknown or mismatched ID/key:** stop the signer. Check the ID, key file,
-  canonical protected-ref record, and policy SHA; do not generate a second
-  unreviewed trust artifact as a workaround.
+Restore a deleted deployment copy only from approved backup and repeat
+readiness. Restoration alone is not trust. Do not restore a suspected
+compromised key into service; revoke and replace it.
 
-## Backup, recovery, and retirement policy
+## 10. Backup and destruction
 
-For a long-lived Runtime key, retain an offline, encrypted, access-controlled
-backup under the operator's key-management policy. The GitHub Environment is a
-deployment copy, not the sole source of truth. Inari does not provide a general
-secrets manager or key escrow service.
+Retain an offline encrypted access-controlled backup under operator policy.
+A local or Environment deployment copy is not the sole recovery source.
+Inari is not a key escrow or general secrets manager.
 
-Backups must preserve the PKCS#8 PEM bytes and restrictive ownership. Restore
-to a private directory and a `0600` file, then run readiness before use. Never
-put a backup in a repository, Issue, PR, artifact, log, shell history, or
-ordinary environment shared with an Agent. If compromise is suspected, do not
-restore the compromised key; revoke its authority and replace it.
+Restore only into restrictive owner storage, verify identity, and run
+readiness. Never put keys in repository history, Issues/PRs, artifacts, logs,
+shell history, or an agent's general environment.
 
-After revocation has merged and no rollback is approved, remove retired private
-copies according to the operator's secure-destruction policy. Keep the disabled
-public record and its governance history. A replacement key must always use a
-new public identity and a separately governed record.
+After revocation and the approved rollback window, retire private copies
+under secure-destruction policy. Keep public trust history. Rotating one
+credential domain does not delete another domain's key.
 
-## Troubleshooting
+## 11. Multi-repository adoption and disconnect
 
-| Readiness state / code                                           | Meaning                                                            | Recovery                                                                                    |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| `missing-deployment-binding` / `...MISSING_DEPLOYMENT_BINDING`   | The initiating Runtime's ID or private key is absent.              | Configure that Runtime's exact pair; do not put the key in the executor.                    |
-| `unknown-authority` / `...UNKNOWN_AUTHORITY`                     | ID is not on the protected canonical ref.                          | Merge the public trust PR, or correct the deployment ID.                                    |
-| `inactive-authority` / `...INACTIVE_AUTHORITY`                   | Record is disabled or outside its validity window.                 | Use an active approved authority or complete rotation; do not edit the deployment alone.    |
-| `invalid-private-key` / `...PRIVATE_KEY_INVALID`                 | PEM is missing, malformed, too large, or not Ed25519 PKCS#8.       | Restore/generate a valid private key in secure storage.                                     |
-| `key-mismatch` / `...KEY_MISMATCH`                               | Derived public key does not equal canonical trust.                 | Stop; correct the ID/key binding or govern a new authority.                                 |
-| `ambiguous-authority` / `...AMBIGUOUS_AUTHORITY`                 | Canonical trust has duplicate/ambiguous identity.                  | Repair the exact trust-root governance violation; fail closed until then.                   |
-| `canonical-trust-unavailable` / `...CANONICAL_TRUST_UNAVAILABLE` | Protected-ref identity, tree, or blob could not be read/validated. | Restore bounded repository read access and retry against the protected ref.                 |
-| `ttl-exceeds-ceiling` / `...TTL_EXCEEDS_CEILING`                 | Intended Session TTL is beyond the record ceiling.                 | Request a shorter TTL or govern a new explicit ceiling.                                     |
-| `capability-exceeds-ceiling` / `...CAPABILITY_EXCEEDS_CEILING`   | Intended semantic capability is not delegated.                     | Narrow the operation or govern a record with the required ceiling.                          |
-| `signer-probe-failed` / `...SIGNER_PROBE_FAILED`                 | Bounded sign/verify probe failed.                                  | Stop signing; inspect the key, validity time, and canonical record without logging secrets. |
+Registry records refer to public Authority identity. Adoption verifies
+repository and key/fingerprint without destructively moving/regenerating keys.
+Canonical migrated records win over stale compatibility input.
 
-Diagnostics are deliberately bounded and never include PEM, JWK private `d`,
-tokens, headers, or raw provider errors.
+Disconnecting one repository cannot delete a key still referenced by another
+binding or trust relationship. Trust revocation and owner key retirement are
+explicitly selected actions with current evidence. Observation/enumeration
+never adopts records or creates owner directories.
 
-## Never do this
+## 12. Setup frontends and process lifecycle
 
-- Never commit, paste, print, or upload a Runtime private key.
-- Never put the Runtime private key in App/executor, direct-App, MCP, Agent
-  Session, effect-adapter, repository-level, or general-purpose executor
-  configuration. Keep it only in the initiating Runtime that signs the
-  request.
-- Never let possession of a Runtime private key self-authorize trust
-  registration, rotation, review, or merge.
-- Never rotate by merely replacing a local file or GitHub secret. Add and merge
-  the new public trust first, migrate and verify the signer, then revoke the
-  old public trust.
-- Never treat a working-branch authority file, local checkout, or unmerged PR
-  as authorization truth.
-- Never weaken `authority register`, `authority rotate`, `authority revoke`,
-  Delegator Governance, protected-ref resolution, or fail-closed
-  diagnostics to recover from a provisioning error.
-- Never add a central Runtime registry, revocation database, HSM/KMS product,
-  or general secrets manager to this workflow.
+The existing `inari setup status|next|console` surfaces use one Setup
+Application and owner state. Unified multi-repository Console reuses that
+application, not a second wizard engine.
 
-## Local execution plane
+Typed action metadata owns secret-free input. Enrollment bytes stream to the
+selected owner and never enter generic action JSON. Operator bearer/CSRF
+material stays memory-only and origin/context-bound, absent from URLs/assets.
 
-Use one isolated `INARI_CONFIG_HOME` for the local CLI, Admission, Executor,
-and Runtime Authority. `inari init` reports the ordered setup state and the
-next supported command. Repository Runtime onboarding through
-`inari setup --endpoint <endpoint-url>` performs GitHub App Device Flow and
-stores the App-user credential at `$INARI_CONFIG_HOME/app-user-credential.json`
-by default. That App-user credential authorizes only this bootstrap publication;
-`inari setup` also writes the repository Runtime profile that binds the
-repository to its Inari Issuer App installation. Configuring the local Executor
-remains a separate step.
+The dynamic loopback host may start before keys/trust are ready. Start, stop,
+and cleanup affect only its own Runtime children/listeners. Observe-only CLI
+calls do not become supervisors. A Runtime owned elsewhere is not adopted,
+stopped, or restarted merely because it is reachable.
 
-The local Executor performs post-bootstrap provider reads and governed effects
-with Inari Issuer App installation credentials, never the App-user credential.
-Set `INARI_GITHUB_APP_ID` (or `GITHUB_APP_ID`) to the numeric App ID reported
-by `inari setup` and `INARI_GITHUB_APP_PRIVATE_KEY_FILE` to the Issuer App
-private key (`.pem`) path, then run `inari executor setup`. `inari executor
-setup` and `inari init` check only that this Executor-owned reference is set;
-they never open or parse the key. Only the running Executor reads and validates
-the key, at start and at each authorized execution, and it mints repository-scoped installation tokens for the
-installation recorded in the Runtime profile, and fails closed on a missing or
-unreadable, or invalid key, a mismatched App, installation, or repository, or insufficient
-installation permissions. The key is never written to Executor configuration,
-Runtime profiles, Admission, Session, or `inari init` output; the Supervisor
-withholds it from Admission and the Agent child. Run `inari authority setup`
-to create local key custody, followed by `inari authority bootstrap` to create
-the public Runtime Authority record. Pass that public file to
-`inari admission setup --from <public-record-file>`; this pins public trust and
-binds the CLI Admission route. The private Authority key stays in its local
-custody directory, App-user credentials stay in their credential file, and the
-Issuer App private key stays in Executor-owned custody.
+Configuration, health, binding, trust, Session readiness, and Relay
+reachability remain separate observations. Existing browser certification is
+`pnpm run test:setup-browser`; unavailable prerequisites are blocked, not pass.
 
-Run `inari runtime supervise` to start and supervise the local Executor and
-Admission processes together and verify their discovered loopback readiness.
-Admission checks the configured Executor identity before becoming ready. The
-CLI and Agent child use the configured Admission route and do not need
-provider credentials.
+## 13. Session and Source operation
 
-### Setup Application frontends (`inari setup status|next|console`)
+Local work selects the current authorized Implementation and exact leaf
+branch. The Session task remains that Implementation. Source Change operations
+select a Source in both signed and current authorized Source sets.
 
-`inari setup status`, `inari setup next` and `inari setup console` use one Setup
-Application over the same persisted, non-secret setup records and the real
-owner adapters, so a fresh CLI and the browser report the same state and
-configuration generation without inheriting matching shell exports. The
-repository identity comes from `--repository-id`, the recorded Runtime profile,
-or a credential-free public repository read.
+Do not use the task number as a Change root because older guidance equated
+them. The task-bound compatibility claim is limited to leaf publication and
+branch-side composition.
 
-- `inari setup status [--detail]` prints the canonical state and the one next
-  action. `inari setup next` performs only that offered action; confirmation is
-  interactive or `--yes`, secret-free inputs are `--input <id>=<value>`, and an
-  enrollment file is `--enrollment-file <id>=<path>`. Its bytes are streamed
-  unparsed to the owning component (the Executor for the Issuer key).
-- `inari setup console` starts an explicitly owned loopback setup/control host
-  on a dynamically allocated port (there is no fixed-port fallback) and prints
-  its URL and the matching SSH `-L` forward. It needs no Issuer key, repository
-  trust or ready Runtime. The host serves the packaged console assets
-  (`dist/setup-console/`); the page obtains a short-lived operator bearer/CSRF
-  pair from its own origin and keeps it in memory only; it is never stored,
-  placed in a URL or embedded in an asset. A repeated `inari setup console`
-  reports the running host instead of starting another; a stale announcement
-  is replaced.
-- Starting the ordinary Runtime from the browser uses the same Supervisor and
-  discovery model as `inari runtime supervise`. Starts are serialized, a running
-  owned or discovered healthy Runtime is reused, and a reachable Runtime that
-  this host did not start is never adopted, restarted or stopped. A crashed owned
-  child is stopped with its sibling and reported; a new start recovers.
-  Stopping the console (Ctrl-C/SIGTERM) closes its listener, removes only its
-  own announcement and stops only the Runtime children it started. The short
-  `setup status|next` CLI processes never spawn Runtime children; start the
-  Runtime from the console or with `inari runtime supervise`.
+Remote human-operated clients use Hosted assertions. They do not receive
+Delegator keys or manually copied Session credential bundles. Authority is
+not Hosted caller identity.
 
-The packaged console is exercised in a real browser by
-`pnpm run test:setup-browser` (exit 0 pass, 1 fail, 2 blocked when no
-Chromium-compatible browser or driver is available; set `INARI_SETUP_BROWSER`
-to choose one).
+## 14. Troubleshooting
 
-Before Session start, check out the canonical Issue-bound Change branch
-(`<feat|fix|docs|refactor|test|chore>/<issue-number>-<slug>`) for the Issue
-you are implementing; `inari init` reports whether one is currently selected.
-From that governed repository checkout, launch the Agent with
-`inari session start --issue <n> -- <command...>`. The child inherits
-`INARI_SESSION_ID`; `inari change show <n>` and admitted Change mutations use
-that Session. Run `inari session close` with the same selector when finished.
-The local process route is certified without live provider services by
-`test/local-execution-plane-certification.test.mjs` in `pnpm run verify`.
+`missing-deployment-binding`: configure the exact Authority owner pair, not
+Executor. `unknown-authority`: correct the ID or complete the protected trust
+PR. `inactive-authority`: use approved active trust or complete rotation.
 
-## Runtime Authority compatibility inventory
+`invalid-private-key`: restore valid bounded Ed25519 owner material.
+`key-mismatch`: stop and repair the actual ID/key/trust binding.
+`ambiguous-authority`: resolve the exact public trust conflict.
 
-The following names are stable compatibility surfaces. They remain readable,
-verifiable, and byte-compatible while the canonical architecture and library
-terminology use Delegator. Compatibility exports are aliases or thin
-re-exports of the Delegator implementation; they do not define a second trust
-model.
+`canonical-trust-unavailable`: restore bounded protected-ref reads; never use
+an agent working branch instead. `ttl-exceeds-ceiling` and
+`capability-exceeds-ceiling`: narrow intent or govern a separate trust change.
+`signer-probe-failed`: inspect key identity, validity, and probe safely.
 
-| Compatibility surface        | Stable value/name                                                                                                                      | Canonical Delegator surface                                         |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Library modules              | `src/agent-authority/runtime-authority*.ts`, `runtime-key.ts`                                                                          | `delegator*.ts` and `delegator-key.ts`                              |
-| Types and functions          | `RuntimeAuthority*`, `validateRuntimeAuthority`, `assertRuntimeAuthority`, `canonicalRuntimeAuthorityJson`, `isRuntimeAuthorityActive` | `Delegator*` and corresponding Delegator functions                  |
-| Trust and key APIs           | `loadRuntimeAuthorityTrust`, `resolveRuntimeAuthority`, `generateRuntimeKeyPair`, and related exports                                  | Delegator-named equivalents                                         |
-| Public fields and identity   | `runtimeAuthority`, `authorityId`, `runtime:<id>`                                                                                      | Unchanged wire/property values; Delegator is the semantic role name |
-| Persisted trust records      | kind `runtime-authority`; path `.github/inari/authorities/<authority-id>.json`                                                         | Unchanged for existing records and verification                     |
-| Rotation and local key paths | kind `runtime-authority-rotation`; `~/.config/inari/runtime-authority.pem`                                                             | Unchanged compatibility paths and envelopes                         |
-| Provisioning variables       | `INARI_RUNTIME_AUTHORITY_ID`, `INARI_RUNTIME_AUTHORITY_PRIVATE_KEY`                                                                    | Unchanged deployment contract                                       |
-| Diagnostics and governance   | `RUNTIME_AUTHORITY_*`; check name `Runtime Authority Governance`                                                                       | Canonical code paths retain these machine-facing identifiers        |
-| CLI command group            | `inari authority ...`                                                                                                                  | Unchanged command contract; it operates on Delegators               |
+Existing `RUNTIME_AUTHORITY_*` codes retain machine-facing meaning. Errors
+never echo private material, tokens, headers, or raw provider responses.
 
-Committed trust records are not rewritten solely for this terminology
-migration. Existing signatures, canonical JSON, golden vectors, persisted
-paths, and verification inputs remain valid.
+## 15. Compatibility inventory
+
+Retain supported RuntimeAuthority-named types/functions as thin aliases to
+Delegator code, existing `runtimeAuthority`, `authorityId`, and `runtime:<id>`
+fields, `runtime-authority` record kind, `runtime-authority-rotation` envelope,
+and protected trust path.
+
+Existing provisioning variables, key-reader paths, public signatures,
+canonical JSON vectors, and `Runtime Authority Governance` check name retain
+their versioned behavior until approved migration.
+
+These representation/API adapters do not retain independent Direct App
+execution, a Hosted Session engine, or a second trust source.
+
+## 16. Operator evidence
+
+Record public identity/fingerprint, repository, protected-ref SHA, trust PR,
+readiness outcome, intended TTL/capability, rotation phase, and bounded failure.
+Exclude private bytes, credential-bearing environment, raw signed payloads,
+tokens, and provider exceptions.
+
+A unit probe is not live Ruleset proof. A Source-branch test is not a
+current-main deployment certification. Publishing this runbook performs none
+of those operations.

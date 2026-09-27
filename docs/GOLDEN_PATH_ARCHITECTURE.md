@@ -1,356 +1,233 @@
-# Inari Golden Path Architecture
+# Inari Golden Path Composition
 
-Status: normative architecture gate for Issue #395, reconciled with the
-completed XState leaves by #552. This document freezes the Golden Path
-composition contract; it does not add a Golden Path CLI, runtime orchestration
-code, a new persistence store, or a new operational playbook implementation.
+Status: normative composition contract under
+[Product Architecture Canon](./ARCHITECTURE.md).
 
-Issue #395 is the intent authority for this gate. Its Decision, Invariants, and
-Acceptance criteria are reflected here without replacing the executable
-authorities named below. This document is the architecture authority for the
-composition and certification boundary only.
+A Golden Path composes existing owners into a continuous usable workflow.
+It does not add a command namespace, lifecycle engine, credential model,
+private repository database, or second recovery classifier.
 
-## 1. Decision
+The detailed status/next-action/recovery and installed-package proof obligations
+remain here. The approved target replaces old Implementation-root and
+Direct App/Actions-required composition, not these evidence requirements.
 
-The Inari Golden Path is the canonical agent and human workflow for a governed
-repository Change. It is a product-level composition over the existing
-Repository Canon, Semantic Artifact Core, Change, XState, GitHub adapters, and
-`inari skill` authorities.
+## 1. Outcome
 
-For new implementation-native execution, the composed subject is the
-Implementation authorization, not the broader ordinary source Issue. The
-Golden Path consumes the identity binding defined by
-[`IMPLEMENTATION_CONTRACT.md`](./IMPLEMENTATION_CONTRACT.md): source Issue ->
-Implementation -> Change(root = Implementation) -> Session -> branch/PR ->
-execution evidence/conformance. Historical Issue-rooted Changes remain
-readable through the explicit compatibility rule and are never silently
-reinterpreted by composition.
+A caller can discover the repository contract, provide permitted semantic
+intent, obtain the applicable authorization, perform a governed operation,
+and receive a verified result or one bounded next action.
 
-The normative path is:
+The workflow includes onboarding, normal operation, retry, abort, and recovery.
+Local and remote clients differ in authentication and transport. They reach
+the same user-owned Admission/Executor and semantic contracts.
 
-```text
-fresh environment
-  -> packaged gh-inari compatibility/preflight
-  -> repository Canon and semantic contract discovery
-  -> governed source Issue and first-class Implementation
-  -> current Implementation authorization
-  -> Change issuance
-  -> canonical branch + canonical Draft PR
-  -> implementation
-  -> deterministic status/next-action projection
-  -> Change ready
-  -> REVIEW
-  -> repository CI, review, and merge admission
+Issue, Source Change, Implementation task, Session, leaf publication, and
+integration publication are not a single identity despite the short lifecycle
+summary Issue -> Change -> PR -> Merge.
 
-failure at any governed effect
-  -> bounded diagnostic
-  -> authoritative reread
-  -> idempotent retry, safe abort/cleanup, or explicit recovery
-```
+## 2. Composition responsibilities
 
-`REVIEW` means that the governed `ready` transition has been admitted and
-verified. It does not mean that a human review, required check, or merge has
-already succeeded. `ACCEPTED` and `MERGED` remain the existing Change and
-repository-policy states; they are not new Golden Path lifecycle states.
+Repository Canon and Semantic Artifact Core determine accepted input, desired
+values, relations, and projections. Implementation authorization determines
+bounded task scope and current body/base binding. Change determines Source
+lifecycle/publication and recovery. XState sequences admitted operations.
 
-The Golden Path eliminates caller rediscovery of templates, branch identity,
-PR identity, Change legality, and recovery action by composing existing
-semantic operations and projecting one bounded next action. It does not move
-any of those decisions into a new orchestration authority.
+Admission authenticates and authorizes. Executor obtains bounded provider
+observations and applies admitted effects through Inari Access. Setup
+Application composes owner observations/actions without holding secrets.
 
-## 2. Scope and invariants
+Golden Path projection owns only stage order, bounded status/next-action
+composition, and its certification boundary. It must not derive a second
+branch name, render a parallel artifact, invent a capability, or persist a
+competing readiness state.
 
-### 2.1 Scope
+CLI/Skill/UI guidance derives from those public results and command metadata.
+A static Skill router is not another operational policy source.
 
-This architecture gate fixes:
+## 3. Repository connection
 
-- the end-to-end workflow from a fresh packaged environment through verified
-  `REVIEW`;
-- the boundary between composition and existing semantic, lifecycle, control-
-  flow, transport, and playbook authorities;
-- the finite machine-readable status, next-action, diagnostic, and recovery
-  contract;
-- the package-level certification subject and isolation boundary;
-- the retry, abort, partial-effect, reread, and recovery certification matrix;
-- the dependency and implementation order for #239 and the completed #350,
-  #351, and #352 leaves.
-
-The document is normative for those boundaries. Executable schemas, validators,
-command contracts, Change types, XState machines, GitHub workflows, repository
-Rulesets, and tests remain the mechanical authorities for their own contracts.
-
-### 2.2 Normative invariants
-
-- The Golden Path is continuously executable and package-certified; README or
-  Skill prose alone is not evidence of completion.
-- The certification subject is an installed packed `gh-inari` artifact. A
-  source checkout, TypeScript entrypoint, workspace `node_modules`, or direct
-  `dist` invocation cannot satisfy package-level certification.
-- A normal caller never supplies or guesses the canonical branch name, PR
-  identity, template path, lifecycle legality, or compensation effect.
-- A governed Issue may exist in `DEFINED` without an issued Change. Issue
-  creation does not implicitly create a branch or PR.
-- A source Issue may have multiple independent Implementations. A new Change
-  is issued only for one current Implementation authorization, and the
-  Implementation Issue is its canonical root.
-- An issued active Change has exactly one canonical branch and one canonical
-  Draft PR, both projected from the same Change identity.
-- Session task/capability, branch, canonical PR `implements`/closing relation,
-  execution evidence, and conformance must bind to that same Implementation
-  authorization. Source Issue references do not substitute for the execution
-  root.
-- Historical Issue-rooted Changes remain readable/recoverable but are not
-  admissible as new Implementation-native execution without fresh
-  Implementation-rooted evidence; ambiguity fails closed.
-- Issuance retry is create-or-return-existing and never creates a duplicate
-  canonical branch or PR.
-- Every retry, compensation, abort, or recovery decision starts from fresh
-  authoritative GitHub-derived evidence. A provider response or stale actor
-  snapshot is not sufficient proof.
-- A privileged mutation succeeds semantically only after reread and
-  postcondition verification.
-- Partial or ambiguous state fails closed. Destructive cleanup is permitted
-  only under the existing generation-safe Change compensation/abort contract.
-- `change abort` and cleanup are part of certification, not optional manual
-  maintenance.
-- Raw GitHub write commands are not part of the normal governed path.
-- GitHub remains the observable Change state store. No competing persistent
-  Golden Path or XState database is introduced.
-- `inari skill golden-path` is the single versioned operational playbook once
-  its implementation leaf lands. `skills/inari/SKILL.md` remains a thin
-  router and does not duplicate that playbook.
-- CLI, MCP, Actions, and other adapters expose or transport the same Core and
-  Change semantics. They do not acquire independent Golden Path policy.
-- Existing public contracts remain compatible unless a separately governed
-  implementation Issue explicitly versions them.
-
-### 2.3 Non-goals of this gate
-
-This gate does not:
-
-- add `inari golden-path` or any other new CLI command;
-- add or change `src/` code, command metadata, MCP tools, Actions workflows,
-  package behavior, or XState machines;
-- define a second branch grammar, template schema, artifact IR, Change state
-  machine, or recovery classifier;
-- replace Repository Canon, Semantic Artifact Core, Change, XState, GitHub, or
-  `inari skill` with a Golden Path authority;
-- move Nawabari worktree/process isolation or Mottainai agent orchestration
-  into Inari;
-- introduce merge automation, a hosted service, or a separate Change store;
-- treat documentation completion as executable Golden Path completion.
-
-## 3. Authority boundaries
-
-The Golden Path is a composition layer. The following table is normative:
-
-| Authority                                                                   | Owns                                                                                                                                                                                                         | Golden Path must not do                                                                                           |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| Repository Canon and native repository contracts                            | Repository-specific Issue/PR meaning, template selection, branch policy, governance generation, and declared supplied/derived/fixed values                                                                   | Embed repository paths, regexes, title/body rules, branch grammars, or template defaults in orchestration         |
-| Semantic Artifact Core                                                      | Contract compilation, effective input schema, artifact materialization, relation semantics, canonical branch/PR desired projections, validation, observed-vs-desired reconciliation, and bounded diagnostics | Re-derive artifact values, render a parallel body, or turn GitHub presentation into semantic policy               |
-| Implementation Contract/Authorization Core                                  | One-session contract, current body digest/base binding, execution scope/evidence, and the cross-artifact identity binding consumed by this composition                                                       | Treat source Issue state, a PR, or a branch convention as a replacement Implementation/authorization authority    |
-| Change Core and [`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md)      | Change identity, `DEFINED`/`DRAFT`/`REVIEW`/terminal lifecycle, provenance roles, transition legality, issuance idempotency, effect plans, compensation, abort, and recovery semantics                       | Add a parallel lifecycle, Change ID, effect plan, or persistent Change record                                     |
-| XState runtime and [`XSTATE_CHANGE_MACHINE.md`](./XSTATE_CHANGE_MACHINE.md) | Executable control flow: sequencing, explicit retry/no-op branches, reread, postcondition verification, compensation routing, and recovery routing                                                           | Decide semantic names, template meaning, provenance policy, GitHub normalization, or public state vocabulary      |
-| GitHub and bounded adapters                                                 | Observable repository state and bounded provider I/O; read normalization and application of already-admitted effects                                                                                         | Become semantic policy, infer missing intent, or report provider success as semantic success without verification |
-| GitHub Actions executor and Inari Issuer App                                | Actions is the trusted execution runtime; the App is the privileged mutation identity and capability                                                                                                         | Expose credentials to callers, define lifecycle policy in workflow YAML, or become a second Core                  |
-| `inari skill`                                                               | Versioned operational playbooks and their scenario routing; `inari skill golden-path` is the Golden Path playbook authority                                                                                  | Be copied into `SKILL.md`, README, prompts, or a second static playbook                                           |
-| Golden Path composition                                                     | Stage order, composition-level status/next-action projection, package certification boundary, and dependency matrix                                                                                          | Own any underlying semantic rule, provider effect, lifecycle transition, or transport-specific command spelling   |
-
-The precedence is therefore:
+The recommended owner-composed sequence is:
 
 ```text
-Repository Canon + Semantic Artifact Core
-              -> artifact meaning and desired projections
-Change Core + XState
-              -> lifecycle legality and effect control flow
-GitHub/adapters/executor
-              -> observed state and bounded effects
-Golden Path
-              -> composition and next-action projection only
+resolve immutable repository
+  -> register or adopt public repository context
+  -> choose dedicated App or explicit manual existing/shared App
+  -> Executor-owned Manifest conversion or bounded key enrollment
+  -> human App installation consent
+  -> provider-observed App/installation/repository verification
+  -> Executor repository binding
+  -> Authority creation or exact-identity adoption
+  -> governed publication of the public trust record
+  -> independent human review/merge
+  -> protected-ref trust reread
+  -> Admission/Runtime configuration and owner observations
+  -> repository Session-readiness proof
 ```
 
-An implementation may expose the composition through a bounded facade or
-extend existing Change outputs, as permitted by a later implementation Issue.
-Neither choice changes the authority table or creates a new lifecycle.
+App registration is not installation. Enrollment is not provider verification.
+Trust publication is not trust. Runtime health is not Session readiness.
+A connected network socket is not a ready repository.
 
-## 4. Canonical workflow
+The stage is recomputed from persisted owner/repository state and the bounded
+operation journal. Browser refresh, a new CLI process, or server restart must
+not trust a completed-step flag and replay an uncertain external effect.
 
-### 4.1 Stages and exit conditions
+Existing identities, keys, validity, and capability ceilings are adopted only
+when exact evidence matches. Setup never regenerates or widens them merely
+to escape a conflict.
 
-| Stage            | Authoritative activity                                                                                                                                                                                                   | Exit condition and next action                                                                                                |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `ENVIRONMENT`    | Run the packaged executable's compatibility/capability preflight in a clean environment.                                                                                                                                 | Package identity and required capabilities are verified; discover the target repository Canon.                                |
-| `GOVERNANCE`     | Resolve the target repository, immutable governance generation, source Issue/Implementation contracts, and effective semantic inputs through existing Core discovery.                                                    | Governance is available and valid; obtain or create the source Issue and bounded Implementation through existing authorities. |
-| `ISSUE`          | Read the source Issue and current first-class Implementation authorization evidence.                                                                                                                                     | The Implementation is valid/current and its Change projection is `DEFINED`; issue the Implementation-rooted Change.           |
-| `CHANGE`         | Invoke existing Change issuance semantics with the Implementation as root: authoritative projection, Semantic Branch/PR plan admission, canonical branch creation, separate Draft PR creation, reread, and verification. | Exactly one healthy canonical branch and Draft PR exist; Change is `DRAFT`; implement on that canonical branch.               |
-| `IMPLEMENTATION` | A worker edits, commits, and updates the already-issued working branch under the existing Change and local execution boundaries.                                                                                         | Ready preconditions and required evidence are satisfied; request the governed `ready` transition.                             |
-| `READY`          | Invoke existing Change ready semantics. Core validates the projection and preconditions; XState/executor sequences the effect, rereads, and verifies.                                                                    | Canonical PR is non-draft and the Change is `REVIEW`; repository review and CI become the next external activity.             |
-| `REVIEW`         | GitHub review, required checks, Rulesets, and merge admission remain repository and Change policy.                                                                                                                       | The Golden Path certification target is reached. Any later accepted/merged state is observed under existing authorities.      |
+## 4. Local delegated work
 
-The stage name is a composition-level read projection, not a replacement for
-Change state. In particular:
+### 4.1 Environment and governance
 
-- The stage names in this table are the canonical `status.phase` vocabulary;
-  Change issuance is the activity of the `CHANGE` phase, not a second phase
-  token.
+Use the installed package's supported compatibility/discovery surfaces to
+verify executable identity and capability before mutation. Resolve the target
+repository and immutable governance generation through Core.
 
-- `DEFINED`, `DRAFT`, `REVIEW`, `ACCEPTED`, `MERGED`, `ABORTED`, and
-  `RECOVERY_REQUIRED` retain the exact Change vocabulary;
-- `DRAFT` is the visible implementation state and requires both canonical
-  branch and canonical Draft PR;
-- `REVIEW` is admitted reviewability, not approval or merge;
-- a worker owns implementation activity, while Inari owns the governed ready
-  transition;
-- existing Issue and Change operations remain usable independently during
-  migration, but the Golden Path has one canonical composition order.
+Read the Source and bounded Implementation, current authorization, and the
+explicit integration route. A stale body/base or missing producer is not
+repaired by selecting a different root or branch.
 
-### 4.2 Normal path
+### 4.2 Session and publication
 
-The normal path has these properties:
+Authority and Admission establish the current local Session binding. Its task
+is the Implementation; signed Source claims and leaf branch evidence retain
+their different meanings.
 
-1. Package preflight is read-only and runs before repository mutation.
-2. Repository Canon and Effective Contract are discovered from the target
-   repository; callers do not reconstruct template requirements.
-3. Issue creation, when needed, uses the existing governed Issue operation.
-4. Change issuance consumes Core-produced branch and PR plans and creates the
-   canonical branch before the separate canonical Draft PR.
-5. A healthy existing Change is an explicit idempotent return-existing result.
-6. Implementation updates an issued branch; it does not create a competing
-   branch or PR.
-7. `ready` is a governed transition, not a raw GitHub draft toggle.
-8. The result after successful ready contains a verified healthy `REVIEW`
-   projection and a deterministic external review/CI next action.
+Source Change operations name the selected canonical Source. Leaf branch
+advance and PR publication bind the Implementation. The existing task-bound
+publication compatibility claim does not grant an Implementation-root Change.
 
-### 4.3 Retry, abort, and recovery path
+Source integration and leaf publication pairs are resolved explicitly.
+Standalone work uses its accepted route and must not select an arbitrary
+child pair to fill a missing Source binding.
 
-All privileged effects use this shape:
+### 4.3 Implementation and ready
+
+The worker performs the authorized task in its bounded local execution
+context. Inari does not replace physical worktree/process isolation.
+
+Readiness is admitted against current task, publication, and verification
+requirements. Report REVIEW only after the intended canonical publication is
+reread and verified as reviewable. Required CI, independent review, approval,
+and explicit merge remain separate events.
+
+Leaf completion does not prove Source or Epic acceptance.
+
+## 5. Remote human-operated work
 
 ```text
-read authoritative evidence
-  -> project and validate
-  -> admit and plan
-  -> apply explicit effect(s)
-  -> reread authoritative evidence
-  -> verify postcondition
-  -> return bounded result
+Runtime proves Relay transport-key possession
+  -> receives its stable public Relay endpoint
+  -> operator configures the endpoint in the remote client
+  -> client authenticates through Inari Access user authorization
+  -> Hosted verifies caller and requested repository/App eligibility
+  -> Hosted signs a short-lived request-bound access assertion
+  -> user credential is discarded, not forwarded
+  -> Relay delivers to the authenticated Runtime connection
+  -> Runtime verifies issuer, request, target, time and replay binding
+  -> Executor verifies current repository/App/installation binding
+  -> Admission requires actual subject/operation authorization
+  -> the common Core/Executor/effect/reread path
 ```
 
-The failure rules are fixed:
+A cloud client needs no new Hosted-issued Inari Session or ephemeral
+Session-key bootstrap. It also gains no shell, raw GitHub proxy, filesystem,
+network-forwarding, enrollment, or operator-admin privilege.
 
-- A retry after a healthy issuance returns the existing Change with zero
-  duplicate effects.
-- A retry after an unknown effect outcome rereads GitHub before choosing
-  retry, compensation, or recovery. It never blindly repeats creation.
-- If branch creation succeeds and Draft PR creation fails, compensation may
-  delete only the same canonical branch generation when the existing Change
-  safety contract proves that deletion is safe. Successful compensation leaves
-  no issued Change; unsafe or failed compensation yields
-  `RECOVERY_REQUIRED`.
-- `abort` from `DRAFT` or `REVIEW` uses the existing close-PR and conditional
-  canonical-branch cleanup plan, then rereads and verifies `ABORTED`.
-- An already-aborted Change is an explicit idempotent retry result.
-- A recovery retry starts from fresh evidence. It may apply only the remaining
-  effect admitted by current evidence; ambiguous or advanced branch state
-  remains fail-closed and preserves worker data.
-- An unavailable read is not interpreted as absence or success. The result
-  exposes a bounded retry/read diagnostic and no unsafe effect.
+Repository visibility is eligibility, not permission to exercise every App
+write capability. A missing Runtime subject/operation rule is denial.
+Private repositories are verified through the transient authenticated provider
+access, not by requiring a publicly readable repository descriptor.
 
-No failure path silently falls through to success, and no recovery path guesses
-caller intent.
+An offline Runtime returns bounded transport unavailability. Hosted does not
+fall back to its own provider read/write backend or a different Runtime.
+Reauthentication does not make an uncertain prior operation safe to replay.
 
-## 5. Machine-readable status, next-action, and recovery contract
+## 6. Phase and exit conditions
 
-### 5.1 Transport-neutral envelope
+The existing composition phase vocabulary is retained:
 
-The Golden Path result is a transport-neutral projection. A later implementation
-may carry it alongside `ChangeProjectionResult` and
-`ChangeExecutionResult`, or expose it through a thin composition facade.
-It must not replace those underlying contracts or expose XState types.
-
-The minimum envelope is:
-
-```json
-{
-  "version": 1,
-  "subject": {
-    "repositoryHost": "github.com",
-    "repositoryId": "<decimal repository id>",
-    "rootIssue": 395
-  },
-  "status": {
-    "phase": "IMPLEMENTATION",
-    "availability": "actionable",
-    "changeState": "DRAFT",
-    "projectionStatus": "healthy",
-    "executionOutcome": "verified"
-  },
-  "nextAction": {
-    "kind": "IMPLEMENT",
-    "owner": "worker",
-    "reasonCode": "CHANGE_ISSUED"
-  },
-  "recovery": null,
-  "diagnostics": []
-}
+```text
+ENVIRONMENT
+GOVERNANCE
+ISSUE
+CHANGE
+IMPLEMENTATION
+READY
+REVIEW
+TERMINAL
+RECOVERY
 ```
 
-The fields have these rules:
+These are projections, not a second lifecycle. Environment means package
+compatibility/readiness. Governance means current contract discovery. Issue
+means the governed Source/task context is available. Change means the exact
+Source publication operation. Implementation means bounded task activity.
+Ready means admitted transition preparation/execution. Review means verified
+reviewability and external repository activity. Terminal and Recovery reflect
+the actual domain result.
 
-- `version` is the Golden Path envelope version. It is independent of, and
-  must not fork, the versions of the underlying Change or Artifact contracts.
-- `subject` reuses the stable Change repository identity and execution root.
-  For new Implementation-native execution, `rootIssue` is the Implementation
-  Issue. It is absent or incomplete only before repository/execution scope has
-  been resolved; historical projections retain their original Issue root.
-- `status.phase` is one of `ENVIRONMENT`, `GOVERNANCE`, `ISSUE`, `CHANGE`,
-  `IMPLEMENTATION`, `READY`, `REVIEW`, `TERMINAL`, or `RECOVERY`.
-- `status.availability` is one of `actionable`, `blocked`,
-  `recovery-required`, or `terminal`. `actionable` requires exactly one
-  `nextAction` and no `recovery`; `blocked` and `terminal` expose no safe
-  next action; `recovery-required` requires a `recovery` object and exactly
-  one recovery next action.
-- `status.changeState`, when present, is the existing Change state vocabulary:
-  `DEFINED`, `DRAFT`, `REVIEW`, `ACCEPTED`, `MERGED`, `ABORTED`, or
-  `RECOVERY_REQUIRED`. It is derived from authoritative projection and is
-  never caller input.
-- `status.projectionStatus`, when present, reuses the existing Change
-  projection status vocabulary: `healthy`, `absent`, `partial`, `duplicate`,
-  `wrong-base`, `ambiguous`, or `unavailable`.
-- `status.executionOutcome`, when present, reuses the existing trusted
-  execution outcomes: `verified`, `returned-existing`, `compensated`,
-  `recovery-required`, or `failed`.
-- `diagnostics` contains only bounded, allowlisted Core/executor diagnostics.
-  Human-readable messages are explanatory; `code`, `path`, and the status or
-  recovery fields are the machine contract. Raw provider payloads, tokens,
-  stack traces, and unbounded logs never cross this boundary.
+Any serialized projection that formerly equated `rootIssue` with the
+Implementation requires explicit identity migration. This document does not
+silently reinterpret an existing wire record.
 
-### 5.2 `nextAction` vocabulary
+## 7. Machine-readable result
 
-`nextAction` is either one object or `null`; it is never a free-form sentence.
-Its `kind` is one of:
+### 7.1 Envelope responsibilities
 
-| Kind                  | Meaning                                                                          |
-| --------------------- | -------------------------------------------------------------------------------- |
-| `PREFLIGHT`           | Verify or repair the packaged executable environment before mutation.            |
-| `DISCOVER_GOVERNANCE` | Resolve the target repository Canon and effective contract.                      |
-| `CREATE_ISSUE`        | Create or complete the governed root Issue through the existing Issue authority. |
-| `ISSUE_CHANGE`        | Issue the Change through existing Change semantics.                              |
-| `IMPLEMENT`           | Work on the already-issued canonical branch.                                     |
-| `READY_CHANGE`        | Request the governed ready transition after implementation evidence is present.  |
-| `REVIEW`              | Perform repository review/CI activity after verified review admission.           |
-| `RETRY`               | Repeat the named safe operation after the required reread/precondition.          |
-| `ABORT`               | Run the governed abort/cleanup transition.                                       |
-| `RECOVER`             | Run the explicitly admitted recovery action.                                     |
-| `MANUAL_REVIEW`       | Stop automated recovery and require bounded human/operator inspection.           |
-| `WAIT`                | Wait for an external repository condition such as CI or review.                  |
+The composition result contains its version, exact subject identity, bounded
+status, one next action or null, recovery or null, and diagnostics.
+It may accompany existing Change results but must not replace their authority
+or expose XState types.
 
-Each object also contains:
+Subject is the Source Change when the result concerns a Change. Applicable
+Implementation/task/publication identity remains separately bound. A partial
+subject before resolution is not a grant to infer missing identity.
 
-- `owner`: one of `caller`, `inari`, `worker`, `repository`, or `recovery`;
-- `reasonCode`: a bounded stable code, not a diagnostic sentence;
-- `retryOf`, only for `RETRY`, naming the semantic operation being retried.
+### 7.2 Status dimensions
 
-The initial reason-code vocabulary is:
+`availability` remains one of actionable, blocked, recovery-required, or
+terminal. Domain `changeState` uses DEFINED, DRAFT, REVIEW, ACCEPTED, MERGED,
+ABORTED, and RECOVERY_REQUIRED where present.
+
+Projection status preserves healthy, absent, partial, duplicate, wrong-base,
+ambiguous, and unavailable. Execution outcome preserves verified,
+returned-existing, compensated, recovery-required, and failed.
+
+A status belongs to its own dimension. Unavailable evidence is not absent;
+verified transport is not verified execution; REVIEW is not ACCEPTED.
+
+### 7.3 Next action
+
+The existing bounded action vocabulary includes:
+
+```text
+PREFLIGHT
+DISCOVER_GOVERNANCE
+CREATE_ISSUE
+ISSUE_CHANGE
+IMPLEMENT
+READY_CHANGE
+REVIEW
+RETRY
+ABORT
+RECOVER
+MANUAL_REVIEW
+WAIT
+```
+
+Each action identifies its owner, stable reason code, and the retried semantic
+operation when applicable. It is not a free-form sentence that clients parse
+for commands.
+
+The existing owner vocabulary is caller, inari, worker, repository, and
+recovery. Structured invocation is derived from the command contract rather
+than assembled from untrusted shell strings.
+
+### 7.4 Reason codes
+
+Preserve the existing bounded meanings:
 
 ```text
 PACKAGE_CAPABILITY_REQUIRED
@@ -368,244 +245,151 @@ MANUAL_RECOVERY_REVIEW_REQUIRED
 WAIT_FOR_REPOSITORY_REVIEW
 ```
 
-An implementation may add a code only through a separately governed contract
-change. It may use an existing Core diagnostic code as additional evidence,
-but may not replace a stable `nextAction` with free-form diagnostic parsing.
+Changing public code meaning is a contract change. Additional domain evidence
+may explain a result, but diagnostic prose is not a substitute action code.
 
-### 5.3 Recovery contract
+### 7.5 Recovery object
 
-`recovery` is `null` for a healthy or ordinary blocked projection. When present
-it has this minimum shape:
+The bounded recovery classification retains:
 
-```json
-{
-  "class": "ISSUANCE_COMPENSATION_UNSAFE",
-  "safeAction": "MANUAL_REVIEW",
-  "retryable": false,
-  "rereadRequired": true,
-  "automaticCleanup": "forbidden"
-}
-```
+- ISSUANCE_PARTIAL_PROJECTION;
+- ISSUANCE_COMPENSATION_UNSAFE;
+- ABORT_CLEANUP_PENDING;
+- ABORT_CLEANUP_UNSAFE;
+- POST_EFFECT_VERIFICATION.
 
-The bounded recovery classes are:
+It identifies the safe action, retryability, required reread, and cleanup
+policy. Safe action is RETRY, ABORT, RECOVER, or MANUAL_REVIEW. Automatic
+cleanup is none, conditional, or forbidden. Recovery requires fresh evidence.
 
-- `ISSUANCE_PARTIAL_PROJECTION` — an issuance effect may have succeeded but a
-  complete Change is not proven;
-- `ISSUANCE_COMPENSATION_UNSAFE` — the created branch generation cannot be
-  safely deleted under the existing compare/generation contract;
-- `ABORT_CLEANUP_PENDING` — abort has occurred partially and a remaining
-  cleanup effect is still explicitly admissible;
-- `ABORT_CLEANUP_UNSAFE` — cleanup evidence is insufficient or the branch has
-  advanced, so automatic deletion is forbidden;
-- `POST_EFFECT_VERIFICATION` — the effect response and authoritative reread do
-  not prove the planned postcondition.
+An unsafe compensation cannot expose a normal mutation action. Manual review
+must not fabricate a cleanup command. A recovery result cannot be normalized
+to DEFINED/ABORTED/absent without proof.
 
-`safeAction` is one of `RETRY`, `ABORT`, `RECOVER`, or `MANUAL_REVIEW`.
-`automaticCleanup` is one of `none`, `conditional`, or `forbidden`.
-`rereadRequired` is always `true`; recovery never authorizes acting on stale
-effect evidence. A `MANUAL_REVIEW` recovery must not manufacture a cleanup
-command. A recovery result is not success and cannot be normalized to
-`absent`, `DEFINED`, or `ABORTED` without authoritative proof.
+### 7.6 Consistency
 
-### 5.4 Contract consistency rules
+Actionable requires exactly one safe next action and no recovery object.
+Blocked/terminal has no automatic next action. Recovery-required has its
+recovery object and matching bounded recovery action.
 
-- `status.changeState` and `status.projectionStatus` are read projections from
-  existing Core/Change evidence, not Golden Path-owned state.
-- `status.availability = actionable` requires one safe `nextAction` and no
-  `recovery`; `blocked` and `terminal` require no `nextAction`.
-- `status.availability = recovery-required` requires non-null `recovery` and
-  one `RETRY`, `ABORT`, `RECOVER`, or `MANUAL_REVIEW` next action whose safety
-  is justified by that recovery object. The `nextAction.kind` mirrors
-  `recovery.safeAction`, with `MANUAL_REVIEW` mapping directly to
-  `MANUAL_REVIEW`.
-- `nextAction = RETRY` is valid only after the required authoritative reread or
-  an explicitly read-only preflight retry.
-- A healthy `change.issue` retry exposes `executionOutcome = returned-existing`
-  and no duplicate effect. A safe failed issuance compensation exposes
-  `executionOutcome = compensated` and no issued Change.
-- A verified ready transition exposes `changeState = REVIEW`,
-  `projectionStatus = healthy`, and `nextAction.kind = REVIEW` or `WAIT` for
-  repository review/CI. It does not expose `ACCEPTED` or `MERGED` early.
-- A recovery-required result never exposes a normal mutation action in place of
-  its recovery action.
-- A machine state-node name, XState snapshot, provider error object, or CLI
-  prose string is not a public status value.
+A healthy issuance retry returns existing without create effects. Safe failed
+compensation reports compensated, not successful issuance. Verified ready
+reports healthy REVIEW and the relevant review/wait activity, not early merge.
 
-## 6. Package-level certification boundary
+Raw provider payloads, tokens, stack traces, machine snapshots, and arbitrary
+logs never enter this public result.
 
-### 6.1 Certification subject
+## 8. Retry, abort, and compensation
 
-The certification subject is the artifact produced by the repository's build
-and pack flow and installed into an isolated fresh environment:
+Every retry starts with the required fresh observation. A possible effect
+followed by timeout is not a pre-effect failure.
 
-```text
-repository source
-  -> build
-  -> pack gh-inari
-  -> isolated consumer environment
-  -> installed package bin: inari / gh-inari
-  -> Golden Path certification
-```
+If canonical publication already satisfies the request, return existing.
+If partial creation can be compensated under exact generation safety, apply
+only that plan and verify the outcome. If advanced or ambiguous state makes
+cleanup unsafe, preserve work and report recovery required.
 
-The harness must:
+Abort uses its own canonical closure/cleanup contract. It is not the issuance
+compensation algorithm. An already aborted Change is an idempotent result;
+remaining cleanup is applied only when currently safe.
 
-- build and pack the package before the scenario run;
-- install the packed tarball, not a workspace link or source path;
-- run the real packaged `inari` executable from a clean consumer directory;
-- verify package identity/capabilities before any GitHub write;
-- include the packaged Skill assets and invoke the versioned
-  `inari skill golden-path` scenario once that implementation leaf exists;
-- capture and validate only bounded machine-readable output;
-- exercise normal mutations through existing Inari Change/Issue operations and
-  the trusted executor, never raw GitHub writes;
-- use a disposable or explicitly controlled governed repository/fixture for
-  the run, with credentials and repository state isolated from the source
-  checkout.
+## 9. Console and operator composition
 
-The source-level test suite remains valuable for Core and machine semantics,
-but it is a separate evidence class. Passing source tests without the packed
-executable does not certify the Golden Path.
+One machine Console serves independent repository contexts. Setup, Runtime,
+trust, Sessions, and diagnostics consume canonical owner/Application APIs.
+A route selection does not mutate another repository's Application context.
 
-### 6.2 Certification procedure
+Configuration, process health, provider binding, repository trust, Session
+readiness, Session lifecycle, Relay reachability, and execution result remain
+independent observations with owner evidence and freshness.
 
-The release-blocking certification sequence is:
+Remote UI, when supplied, is a presentation client over the same Runtime API.
+It does not create Hosted repository state or bypass operator authorization.
 
-1. Build and pack `gh-inari`.
-2. Create a fresh isolated consumer environment with no dependency on the
-   source checkout's runtime modules or global `inari` installation.
-3. Install the tarball and invoke the installed `inari` bin for preflight and
-   Skill discovery.
-4. Resolve repository Canon and effective Issue/PR contracts through the
-   packaged executable.
-5. Create or select a governed Issue through the existing Issue authority.
-6. Issue the Change through the packaged executable and verify one canonical
-   branch plus one canonical Draft PR.
-7. Repeat issuance and assert `returned-existing` with no duplicate effects.
-8. Perform implementation setup in the controlled worker environment, invoke
-   ready through the packaged executable, and verify `REVIEW` after reread.
-9. Exercise abort/cleanup and retry on disposable Changes.
-10. Inject or reproduce partial-effect, reread, verification, and unsafe
-    cleanup conditions and assert bounded status/next-action/recovery results.
-11. Preserve the JSON evidence and fail the certification if any row invokes a
-    source entrypoint, raw GitHub write, duplicate effect, unsafe cleanup, or
-    unbounded diagnostic.
+Disconnect prevents new relevant work, obtains the active Session decision,
+detaches bindings, and performs only explicitly selected cleanup. Shared App
+or Authority material is not deleted with one repository. Rotation verifies
+the candidate before switching and retiring old access.
 
-Failure injection may use deterministic bounded adapter fakes for provider
-conditions that cannot be safely manufactured in a live repository, but the
-scenario runner and result boundary remain the installed package executable.
-The fakes supply evidence/effect outcomes; they do not define semantic policy
-or a second lifecycle model.
+## 10. Installed-package certification
 
-### 6.3 Required certification matrix
-
-| Case                    | Starting condition                                                           | Required result                                                                                                                            |
-| ----------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Fresh package preflight | Clean consumer directory and packed artifact                                 | Real installed `inari` verifies identity/capabilities; no mutation occurs before success.                                                  |
-| Governance and Issue    | Valid repository Canon and no root Issue, or a valid existing governed Issue | Existing Issue authority creates/reads the Issue; invalid or ambiguous governance fails closed with a deterministic recovery action.       |
-| Happy path              | Governed Issue in `DEFINED`                                                  | `change.issue` yields one canonical branch and one Draft PR; implementation then yields verified `DRAFT -> REVIEW` through `change.ready`. |
-| Issuance retry          | Healthy canonical Change already exists                                      | `change.issue` returns the existing projection with `returned-existing`; branch/PR create effects remain zero.                             |
-| Ready retry             | Healthy canonical PR is already `REVIEW`                                     | Ready is an explicit idempotent no-op/verified result; no duplicate ready effect is emitted.                                               |
-| Normal abort            | Disposable Change in `DRAFT` or `REVIEW`                                     | Close canonical PR, conditionally clean canonical branch, reread, and verify `ABORTED`.                                                    |
-| Abort retry             | Change already `ABORTED`                                                     | Deterministic idempotent result; no unsafe or duplicate cleanup.                                                                           |
-| Partial issuance        | Branch effect succeeds and PR effect fails or is ambiguous                   | Reread first; safe conditional compensation yields `compensated` with no issued Change, otherwise `RECOVERY_REQUIRED`.                     |
-| Unsafe compensation     | Branch generation advanced, moved, or cannot be proven                       | No blind delete; expose recovery class/action with `automaticCleanup = forbidden`.                                                         |
-| Reread unavailable      | Provider read after an effect is unavailable                                 | Do not treat unavailable as absent/success; expose bounded retry/recovery semantics and no duplicate create.                               |
-| Conflicting projection  | Duplicate, wrong-base, ambiguous, or partial canonical evidence              | Fail closed before mutation or enter explicit recovery; no heuristic candidate selection.                                                  |
-| Package/Skill boundary  | Installed package contains plugin/Skill assets                               | `inari skill golden-path` resolves from the packaged artifact; `SKILL.md` remains a router, not a copied playbook.                         |
-
-The matrix covers the happy path, issuance idempotency, abort/cleanup,
-partial failure, authoritative reread, verification failure, and
-recovery-required behavior required by Issue #395.
-
-### 6.4 Dogfood and release gate
-
-`yohn-jp/gh-inari` is the first continuous dogfood consumer. Dogfood must use
-the same packaged executable and governed Change path as external consumers.
-The certification lane becomes release-blocking after dogfood demonstrates
-stable happy-path and recovery behavior. Manual branch or PR creation required
-to develop Inari is a regression signal, not a replacement for certification.
-
-## 7. Dependency and convergence graph
-
-The Golden Path composes the following work without taking over its semantic
-responsibilities:
+### 10.1 Subject
 
 ```text
-#239 Change dogfood / abort-cleanup evidence --\
-#350 issuance Saga (complete) ---------------+--> Golden Path certification matrix
-#351 production-machine graph coverage -------/
-#352 TrustedChangeExecutor convergence -------/
+exact repository candidate
+  -> build and pack
+  -> isolated consumer installation of the tarball
+  -> installed inari / gh-inari executable
+  -> public-path scenario
 ```
 
-The graph is a certification/decomposition relationship, not a new runtime
-dependency database. Exact implementation readiness remains governed by the
-Issues and their executable acceptance criteria.
+A source entrypoint, workspace link, direct dist invocation, or unrelated
+global install does not prove the installed package boundary.
 
-| Issue | Dependency role                                                                                                                                                                                                                          | Boundary preserved                                                                                                       |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| #239  | Supplies the end-to-end dogfood evidence for Change issuance/ready and the still-critical abort, canonical-branch cleanup, and orphan/partial-issuance cases. Its abort/cleanup acceptance must be part of the Golden Path release gate. | It owns dogfood evidence and lifecycle validation; Golden Path does not reimplement abort or cleanup.                    |
-| #350  | **Complete.** Supplies the XState issuance Saga: root-Issue admission, authoritative projection, idempotent existing-Change path, branch-before-PR effects, compensation, reread, and verification.                                      | XState sequences the Saga; Core still owns branch/PR semantics and effect plans.                                         |
-| #351  | **Complete.** Supplies graph/model coverage over production lifecycle and operation machines, including retries, failures, compensation, and recovery.                                                                                   | Production machines are traversed; no hand-written Golden Path state model becomes a second authority.                   |
-| #352  | **Complete.** Converges `TrustedChangeExecutor` on the canonical XState runtime while preserving public Change/Actions/CLI/MCP contracts.                                                                                                | The executor remains an adapter; Golden Path consumes its bounded results and does not classify lifecycle independently. |
+The harness records source/package identity, isolates config and credentials,
+verifies package capability before mutation, and captures only bounded output.
+Skill assets and command discovery must come from that installed artifact.
 
-The #350/#351/#352 implementation dependencies are complete at the current
-main baseline. Their completion does not constitute package certification:
-#239 dogfood/abort-cleanup evidence and the later #553 cross-deployment
-conformance suite remain separate gates. No new facade may duplicate the
-completed sequencing, coverage, or convergence work.
+### 10.2 Continuous scenario
 
-## 8. Post-gate implementation order
+The installed path resolves Canon, establishes Source/task authorization and
+publication, exercises no-op retry, performs admitted ready, and tests abort
+and partial-effect recovery on controlled disposable state.
 
-After this document merges, implementation work is decomposed into independent
-Issues in this order:
+For onboarding proof, fixtures must not pre-create connected/trusted/ready
+state. For operation proof, provider fakes may supply bounded external
+conditions but may not implement a second semantic engine.
 
-1. Extend the existing package-level harness to run the Golden Path from a
-   packed artifact in a fresh environment.
-2. Define the transport-neutral status/next-action/recovery projection by
-   composing existing Change projection, execution evidence, and bounded Core
-   diagnostics. Preserve existing public fields and versions.
-3. Add the `inari skill golden-path` playbook as a thin composition over the
-   existing live skill scenarios and exact command help. Do not copy its
-   content into `skills/inari/SKILL.md`.
-4. Integrate the completed #350/#351/#352 evidence and the outstanding #239
-   abort/cleanup evidence into the package certification matrix and dogfood
-   lane.
-5. Make the packed certification release-blocking after dogfood proves
-   stability; add no new authority as a shortcut around an incomplete
-   dependency.
+### 10.3 Required matrix
 
-Each leaf must identify its exact executable authority, preserve the status
-contract above, and add only the smallest surface needed to certify the path.
-No implementation leaf may introduce Golden Path-specific branch, template,
-transition, recovery, or provider rules.
+Prove clean package discovery; valid and invalid governance; clean local
+onboarding; resume/adoption; exact Source/task publication; healthy issuance
+retry; ready retry; normal abort; already-aborted retry; partial issuance;
+unsafe compensation; unavailable reread; conflicting publication; and
+packaged Skill/command discovery.
 
-## 9. Architecture review gate
+For multi-repository composition, use A/B positive operations and cross-target
+negative attempts, rename with stable identity, concurrent Sessions,
+restart, shared-versus-dedicated App binding, rotation, and disconnect.
 
-This document is ready for implementation decomposition only when reviewers can
-answer yes to all of the following:
+For remote composition, prove the real public ingress into separate owner
+processes, wrong issuer/Relay/repository/App/task/request denial, expiry/replay,
+Runtime offline/reconnect, and absence of GitHub user credentials downstream.
 
-- Does the path explicitly cover fresh environment, packaged `gh-inari`,
-  governed Issue, Change issuance, implementation, ready, and verified
-  `REVIEW`?
-- Are Repository Canon/Semantic Artifact Core, Change, XState, GitHub
-  adapters/executor, and `inari skill` each assigned one authority with no
-  Golden Path duplicate?
-- Are `status`, `nextAction`, and `recovery` bounded, machine-readable, and
-  derived from authoritative evidence rather than prose parsing?
-- Does every effect path reread and verify, and does every retry avoid
-  duplicate canonical branches/PRs?
-- Are abort/cleanup, partial issuance, unsafe compensation, unavailable reads,
-  and recovery-required outcomes in the certification matrix?
-- Is the packed artifact installed and invoked in an isolated fresh
-  environment, with source-only execution explicitly insufficient?
-- Is `inari skill golden-path` defined as the operational authority while
-  `SKILL.md` remains a thin router?
-- Are #239, #350, #351, and #352 mapped without taking over their semantic
-  responsibilities?
-- Is `yohn-jp/gh-inari` identified as the first continuous dogfood consumer?
-- Does the next implementation work decompose into independently executable
-  Issues without adding a new lifecycle or persistence authority?
+### 10.4 Evidence classes
 
-Until a later implementation Issue satisfies these gates with executable
-evidence, this document is an architecture contract, not a claim that the
-Golden Path is implemented.
+Source tests, compiled tests, installed package, real process transport,
+actual browser, deterministic provider, and live GitHub/deployment proof are
+separate classes. A separate temp directory is not proof of a separate host.
+A mocked GitHub response is not a live provider success.
+
+Missing prerequisites are blocked/not checked, never passed.
+
+## 11. Verification ownership
+
+Reuse the same revision-bound build/package only when its identity and
+producer are proved. Avoid concurrent writers to shared outputs. A cache hit
+or older tarball is not evidence for the current candidate.
+
+Routine verification retains its required installed/runtime negative proofs
+but must not reach release-preparation certification. Release and live
+operational certification have explicit separate entrypoints/authority.
+
+See [Verification Architecture](./VERIFICATION_ARCHITECTURE.md) for the suite
+ownership and timing/evidence rules.
+
+## 12. Convergence and review gate
+
+Preserve the existing Core, Saga, model coverage, and Setup owner foundations.
+Migrate identity and public owner seams, then compose local and remote paths,
+then retire competing implementations. Do not rebuild completed foundations
+or use a helper-only success stub to replace an unimplemented connection.
+
+The architecture review asks whether each stage has one owner, whether every
+public state/action is evidence-derived, whether Source/task/publication are
+unambiguous, whether credentials stay with owners, and whether every partial
+failure has a safe next step.
+
+The delivery review additionally requires exact-candidate execution evidence.
+Documentation completion and an Issue closed flag are not Golden Path
+certification, release readiness, or permission to merge.
