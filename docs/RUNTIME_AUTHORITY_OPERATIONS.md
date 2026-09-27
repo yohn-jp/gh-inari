@@ -1,9 +1,5 @@
-# Runtime Authority operations runbook
+# Runtime Authority Operations
 
-This compatibility filename is retained for existing links and operator
-procedures. The canonical runbook is [Delegator operations runbook](./DELEGATOR_OPERATIONS.md).
+This historical filename redirects to [Authority and Delegator Operations](./DELEGATOR_OPERATIONS.md).
 
-The Runtime Authority names used by the CLI, persisted trust records, local
-key path, provisioning variables, and governance check remain stable
-compatibility surfaces. See the canonical runbook's [compatibility
-inventory](./DELEGATOR_OPERATIONS.md#runtime-authority-compatibility-inventory).
+The [Product Architecture Canon](./ARCHITECTURE.md) owns the target architecture. Runtime Authority is the delegation owner, not an Inari Access App, Hosted identity issuer or Relay transport identity. This page defines no additional contract or operational path.

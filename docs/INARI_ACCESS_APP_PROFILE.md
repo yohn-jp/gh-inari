@@ -1,6 +1,6 @@
 # Inari Access GitHub App profile
 
-This document is the canonical public profile copy for the Inari GitHub App.
+This is the public profile copy for Inari Access. The detailed boundary is [Inari Access: App Principal and Credential Profiles](./INARI_ISSUER_APP.md); target-versus-release status is recorded in [Architecture Convergence](./ARCHITECTURE_CONVERGENCE.md).
 
 ## App name
 
@@ -10,44 +10,22 @@ This document is the canonical public profile copy for the Inari GitHub App.
 
 **Governed GitHub access for AI agents and automated runtimes.**
 
-Inari Access is the GitHub App used by Inari to perform explicitly authorized
-repository operations without giving agents or runtimes a reusable GitHub
-credential.
+Inari separates intent, authorization and execution. Repository policy and Inari determine whether an operation is allowed; Inari Access provides the GitHub App identity used for the resulting authorized operation.
 
-### What it does
+### Governed execution
 
-Inari separates **intent**, **authorization**, and **execution**. Repository
-policy and Inari determine which operation is allowed; Inari Access provides
-the GitHub identity used to perform the resulting authorized operation.
+Inari Access reads bounded repository evidence and supplies short-lived, repository-scoped installation authority inside the user-owned Executor. The admitted effect set includes governed branches and pull-request creation, ready and close operations. Agents do not receive the App private key or installation tokens.
 
-The App is used to:
+The App is not a general-purpose agent credential, an independent policy owner, a reviewer or a merge authority. Human review, repository protection and explicit merge policy remain separate gates.
 
-- read repository evidence required for authorization;
-- obtain short-lived, repository-scoped GitHub credentials inside Inari's
-  trusted runtime;
-- create and delete governed branches;
-- create, mark ready, or close governed pull requests; and
-- apply only the GitHub permissions required for the authorized operation.
+### User authorization
 
-### Security model
+The target remote-access profile also uses Inari Access user authorization to authenticate a GitHub user and verify repository eligibility. Hosted uses the GitHub user credential transiently and forwards only a short-lived signed assertion to the user's Runtime, not the credential.
 
-Inari Access is deliberately not a general-purpose GitHub credential for an
-agent.
+Repository visibility does not grant Inari mutation rights. Runtime still admits the caller and requested operation, and Executor still performs admitted effects through its own installation credential. Availability of this profile must be confirmed for the installed/deployed revision; this copy does not certify an unimplemented flow.
 
-Credentials are scoped to the selected repository and operation, remain
-inside the trusted credential boundary, and are discarded after use. Agents
-do not receive the App private key or installation access tokens.
+### Installation and ownership
 
-The App does not approve reviews or merge pull requests. Human review,
-repository protection, and merge policy remain independent authorization
-boundaries.
+Install Inari Access only on repositories where the intended Inari deployment should operate. Installation establishes the GitHub-side ceiling; Runtime policy further limits what may actually happen.
 
-### Why install it?
-
-Install Inari Access on repositories where Inari should be able to execute
-governed GitHub operations. Installation defines the GitHub-side permission
-ceiling; Inari's own authorization model further constrains which operations
-may actually be performed.
-
-For the implementation and trust-boundary contract, see
-[Inari App Principal and Effect Authorizer](./INARI_ISSUER_APP.md).
+Dedicated repository Apps and explicitly shared manual Apps use the same custody and binding rules. Secrets remain with their owning component. Hosted authentication, user-owned execution, caller identity and provider identity are never interchangeable.

@@ -1,296 +1,135 @@
-# Inari Architecture Vocabulary
+# Inari Product Architecture Canon
 
-Status: normative vocabulary for the architecture established by Issues #542
-and #543 and reconciled by #552. This document names responsibility, identity,
-credential, provider, and deployment boundaries. It does not change
-authentication behavior, provider permissions, Change/XState semantics, or
-public and wire contracts.
+Status: approved target architecture, 2026-09-27. This Canon records the architecture-owner decisions from the design review. It is not a claim that every target capability is already implemented. The observed implementation baseline is `597739813c29e6d6fd97479f35a05e6950424515`.
 
-Issue #542 remains the intent and topology authority for the broader
-architecture. This document makes its provider-principal, credential-domain,
-and observation vocabulary concrete. Domain documents retain their detailed
-decisions, but new architecture prose MUST use the terms defined here. Existing
-names remain valid only as implementation or compatibility names unless this
-document explicitly maps them.
+## 1. Decision authority
 
-## 1. Architectural boundary
+The product owner approves architecture changes in the architecture-design review. Implementation agents may propose changes but cannot approve them, silently reinterpret this Canon, or amend an Implementation Issue to create architecture authority. Approval of implementation is not approval to change architecture.
 
-GitHub is the sole repository **Authority**: it owns the durable repository
-facts and provider-enforced state from which Inari derives semantic
-projections. A process, workflow, Runtime Host, XState actor, App, or
-credential is not an Authority merely because it can authenticate or execute
-code.
+This document is the single entry point for normative product architecture. Domain documents refine its decisions; they do not establish competing ones. Accepted Issues specify bounded work inside the approved architecture. Code, schemas and tests establish what a revision actually does, not permission to make an unintended behavior permanent.
 
-The following terms describe different dimensions and MUST NOT be collapsed
-into one another:
+When intent, an Issue and executable behavior disagree, record the exact conflict and reconcile the task with the architecture owner before changing the disputed semantics. Do not weaken a guard or rewrite a test merely to conceal the conflict. Continue unrelated, already-authorized work only when it is independent.
 
-| Term                   | Meaning                                                                                                                                                      |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Role**               | One architectural responsibility or decision ownership. A Role says what must be done, not where it runs.                                                    |
-| **Component**          | Code, module, process, or service that implements one or more Roles. Co-location does not merge the logical boundaries.                                      |
-| **Principal**          | An authenticated identity that can prove identity or possession. A Principal is not automatically an Authority or a semantic requester.                      |
-| **Canon**              | Authoritative governed data or rules held by the Authority. Canon is data, not an executing component.                                                       |
-| **Port**               | A stable transport-neutral contract between Components or Roles.                                                                                             |
-| **Adapter**            | A concrete binding between a Port and a protocol, provider, CLI, or Runtime Host.                                                                            |
-| **Transport**          | The mechanism that moves a request or result. Transport metadata cannot create repository Authority or semantic capability.                                  |
-| **Runtime Host**       | The compute environment in which Components execute, such as local Node.js, an Actions Runner, or a Cloudflare Worker.                                       |
-| **Deployment Profile** | An explicit composition of Components, Adapters, Transports, credentials, and Runtime Hosts.                                                                 |
-| **Trust Boundary**     | A boundary across which identity or credential authority changes and therefore requires explicit proof, scope, or containment.                               |
-| **Executor**           | The operation-coordination Role that admits a request or plan and carries it through a verified terminal result. It is not a Port, Adapter, or Runtime Host. |
+Architecture-owner approval is required for changes to product responsibility, public semantics, identity, credential or state ownership, trust, capability, lifecycle/recovery semantics, deployment guarantees and compatibility removal. Internal functions, file organization, algorithms and test implementation remain implementation choices within those boundaries and the task's declared scope.
 
-`same executable/process != same responsibility`. A compact deployment may
-co-locate Roles, but co-location never permits a Session, Delegator, provider,
-or transport credential to be treated as another credential domain.
+Ordinary implementation must not edit normative architecture or its approval rules. An explicitly approved architecture-documentation task may do so. Generated organization governance remains owned by `yohn-jp/.github`; this policy does not authorize editing generated copies or changing live protection settings.
 
-### 1.1 Execution boundaries
+## 2. Product and non-goals
 
-`Executor` is reserved for operation coordination after admission. A Port
-defines a contract; an Adapter binds that contract to a provider or Transport;
-neither one becomes the semantic Executor merely because it can send requests or
-apply provider effects. Runtime Hosts, including Actions Runners and Workers,
-are deployment environments rather than Executors.
+Inari is one deterministic repository-governance product. It resolves GitHub-backed repository contracts and current evidence, admits bounded semantic requests, applies only permitted effects, and verifies the resulting state.
 
-The Change boundary uses these canonical names:
+Inari owns artifact meaning, Implementation contracts, repository-change authorization, Change lifecycle, governed publication, owner-controlled setup and bounded operational projections. It is not a general GitHub proxy, remote shell, filesystem server, agent scheduler, identity provider with its own user database, or arbitrary workflow engine.
 
-- `ChangeExecutionPort` is the transport-neutral request/read contract.
-- `ActionsChangeExecutionAdapter` and the Direct-App adapter implement that
-  Port and own transport mechanics only.
-- `TrustedChangeExecutor` and Session-authorized coordination are Executor
-  implementations that admit operations and verify terminal results.
-- `LocalSemanticIssueExecutor`, `LocalSemanticBranchExecutor`, and
-  `LocalSemanticPullRequestExecutor` (including their bounded relation and
-  mutation profiles) are explicit local semantic execution profiles. They do
-  not collapse into privileged Change coordination.
+GitHub remains authoritative for GitHub-owned repository facts, protected Canon, Issues, refs, PRs, checks and reviews. Admission owns local Session lifecycle; Executor owns App custody and repository bindings; Authority owns delegation keys. These local records do not form a competing GitHub state database.
 
-The deprecated `ChangeRemoteExecutor` and
-`GitHubActionsChangeRemoteExecutor` exports remain compatibility aliases to the
-canonical Port and Adapter; they contain no parallel behavior.
+Inari remains one product and distribution. Logical isolation uses explicit public ports, dependency boundaries and owner-local state. It does not require a microservice or package per role.
 
-## 2. Provider principals
+## 3. Responsibility model
 
-### 2.1 Canonical terms
+Repository Canon declares repository-specific meaning, relationships and naming policy. Semantic Core compiles contracts, materializes values, projects state, plans changes and verifies semantic postconditions. Generic syntax, CLI mechanics and data-shape validation are not additional Inari policy engines.
 
-**Provider Principal** is the authenticated identity under which access to the
-GitHub provider occurs. It describes provider-facing identity only; it is not
-the repository Authority, a Session Principal, or a semantic capability
-authority.
+Admission authenticates the caller evidence and evaluates repository, subject, current Implementation where applicable, allowed operation and bounded authority. It does not hold GitHub provider credentials or private signing keys.
 
-| Principal               | Definition                                                                                | Current binding                                                                            | Explicit non-meaning                                                                             |
-| ----------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| **App Principal**       | A Provider Principal backed by the Inari GitHub App.                                      | The `inari-issuer` App and its installation-scoped provider access.                        | Not GitHub Authority, Session Authenticator, or semantic Executor.                               |
-| **User Principal**      | A Provider Principal backed by an explicitly trusted user’s existing GitHub credential.   | The bounded native GitHub HTTP path using the resolved user credential.                    | Not App execution and not a reusable Session or Delegator credential.                            |
-| **Transport Principal** | An identity supplied by execution infrastructure for transport or Runtime Host admission. | Trusted execution evidence associated with a workflow, Worker, server, or other transport. | Not automatically the requester identity, a Session Principal, or semantic capability authority. |
+Executor coordinates admitted operations, obtains current bounded provider evidence, contains Inari Access App keys and installation credentials, owns repository-to-App/installation bindings, applies admitted effects and verifies the result. Evidence reads needed by Admission use bounded owner ports; Admission must not acquire a provider token to perform them.
 
-The umbrella term **Provider Principal** is required when the identity may be
-App-backed, user-backed, or another explicitly admitted provider identity.
+Authority owns delegation signing material and bounded delegation/provenance issuance. The compatibility name Runtime Authority denotes this role, not a runtime host or GitHub authority.
 
-### 2.2 GitHub Principal compatibility mapping
+Setup Application derives status, available actions and recovery from owner evidence. Control authenticates operator requests and invokes specific owner ports. Composition selects and connects components and supervises processes it actually owns; it is not a secret parser or policy owner.
 
-**GitHub Principal** is the concrete App-specific Provider Principal for the
-Inari GitHub App. It is not the umbrella term for every identity that can call
-GitHub. In current implementation vocabulary, `inari-issuer`,
-`INARI_ISSUER_PRINCIPAL`, and related issuer identity names remain compatible
-implementation/provenance names for this App Principal; they do not rename or
-broaden the Provider Principal category.
+CLI, MCP, Local Console and optional Hosted UI are clients or protocol/presentation adapters. They do not implement alternate artifact, branch, lifecycle or authorization semantics. A remote UI is not automatically entitled to secret enrollment or operator-control actions.
 
-Therefore:
+## 4. One execution architecture
 
-- an App-backed GitHub read or effect is performed as an **App Principal**;
-- a trusted local `gh auth` read or effect is performed as a **User Principal**;
-- an Actions or other infrastructure identity is classified as a
-  **Transport Principal** for transport/runtime admission unless a separate
-  provider identity is explicitly established;
-- authenticating as any of these principals does not make the principal the
-  repository Authority or grant semantic capabilities by itself.
-
-## 3. Credential domains
-
-Credential names describe trust domains, not implementation formats. The four
-domains are distinct and one class MUST NOT be inferred from another:
-
-| Credential domain         | Canonical meaning                                                                                 | Allowed use                                                                                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Delegation Credential** | Long-lived Delegator key material used only to create bounded delegation or attestation.          | Signing a bounded Session certificate or governed provenance; never direct GitHub provider access.                                                           |
-| **Session Credential**    | Ephemeral Session key plus Delegator-signed certificate and request proof-of-possession material. | Authenticating one bounded Agent Session request; never App installation access or further delegation.                                                       |
-| **Provider Credential**   | A bounded credential used to access GitHub as a Provider Principal.                               | Provider reads or already-admitted effects within the target repository and permission ceiling.                                                              |
-| **Transport Credential**  | A credential used only to enter or operate a Transport or Runtime integration.                    | Transport/runtime admission; never semantic requester identity or GitHub provider authority unless a separate Provider Credential is explicitly established. |
-
-The compatibility name **Runtime Authority** refers to the Delegator Role in
-existing API and wire contracts. It is not a Runtime Host, repository
-Authority, Change state owner, or Provider Principal. The Delegator key is a
-Delegation Credential and never becomes an App, User, Session, or Transport
-Credential.
-
-Agent Sessions never receive Delegation Credentials, reusable Provider
-Credentials, or Transport Credentials belonging to trusted infrastructure.
-Provider credentials are scoped and discarded at their existing trusted
-credential boundary; the domain label does not authorize a caller to request
-or retain one.
-
-## 4. Deployment profile classification
-
-The same semantic operation can use different provider and transport bindings.
-The bindings below are classification rules, not new execution paths.
-
-| Deployment profile        | Runtime Host / Transport                                                                                | Provider identity and credential                                                                                                                                                                                                                                     | Boundary rule                                                                                                                                                      |
-| ------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Local trusted-human**   | Local Node.js process; `gh` process transport.                                                          | **User Principal** + the trusted user’s existing **Provider Credential** from `gh auth`.                                                                                                                                                                             | This is a valid user-backed profile; it must not be labeled App execution.                                                                                         |
-| **Direct App / Worker**   | Cloudflare Worker or server; HTTPS transport.                                                           | **App Principal** + a bounded installation **Provider Credential** obtained and contained by the App Credential Broker.                                                                                                                                              | Worker/runtime admission and Session authentication remain separate from App provider identity.                                                                    |
-| **Actions compatibility** | GitHub Actions Runner as Runtime Host; workflow dispatch/call and bounded result artifact as Transport. | The broker-issued installation credential is the **Provider Credential** for the App Principal used by semantic evidence and effects. `GITHUB_TOKEN` is retained only for the bounded Actions bootstrap/transport read that resolves the target repository identity. | Workflow/runtime fields and actor metadata are transport/runtime evidence; they cannot by themselves establish a semantic requester or enlarge Session capability. |
-
-For the Actions profile specifically:
-
-- `GITHUB_WORKFLOW_REF`, the protected `GITHUB_REF`, event information, and
-  related workflow claims establish trusted-execution context only after the
-  executor verifies the protected workflow boundary;
-- `GITHUB_ACTOR` and `GITHUB_TRIGGERING_ACTOR` are runtime/transport metadata,
-  not caller-supplied Session authority. A trusted executor may record its own
-  authenticated actor as bounded provenance only after independently proving
-  the protected executor context; the raw transport field does not create the
-  semantic requester or capability authorization;
-- `GITHUB_TOKEN` is limited to the bounded Actions bootstrap/transport
-  responsibility of resolving the workflow target repository identity. It is
-  not the semantic evidence credential and is not a Delegation Credential or
-  Session Credential;
-- semantic Change evidence for authentication, admission, projection, planning,
-  and postcondition verification is read through the broker-owned,
-  repository-scoped App capability. The Evidence Reader records the explicit
-  App Provider Principal at that boundary;
-- App private-key and installation-token handling remains inside the trusted
-  App Principal Credential Broker boundary. No Actions workflow input or result artifact
-  carries those credentials to a caller.
-
-This preserves the distinction between the person or Agent Session that
-requested an operation, the infrastructure that transported it, and the
-Provider Principal that performed a bounded GitHub read or effect.
-
-## 5. Observation Projector
-
-The **Observation Projector** is the pure Role that converts already-bounded,
-provider-normalized evidence into provider-neutral **Operational Observation**.
-It performs no GitHub I/O, no transport operation, no mutation, and no
-semantic policy decision.
-
-The canonical implementation is
-[`src/operational-observation.ts`](../src/operational-observation.ts):
+Local and remote ingress converge on the same user-owned Admission and Executor semantics:
 
 ```text
-Provider Adapter / Evidence Reader
-    -- bounded GitHub I/O --> provider-normalized evidence
-    -- no I/O --> Observation Projector
-    -- deterministic conversion --> Operational Observation
-    -- separate semantic interpretation --> State Projector / Core
+local caller evidence -------------------------+
+                                               |
+remote caller -> Hosted authentication         |
+  -> signed Repository Access Assertion        |
+  -> Relay -> user-owned ingress ---------------+
+                                               v
+                                           Admission
+                                               v
+                            Executor + Semantic Core / Lifecycle Controller
+                                               v
+                            Inari Access installation credential boundary
+                                               v
+                                             GitHub
+                                               v
+                            authoritative reread + postcondition verification
 ```
 
-The `observeOperationalIssue` and `observeOperationalPullRequest` entrypoints
-and their `tryObserve...` variants validate and normalize the evidence into
-the versioned (`version: 1`) Operational Observation model. They preserve
-bounded resource state, provider provenance, and collection availability while
-remaining independent of GitHub transport and credentials.
+Admission and planning may require bounded current evidence before an effect is admitted. The diagram does not require evidence to be read only after authorization, nor does it require pure schema/render operations to acquire mutation authority.
 
-The Observation Projector is distinct from the semantic **State Projector**:
+All normal governed provider mutations use Executor-owned Inari Access installation capabilities. Caller identity and provider execution identity remain separate. OAuth credentials do not become execution credentials. Bootstrap/trust publication is a separately authorized operator path; it cannot silently serve as a normal-operation fallback.
 
-- the Observation Projector describes what bounded provider evidence says;
-- the State Projector interprets admissible evidence together with Canon and
-  semantic contracts to derive Inari state;
-- neither projector is the GitHub Authority, a credential broker, or a
-  transport adapter.
+Direct App as an independent client-to-provider execution deployment is retired. Retiring that deployment does not remove the Inari Access App, its broker, or semantic/effect implementations that the canonical Executor still needs. Actions may provide CI or a bounded integration adapter; it must not preserve a second normal execution authority.
 
-Provider I/O belongs to adapters such as
-[`src/github/adapter.ts`](../src/github/adapter.ts),
-[`src/github/app-repository-evidence-reader.ts`](../src/github/app-repository-evidence-reader.ts),
-and the bounded process/API transports. The class name
-`GitHubActionsEvidenceReader` in
-[`src/github/actions-change-executor.ts`](../src/github/actions-change-executor.ts)
-is a compatibility/naming-debt case: the reader is reused by the deployment-
-agnostic Direct App composition and its responsibility is provider evidence
-acquisition, not Actions-specific semantics.
+## 5. Identity and graph semantics
 
-## 6. Evidence-to-effect responsibility boundaries
+Repository identity is `repositoryHost + repositoryId`. A name, checkout path, URL or installation ID is not a substitute. A rename updates metadata without creating another repository.
 
-The privileged execution path is a sequence of distinct Roles. A component may
-co-locate them, but no Role may absorb another Role's responsibility merely
-because the same process performs both steps.
+Source Issue records an outcome and acceptance criteria. Implementation records one bounded execution contract, its canonical Source set, body digest, base, scopes and dependencies. Session identifies one bounded delegated execution, not the Source itself.
 
-| Role                       | Owns                                                                                                                                                                        | Must not own                                                                                     |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| **Credential Broker**      | App private-key and installation-token containment; bounded provider capability issuance for the target repository and permission ceiling.                                  | Session capability admission, semantic planning, reusable credential return, or caller identity. |
-| **Evidence Reader**        | Bounded current evidence acquisition through an admitted Provider Credential.                                                                                               | GitHub-to-Inari semantic interpretation, lifecycle transitions, or policy decisions.             |
-| **Observation Projector**  | Pure normalization of provider evidence into versioned Operational Observation.                                                                                             | GitHub I/O, mutation, repository policy, or semantic Change state.                               |
-| **State Projector**        | Deterministic interpretation of admissible observations plus Canon/contracts into Inari state and projections.                                                              | Provider I/O, credential handling, or lifecycle/effect sequencing.                               |
-| **Operation Planner**      | Conversion of a requested semantic operation and projected state into bounded intended effects and postconditions.                                                          | Applying effects, minting credentials, or inventing provider-specific policy.                    |
-| **Lifecycle Controller**   | Legal event sequencing, retry/no-op branches, compensation, recovery, reread, and postcondition-verification control flow. XState is the current implementation technology. | Repository Authority, persistent Change state, artifact derivation, or provider normalization.   |
-| **Effect Authorizer**      | Validation that one already-planned effect may cross the App Principal credential boundary for the execution context and permission ceiling.                                | Choosing lifecycle transitions, deriving artifacts, or acting as a general provider client.      |
-| **Effect Adapter**         | Translation of one admitted effect into bounded GitHub provider operations and bounded result evidence.                                                                     | Adding effects, semantic policy, or success claims without reread and verification.              |
-| **Postcondition Verifier** | Comparison of reread/projected Authority state with the planned semantic postcondition before success.                                                                      | Applying effects, changing policy, or treating a transport response as proof of success.         |
+For new canonical Change operations, the Change root is the selected Source Issue. A delegated Implementation Session keeps `task.number = Implementation`. Requested Source membership must be present in both the signed authorized Source set and the freshly read current contract. There is no implicit first or primary Source.
 
-The resulting boundary is:
+Implementation branch/PR publication is distinct from Source Change identity. The existing task-bound `change.implement` compatibility claim is usable only for its established leaf publication/branch-side path; it is never a Source-membership bypass or a grant to create an Implementation-root Change.
 
-```text
-Credential Broker -> Provider Credential
-        -> Evidence Reader -> Observation Projector -> State Projector
-        -> Operation Planner -> Lifecycle Controller
-        -> Effect Authorizer -> Effect Adapter -> GitHub Authority
-        -> Evidence Reader -> Observation Projector -> State Projector
-        -> Postcondition Verifier -> bounded result / recovery
-```
+Integration routing is a separate graph. Canonical parent/routing evidence selects the Implementation leaf's target, then Source integration and Epic integration where used. Multiple authorized Sources do not create arbitrary PR-target selection. Standalone work does not have to manufacture an Epic or integration branch. See [Implementation Contract](./IMPLEMENTATION_CONTRACT.md) and [Change Control Plane](./CHANGE_CONTROL_PLANE.md).
 
-`Executor` is the transport- and Runtime-Host-neutral coordinator around this
-sequence. It composes the Roles; it does not replace them with a single generic
-authority. `ChangeExecutionPort`, CLI, Direct App, MCP, and Actions bind the
-same execution semantics to different client, protocol, or deployment
-surfaces.
+## 6. Hosted authentication and relay
 
-## 7. Current vocabulary map
+Hosted exists to make a user-owned Inari server reachable by cloud clients. It is an authenticated public endpoint, not a cloud copy of Inari's semantic control plane.
 
-This map records the safe classification for the current implementation. #548
-applies the explicit compatibility migration for execution ports, transport
-adapters, and local semantic execution profiles described above.
+Hosted may temporarily use an Inari Access GitHub App user access token to verify GitHub user identity and access to the requested repository through the intended App installation. It emits a short-lived signed Repository Access Assertion and discards the GitHub credential. No GitHub user token is forwarded to Runtime, stored in a job, or used for normal effects.
 
-| Current symbol or surface                                                                              | Canonical classification                                                                                                         |
-| ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `src/github/app-principal.ts`                                                                          | Canonical App Principal identity surface; issuer-named identity constants remain compatibility/provenance names.                 |
-| `src/github/app-installation-credential-broker.ts`                                                     | Credential Broker containing App Principal Provider Credentials and issuing bounded provider capabilities.                       |
-| `src/github/effect-authorizer.ts` / `InariEffectAuthorizer`                                            | Effect Authorizer around App Principal provider effects; it admits only already-planned effects.                                 |
-| `src/github/issuer-authority.ts` / `InariIssuerAppAuthority`                                           | Compatibility module and class alias for the canonical Effect Authorizer; it is not repository Authority.                        |
-| `src/github/native-http-transport.ts` / `GitHubNativeHttpTransport`                                    | Native bounded HTTP Transport at the User Principal Provider Credential boundary.                                                |
-| `src/github/app-repository-evidence-reader.ts`                                                         | Provider Adapter / Evidence Reader for bounded App-backed repository evidence.                                                   |
-| `src/change-execution-port.ts`                                                                         | Transport-neutral Change Port; it defines request/result contracts and normalization, not orchestration.                         |
-| `src/github/actions-change-execution-adapter.ts`                                                       | Actions Transport Adapter implementing `ChangeExecutionPort`; it dispatches/polls transport and does not own semantic admission. |
-| `src/agent-authority/direct-app-client.ts`                                                             | Direct-App Transport Adapter implementing `ChangeExecutionPort`; Session/App authority remains outside this adapter.             |
-| `src/change-trusted-executor.ts` / `TrustedChangeExecutor`                                             | Trusted Change Executor that coordinates admitted operation effects and verifies terminal projection.                            |
-| `src/github/actions-change-executor.ts` / `GitHubActionsEvidenceReader`                                | Provider Evidence Reader with a legacy Actions-specific name; not a separate semantic Executor.                                  |
-| `src/semantic-issue-executor.ts`, `src/semantic-branch-executor.ts`, and `src/semantic-pr-executor.ts` | Local semantic execution profiles with explicit `LocalSemantic...Executor` names.                                                |
-| `src/github/direct-app-execution.ts`                                                                   | Deployment-agnostic composition that wires existing Roles; not a new authority.                                                  |
-| `.github/workflows/inari-change-executor.yml`                                                          | Actions Deployment Profile: Runner Runtime Host plus workflow Transport and trusted provider bindings.                           |
-| `src/operational-observation.ts`                                                                       | Observation Projector; pure provider-evidence normalization with no GitHub I/O.                                                  |
+There is no separate Endpoint App or Inari Identity App. Inari Access has user-authorization and installation-execution credential profiles. Their identity binding must be verified; their credentials and ownership never merge.
 
-Existing wire and provenance names remain compatible where they still carry
-issuer semantics. Public contracts remain compatible through the aliases
-documented above. Future renames require an explicit compatibility or
-migration decision. In particular, better prose must not silently turn a User
-Principal into an App Principal, a Transport Principal into a requester, a
-Provider Credential into a Session Credential, or an Observation Projector into
-a semantic policy engine.
+The assertion proves caller eligibility, not an Inari mutation capability and not GitHub user-scoped execution. Runtime explicitly trusts the assertion issuer for those facts, validates its signature, target and freshness, and independently admits the semantic operation. A signature does not make a compromised issuer trustworthy. Repository visibility alone cannot authorize writing, signing, trust changes, approval or merge.
 
-## 8. Tracking convergence
+Relay routes by a self-certifying public locator derived from a Runtime-owned transport public key. Runtime proves possession during a bounded WebSocket handshake. Hosted returns the confirmed relay ID/public URL only after admission. The same local transport key retains the locator across reconnects. Key replacement changes it and requires explicit client reconfiguration unless a separately approved migration proves continuity.
 
-The documentation and implementation leaves are intentionally separate:
+Relay identity is neither repository identity nor delegation authority. Its private key is separate from Authority signing and App custody. Private repositories need no public Canon file for locator discovery: the operator supplies the public URL to the client, and repository eligibility is authenticated independently.
 
-- [#542](https://github.com/yohn-jp/gh-inari/issues/542) defines the
-  responsibility topology and reserves `Authority` for GitHub.
-- [#543](https://github.com/yohn-jp/gh-inari/issues/543) through
-  [#551](https://github.com/yohn-jp/gh-inari/issues/551) establish the
-  provider, observation, port/adapter, Delegator, App Principal, and branch
-  vocabulary reflected here.
-- [#352](https://github.com/yohn-jp/gh-inari/issues/352) is complete; the
-  trusted Change executor now converges on the canonical XState runtime.
-- [#552](https://github.com/yohn-jp/gh-inari/issues/552) reconciles current
-  architecture prose and active tracking; it does not add production
-  behavior.
-- [#553](https://github.com/yohn-jp/gh-inari/issues/553) remains the open
-  cross-deployment semantic conformance follow-up. Documentation convergence
-  is not evidence that this parity suite is complete.
+Hosted owns only service configuration/keys, bounded authentication transactions, live routing and bounded delivery/replay metadata. It has no durable user/repository database, repository-work cache, semantic execution, or provider-mutation credential store. Authentication evidence may reveal repository IDs to Hosted; this is not a claim that Hosted cannot observe traffic. Ordinary TLS is not end-to-end payload encryption.
 
-Release and self-dogfood gates remain operational gates and are not closed by
-this documentation status map.
+Details and security gates are in [Repository Access Assertion](./REPOSITORY_ACCESS_ASSERTION.md) and [Hosted Relay](./HOSTED_RELAY_DEPLOYMENT.md).
+
+## 7. Local control and custody
+
+Repository registry and Setup metadata are secret-free references to component-owned identities. Executor custody is App-scoped, Authority custody is Authority-ID-scoped, and repository binding is independent of either key's storage partition. Dedicated Apps and explicitly shared manual Apps use the same binding model without duplicating PEM files.
+
+One machine-scoped Console serves repository-scoped contexts. Configuration, process health, provider binding, protected-ref trust, Session readiness, Session lifecycle, execution outcome and Relay reachability remain distinct dimensions.
+
+Connect uses owner actions for App enrollment/installation, Authority preparation, governed trust publication, human review, protected-ref recheck and readiness. Disconnect/rotation are explicit recoverable lifecycles, not directory deletion. Shared owners are not deleted while another binding still depends on them.
+
+Remote Control initially accepts explicit endpoint, expected component identity and operator-provided trust material. Automatic PKI, automatic remote discovery and remote Authority are not implied. Control and Admission transport principals have different route authority. See [Runtime Component Boundaries](./RUNTIME_COMPONENT_BOUNDARIES.md).
+
+## 8. Semantic and CLI convergence
+
+JSON Schema 2020-12 owns generic artifact data shape. Inari owns value authority, relations, derivations, provenance and capabilities. Markdown syntax is parsed through the shared mdast boundary; observed free text comes from source slices, not generic stringification. Automatic reconciliation applies only proven semantics-preserving changes with independent governance and observation freshness gates.
+
+CLI Canon owns command grammar, standard shell, help, version, usage errors, invocation/Skill projection and eligible lexical paths. Inari retains domain meaning, security enforcement and terminal ownership for genuine interactive/protocol surfaces. This campaign completes the eligible CLI migration, not only touched routes. Each migrated fact has one active authority.
+
+Nawabari owns worktree/process/filesystem isolation. Mottainai owns agent orchestration. Wabachi owns its architecture/design semantics. Suzukuri owns its published bounded observation/test-projection contracts. Inari consumes explicit contracts; it does not copy those products' responsibilities.
+
+## 9. Failure, persistence and compatibility
+
+Provider success is not semantic success. Every effect ends with authoritative reread and postcondition verification or a bounded failure/unknown outcome. Unknown delivery or a lost response never justifies blind replay.
+
+Owner records, journals and replay fences may be durable where required for restart safety. A UI cache, XState snapshot, Relay job or OAuth session is not a Change state authority. Reuse is always bound to exact identity and relevant generation.
+
+Old architectures must not survive as fallback executors, parallel parsers or implicit credential paths. Bounded old-data readers may remain only when they converge into the canonical model without broadening authority. Historical records retain their original identity; ambiguous records are not reinterpreted. Retirement includes consumer migration, regression evidence and removal of new-work entry points, not just a deprecated label.
+
+## 10. Documents, implementation and completion
+
+The normative domain set is:
+
+- [Golden Path](./GOLDEN_PATH_ARCHITECTURE.md), [Change](./CHANGE_CONTROL_PLANE.md), [Implementation](./IMPLEMENTATION_CONTRACT.md), [Execution Scope](./IMPLEMENTATION_EXECUTION_SCOPE.md) and [Branch Policy](./REPOSITORY_BRANCH_POLICY.md).
+- [Authorization](./AGENT_CAPABILITY_AUTHORIZATION.md), [Repository Access Assertion](./REPOSITORY_ACCESS_ASSERTION.md), [Inari Access](./INARI_ISSUER_APP.md) and [Runtime Boundaries](./RUNTIME_COMPONENT_BOUNDARIES.md).
+- [Artifact Contracts](./SEMANTIC_ARTIFACT_CONTRACTS.md), [Templates](./SEMANTIC_TEMPLATES.md), [Lifecycle Controller](./XSTATE_CHANGE_MACHINE.md) and [MCP](./NATIVE_MCP_ISSUER_GATEWAY.md).
+
+[Architecture Convergence](./ARCHITECTURE_CONVERGENCE.md) records implementation gaps and dependency order. [Verification Architecture](./VERIFICATION_ARCHITECTURE.md) distinguishes source, compiled, installed, process/browser and live-provider evidence. Operational guides consume these contracts; they cannot change them.
+
+Release/certification archives record historical evidence at their stated revisions. An old Issue, document, successful test or merged leaf does not establish current product completion. Every open Issue must be assessed against this Canon before execution. No Issue is closed merely by publishing these documents.

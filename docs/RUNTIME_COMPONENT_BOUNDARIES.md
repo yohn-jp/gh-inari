@@ -1,157 +1,71 @@
 # Runtime Component Boundaries
 
-Source: #1098. Implementation: #1105. Epic: #1097. Baseline: `569c2399fe63bb78adf92a766375da8fd9485ca8`.
+Status: normative target under [Product Architecture Canon](./ARCHITECTURE.md). One product/distribution contains distinct owners connected through public contracts. Module isolation is not OS sandboxing.
 
-Inari ships as one product and one distribution. This document freezes the public Runtime ports, the ownership of every Runtime component, and the import direction the migration leaves (#1106, #1107, #1108, #1109, #1110, #1111) build against. Module isolation is not OS sandboxing. It keeps private secret-holding code out of the components that must not load it.
+## 1. Owners
 
-The executable authority is:
+`runtime-contracts` owns transport-neutral DTOs, validators and public ports, not provider I/O or secret handling. `setup-application` owns secret-free action/state/recovery projection. It depends on public contracts, not private component implementations.
 
-- `src/runtime-contracts/`: the public ports, DTOs, validators and ownership catalog.
-- `scripts/check-runtime-boundaries.mjs`: the dependency guard. It runs in `pnpm run verify` as `boundaries:check`.
-- `test/runtime-boundaries.test.mjs`: the guard proofs and the frozen migration-ledger baseline.
+CLI and Console present operations/results. Admission owns caller/Session authentication, capability admission and Session lifecycle. Executor owns Inari Access custody, repository bindings, provider evidence and admitted execution. Authority owns delegation signing. Composition wires owners and supervises only processes/listeners it actually owns.
 
-## Components and ownership
+Hosted authentication has narrowly scoped transient GitHub-user verification and assertion signing. Relay owns locator routing and bounded delivery. Neither imports private Runtime owners or becomes a semantic execution host.
 
-`RUNTIME_COMPONENT_CATALOG` in `src/runtime-contracts/components.ts` is the canonical catalog. The guard's `RUNTIME_ROLE_OWNERSHIP` must match it exactly, and `src/runtime-contracts/components.test.ts` checks that it does.
+## 2. Public seams and dependency direction
 
-| Component           | Owner leaf | Owned modules                                                                                                                  | Public entries                                      | Implements                                                               | Consumes                                                                                                                                                        |
-| ------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `runtime-contracts` | #1105      | `src/runtime-contracts/`                                                                                                       | `src/runtime-contracts/index.ts`                    | —                                                                        | —                                                                                                                                                               |
-| `setup-application` | #1110      | `src/application/setup/`                                                                                                       | `src/application/setup/index.ts`                    | —                                                                        | `SetupObservationPort`, `SetupActionPort`, `SetupJournalPort`, `SecretEnrollmentPort`                                                                           |
-| `cli`               | #1108      | `src/cli/`, `src/local-control/admission-client.ts`, `src/local-control/session-launcher.ts`, `src/local-application-state.ts` | `src/cli/runtime/session-launcher.ts`               | —                                                                        | `AdmissionSessionPort`, `AuthoritySigningPort`, `RuntimeRoleStatusPort`                                                                                         |
-| `console`           | #1109      | `src/local-control/console-server.ts`                                                                                          | `src/local-control/console-server.ts`               | —                                                                        | `RuntimeRoleStatusPort`                                                                                                                                         |
-| `admission`         | #1107      | `src/admission/`, `src/local-control/admission-server.ts`, `src/local-control/session-store.ts`                                | `src/admission/setup.ts`, `src/admission/server.ts` | `AdmissionSessionPort`, `RuntimeRoleStatusPort`                          | `ExecutorExecutionPort`                                                                                                                                         |
-| `executor`          | #1106      | `src/executor/`, `src/local-control/executor-server.ts`                                                                        | `src/executor/setup.ts`, `src/executor/server.ts`   | `ExecutorExecutionPort`, `RuntimeRoleStatusPort`, `SecretEnrollmentPort` | —                                                                                                                                                               |
-| `authority`         | #1108      | `src/authority/`                                                                                                               | `src/authority/index.ts`                            | `AuthoritySigningPort`                                                   | —                                                                                                                                                               |
-| `composition`       | #1109      | `src/composition/`, `src/local-control/supervisor.ts`                                                                          | `src/composition/index.ts`                          | —                                                                        | `AdmissionSessionPort`, `ExecutorExecutionPort`, `RuntimeRoleStatusPort`, `SecretEnrollmentPort`, `SetupActionPort`, `SetupJournalPort`, `SetupObservationPort` |
+Producers expose their public owner ports; consumers depend on the neutral contract rather than sibling worktrees, private modules or owner filesystem paths. Existing Admission, Executor execution, Authority signing, Runtime status, Setup observation/action/journal and secret enrollment ports remain the starting point.
 
-Responsibilities follow Epic #1097:
+Executor owner observation is a separate Control capability from Admission execution/evidence access. A remote Console calls the same observation contract over authenticated transport, not a new config-file reader. Admission Session listing is an owner-side bounded read projection with immutable repository filtering; the browser does not scan Session files or enforce isolation by client-side filtering alone.
 
-- The CLI and Web console run operations and display results. They do not reimplement workflow or branch policy.
-- The setup application holds secret-free state, the allowed actions, prerequisites, freshness and the next action.
-- Admission authorizes Sessions, Delegators and capabilities. It holds no GitHub credential.
-- The Executor holds the Issuer installation credential and performs authorized provider effects.
-- The Authority owner holds the initiating Runtime's private signing key.
-- Composition selects roles, runs the process lifecycle and connects public ports. It never becomes a private-key parser or a provider authority.
+The existing component catalog and `scripts/check-runtime-boundaries.mjs` are executable checks for the implemented module graph. The guard's static import/re-export, literal dynamic import and TypeScript resolution rules remain fail-closed. No unresolvable import, nonliteral dynamic import or new historical-ledger exception is a migration shortcut.
 
-## Frozen public ports
+At the observed main baseline the old migration ledger is empty. Do not reintroduce private-owner imports to connect a new frontend. Future contract extensions must update the corresponding ownership proofs without weakening them.
 
-Every port reuses an existing canonical type. None of them adds provider, permission, Session or trust semantics.
+## 3. Repository registry and binding
 
-| Port                    | Module                                | Reused canonical types                                                         | Existing implementation                  |
-| ----------------------- | ------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------- |
-| `ExecutorExecutionPort` | `src/runtime-contracts/ports.ts`      | `AuthorizedExecution`, `AuthorizedExecutionResult`, `RepositoryIdentity`       | `LocalExecutorClient`                    |
-| `AdmissionSessionPort`  | `src/runtime-contracts/ports.ts`      | `LocalSessionBinding`, `ExecutionIntent`, the existing Admission wire identity | `createLocalAdmissionClient`             |
-| `AuthoritySigningPort`  | `src/runtime-contracts/ports.ts`      | `SignedChangeProvenanceRecord`                                                 | the existing Delegator provenance signer |
-| `RuntimeRoleStatusPort` | `src/runtime-contracts/ports.ts`      | `RepositoryIdentity`, the setup dimension observations                         | #1106 / #1107                            |
-| `SetupObservationPort`  | `src/runtime-contracts/ports.ts`      | `SetupObservation`                                                             | #1110 / #1120                            |
-| `SetupActionPort`       | `src/runtime-contracts/ports.ts`      | `SetupActionRequest`, `SetupActionResult`                                      | #1110 / #1120                            |
-| `SetupJournalPort`      | `src/runtime-contracts/ports.ts`      | `SetupJournalEntry`                                                            | #1110 / #1120                            |
-| `SecretEnrollmentPort`  | `src/runtime-contracts/enrollment.ts` | `SecretEnrollmentRequest`, `SecretEnrollmentReceipt`                           | #1114                                    |
+Repository contexts use immutable host plus repository ID for semantic equality. The accepted registry path convention uses the numeric ID and validates the host; host collisions fail rather than aliasing. Repository names are mutable display/lookup metadata, not storage identity.
 
-`components.test.ts` proves at compile time that `LocalExecutorClient` satisfies `ExecutorExecutionPort` and `LocalAdmissionClient` satisfies `AdmissionSessionPort` without change.
+Repository Setup records contain public component IDs, App/installation references, Authority fingerprints, endpoint references and relevant generation/revision. They contain no PEM, user/provider token, Session secret, copied environment or owner key path.
 
-### Setup observations, actions and results (`setup.ts`)
+Executor custody is keyed by App identity. A repository binding names its App, installation and exact verified credential generation/fingerprint. Intentional shared-App bindings reuse the same owner credential without copying PEM; dedicated Apps remain distinct.
 
-A `SetupObservation` is bound to a `SetupGeneration`: the repository identity plus the owner configuration generation. It carries five separate dimensions:
+Authority custody is keyed by Authority identity. Multiple repository trust records may refer to the same public identity without duplicating the private key. Repository trust is still independently established on each protected canonical ref.
 
-| Member             | Dimension           | Statuses                                                 |
-| ------------------ | ------------------- | -------------------------------------------------------- |
-| `configuration`    | `configuration`     | `unknown`, `unconfigured`, `partial`, `configured`       |
-| `health`           | `health`            | `unknown`, `not-running`, `unhealthy`, `healthy`         |
-| `providerBinding`  | `provider-binding`  | `unknown`, `unbound`, `mismatched`, `bound`              |
-| `repositoryTrust`  | `repository-trust`  | `unknown`, `untrusted`, `pending-human-trust`, `trusted` |
-| `sessionReadiness` | `session-readiness` | `unknown`, `not-ready`, `ready`                          |
+Canonical adopted records override legacy input. Observation never performs migration or creates missing owner files. Adoption validates identity, persists durably and rereads before canonical state is selected; it never destroys legacy state implicitly.
 
-Apart from `unknown`, no status appears in two dimensions. A status from one dimension is invalid in another. There is no aggregate "ready" member. Any known status must carry owner evidence: the owner, the observation time and the generation.
+## 4. State and owner evidence
 
-A `SetupAction` declares its owner, prerequisites (a dimension plus the accepted statuses), required inputs (`text`, `choice`, `confirmation` or `enrollment`), confirmation, freshness (a generation plus `notAfter`) and an optional `StructuredCommand` (`executable` plus `argv`, never a shell string). An `enrollment` input names a `SecretEnrollmentKind`. Its value never appears in a `SetupActionRequest`.
+Keep configuration, health, provider binding, protected-ref trust and Session readiness distinct. Session lifecycle, execution outcome and Relay connectivity are additional independent observations. Each known fact carries its owner, observation time and relevant generation.
 
-`SetupActionResult.outcome` is one of `succeeded`, `failed`, `cancelled`, `stale`, `action-required` or `unknown`. `stale` covers a wrong repository or an outdated generation. `unknown` reports an effect whose outcome was not observed, so the caller reconciles it instead of replaying it blindly.
+Unavailable evidence is unknown/unavailable, not absent or healthy. Aggregate UI status is derived and never written back as authority. A generation-bound action is revalidated immediately before its owner effect.
 
-### Secret-free setup JSON (`secret-material.ts`)
+Admission owns immutable Session binding plus lifecycle records. Expiry is derived from current time and binding; closing is an owner operation. Listing is bounded, deterministic and repository-checked. Global views aggregate those same authorized records, not another Session database.
 
-Every setup validator first calls `assertSecretFreeSetupJson`. It rejects:
+## 5. Setup and secret enrollment
 
-- PEM blocks;
-- GitHub provider tokens and bearer credentials;
-- private JWK members;
-- members whose names denote secrets, such as `privateKey`, `pem`, `token`, `accessToken`, `refreshToken`, `clientSecret`, `secret` and `password`;
-- non-JSON values;
-- oversized or deeply nested data.
+Setup orchestrates existing owner actions and a bounded journal. It never stores a parallel completed-step workflow authority. Retry/restart recomputes from owner evidence, preserving uncertain outcomes instead of repeating effects blindly.
 
-Diagnostics name the JSON path only and never echo the rejected value. The shared contracts never acquire, parse or store a secret.
+Secret enrollment is a separate bounded streaming owner port. Generic Setup JSON contains only intent and public receipts. Only Executor parses/stores App PEM; only Authority parses/stores its private signing material. A forwarding layer must not inspect, log or persist enrollment bytes. Enrollment is available before normal repository readiness to avoid circular bootstrap requirements.
 
-### Streaming enrollment (`enrollment.ts`)
+Dedicated App Manifest conversion occurs at Executor so the private key is born inside its custody boundary. Public App identity/fingerprint is returned, not the conversion body. OAuth client configuration needed for that same App's Hosted profile is a distinct explicit prerequisite; generic Setup must not retain otherwise unused secrets for hypothetical future use.
 
-PEM files, provider tokens and private signing material cross only through `SecretEnrollmentPort.enroll(request, stream, signal)`:
+## 6. Control, Admission and remote placement
 
-- The request is secret-free and byte-bounded. `MAX_SECRET_ENROLLMENT_BYTES` is 64 KiB, the existing Issuer key bound.
-- Only the owning component consumes the stream. The Issuer private key goes to the `executor`.
-- The port returns a public `SecretEnrollmentReceipt`: the outcome plus a `sha256:` public fingerprint.
-- The port must be usable before normal Executor or Admission readiness. An implementation must not require health, provider binding or trust before accepting an enrollment.
+Browser operator authentication uses the established bounded context, Host/Origin/CSRF checks, expiry, confirmation and generation validation. Loopback alone is not authentication. Browser context does not become a component mTLS principal.
 
-## Dependency guard
+Control may invoke explicitly authorized owner observation/enrollment/setup actions. Admission may invoke its execution/evidence routes. Neither transport role implies the other's authority. The `control`, `admission` and `executor` identities remain distinct even when processes share a host.
 
-`scripts/check-runtime-boundaries.mjs` resolves every module specifier with the TypeScript resolver (`ts.resolveModuleName`) using the repository `tsconfig.json`. For each role-owned module it walks the full value-import closure, which covers:
+Remote placement initially uses an explicit endpoint, expected component identity and operator-provided TLS trust. Automatic PKI, ambient backend discovery, generic SSH execution and remote Authority are not included. Separate Executor deployment must not depend on a shared secret filesystem. See [Non-loopback Runtime](./LOCAL_RUNTIME_NON_LOOPBACK.md).
 
-- static imports and side-effect imports;
-- `export … from` re-exports, which is how barrels such as `src/github/index.ts` load their targets;
-- `import x = require()`;
-- literal dynamic `import()`.
+## 7. Console and lifecycle
 
-It reports every forbidden private module the role can load, with a witness path.
+One machine-scoped Console serves repository list/overview and repository-specific Setup, Runtime, trust, Sessions and diagnostics. `setup console` and `runtime console` are current entry-point names; convergence makes them select routes on the same host, not competing apps or authorization systems.
 
-Private module groups:
+A repository switch changes the selected context. It never retargets an existing owner's action/session to another repository. Effectful contexts remain repository- and generation-bound. A remote UI is a presentation adapter and receives only the controls its authenticated operator is entitled to use.
 
-| Group                 | Modules                                                                                                                                             |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `issuer-custody`      | `src/executor/`, `src/local-control/executor-server.ts`, `src/relay/local-runtime-config.ts`, `src/github/app-installation-credential-broker.ts`    |
-| `app-user-credential` | `src/github/app-user-credential.ts`, `app-user-credential-store.ts`, `app-user-credential-broker.ts`, `gh-auth-credential.ts`, `user-credential.ts` |
-| `authority-signing`   | `src/authority/`, `src/agent-authority/delegator-operations.ts`                                                                                     |
-| `admission-private`   | `src/admission/`, `src/local-control/admission-server.ts`, `src/local-control/session-store.ts`                                                     |
+Disconnect prevents new relevant work, resolves active Sessions, detaches bindings, then performs only selected cleanup. Shared App/Authority material cannot be removed while referenced. Rotation prepares and verifies a candidate, switches the binding safely, proves the new path, then retires old access. A directory deletion is not a lifecycle implementation.
 
-Denied groups by role (a role is never denied its own group):
+## 8. Implementation status and evidence
 
-| Role          | Denied                                                                           |
-| ------------- | -------------------------------------------------------------------------------- |
-| `cli`         | `issuer-custody`, `admission-private`                                            |
-| `console`     | `issuer-custody`, `admission-private`, `authority-signing`                       |
-| `admission`   | `issuer-custody`, `app-user-credential`, `authority-signing`                     |
-| `executor`    | `app-user-credential`, `authority-signing`, `admission-private`                  |
-| `authority`   | `issuer-custody`, `app-user-credential`, `admission-private`                     |
-| `composition` | none; it wires roles and must keep private roles out of the ordinary CLI (#1109) |
+The main baseline already contains component ports/guards and local setup/runtime work. Multi-repository custody/observation work exists on its separately audited Source lineage; that is not evidence of main integration. Assertion ingress, relay-locator routing and remaining Console/onboarding composition are target work.
 
-The neutral roles are stricter:
-
-- `runtime-contracts` may value-import only itself.
-- `setup-application` may value-import only itself and `runtime-contracts`.
-
-Type-only imports are erased at runtime, but they are still restricted. A neutral role may type-import only the approved neutral types (`APPROVED_NEUTRAL_TYPES`): `AuthorizedExecution`, `AuthorizedExecutionOperation`, `AuthorizedExecutionResult`, `RepositoryIdentity`, `Delegator`, `SignedChangeProvenanceRecord`, `LocalSessionBinding` and `ExecutionIntent`. Any other role may type-import from a denied group only those approved symbols.
-
-Some imports inside a role's closure cannot be proven safe. A non-literal dynamic `import()`/`require()` or an unresolvable relative specifier always fails, and no ledger entry can excuse it.
-
-## Historical migration ledger
-
-`HISTORICAL_MIGRATION_EDGES` is empty after #1109. The frozen baseline remains in `test/runtime-boundaries.test.mjs` to prevent reintroducing exceptions. The ledger rules remain:
-
-- An entry must contain exactly `from`, `to` and `owner`.
-- Both `from` and `to` must be exact `.ts` module paths. No wildcards, no directories.
-- The owner must be one of #1106, #1107, #1108 or #1109.
-- The entry must be in the frozen baseline in `test/runtime-boundaries.test.mjs`. A new or grown entry fails verification.
-- A removed import is reported as retired until its ledger entry is removed. No entries remain.
-
-All 17 baseline exceptions (#1106: 5, #1108: 7, #1109: 5) are retired. The local role commands load only the selected private implementation through `src/composition/local-runtime-roles.ts`; ordinary CLI clients and the browser console use public ports and status projections.
-
-Product wiring (#1121) stays in the `composition` role: `src/composition/setup-host.ts` builds the one Setup Application from `createLocalSetupPorts`, supplies the Runtime lifecycle owner (observe-only for the CLI; Supervisor-owned for the setup/control host) and hosts the packaged setup console with the Setup API. The CLI loads it only for `inari setup status|next|console`. Composition owns process and listener lifecycle; it never parses secret material, and enrollment bytes pass through it unread to the owning component.
-
-The baseline has no Admission (#1107) violation. #1107 must keep it that way.
-
-During extraction, a frozen cross-role edge is treated as the historical boundary itself: traversal does not continue through that target under the caller's role, because the target module is checked independently under its owning Runtime role. When code moves from a frozen source into modules of that same owner role, only the exact forbidden targets already recorded for the frozen source may follow that owner-internal path. The ledger itself is unchanged; a new caller, target, owner, wildcard, unresolved import or dynamic import still fails.
-
-## Import direction for producers
-
-- Producers implement the ports in `src/runtime-contracts/` and expose them only through the public entries listed above.
-- Consumers import `src/runtime-contracts/index.ts`, never a sibling leaf's implementation or worktree.
-- Old `src/local-control/*` paths may remain as bounded compatibility facades until #1109 wires the composition. They are not approved access to private implementation.
-- Adding a module under an owned prefix places it under the guard automatically.
+Tests must prove exact owner boundaries, wrong repository/peer/generation denials, read-only observation, no shared-filesystem dependency, secret exclusion, restart and interrupted lifecycle recovery. Source helper tests, separate-process tests and actual separate-host proof must remain distinguishable. See [Architecture Convergence](./ARCHITECTURE_CONVERGENCE.md).

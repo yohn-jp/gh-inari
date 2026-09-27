@@ -1,313 +1,61 @@
-# Issue and Implementation governance
+# Implementation Contract
 
-Status: normative authoring and execution guidance for the repository's
-Issue and Implementation contracts. Executable schemas, validators, command
-metadata, and provider relationship evidence remain authoritative for their
-machine-readable behavior.
+Status: normative task-domain contract under [Product Architecture Canon](./ARCHITECTURE.md). Existing versioned parser/authorization interfaces remain the executable format authority; this revision corrects the cross-artifact target identity, not their serialized schema.
 
-## 1. Responsibility boundary
+## 1. Source, Implementation and Session
 
-The governing model is:
+An ordinary Source Issue records a problem, requested outcome or approved architecture decision. An Implementation records one bounded execution task: objective, non-goals, approved design, READONLY/WRITE/CREATE/DELETE/DENY scopes, prerequisites, verification, base and dependencies. A PR records delivered work and evidence; it is not another task-authorization record.
 
-```text
-ordinary Issue = problem / request / decision record
-Implementation = one authorized implementation-session contract
-```
+A Source may have multiple Implementation children. An Implementation may reference multiple canonical Sources without acquiring multiple implicit parents or PR targets. Native provider parent/sub-issue state governs hierarchy where available. Contract Source/dependency references govern their declared semantics, not silent reparenting.
 
-An ordinary Issue records why work matters and what outcome is wanted. It may
-be an Architecture, Bug, Feature, Research, or Maintenance Issue. Its
-responsibility is the problem, request, or decision and its issue-level
-acceptance criteria. An ordinary Issue may remain open indefinitely without an
-Implementation, a branch, a pull request, or a Change.
+A Session is an admitted execution context. Creating an Issue, writing a contract or opening a PR does not itself issue a Session or approve the task. The current authorization record binds Implementation identity, canonical governed-body digest and base evidence.
 
-An Implementation is a separate governed Issue created when a concrete
-implementation session is being prepared. It records the bounded work that a
-single session may perform. Its responsibility is the session objective,
-selected implementation design, explicit path authority, constraints,
-verification evidence, base binding, and execution dependencies. It is not a
-replacement for the source Issue and it does not rewrite the source Issue into
-an execution plan.
+## 2. Architecture-owner control
 
-The distinction is normative:
+Implementation chooses how to satisfy the approved task, not which architecture to follow. Changes to identity, public behavior, trust/capability, credential custody, state owner, recovery semantics, supported topology or compatibility require architecture-owner approval.
 
-| Artifact       | Owns                                                                                                                                                 | Does not require for its existence                                                                 |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Ordinary Issue | Problem, request, decision, context, issue-level contract, and acceptance outcome                                                                    | Session path scopes, implementation branch/base, targeted checks, postconditions, or authorization |
-| Implementation | One-session objective, non-goals, architecture choice, scopes, constraints, prerequisites, tests/checks, postconditions, and base/dependency binding | A new problem statement or a second authorization model                                            |
-| Pull request   | Delivered result, linked work, validation, and review context under the applicable PR/Change contract                                                | The Implementation's path authority or a replacement authorization record                          |
+A worker may identify an architecture conflict and propose a minimal correction. It must not edit the Canon or redefine the Issue to authorize itself. Pure internal restructuring, helper reuse and algorithm/test choices remain within its granted scope. Architecture-document changes require an explicitly authorized architecture task.
 
-Creating or editing either an ordinary Issue or an Implementation does not
-start implementation. An Implementation is not ready to authorize until its
-canonical body is complete and its required execution evidence is available.
+## 3. Current authorization and scope
 
-## 2. Normative lifecycle
+Use the canonical Implementation parser, authorization verifier and [execution-scope projection](./IMPLEMENTATION_EXECUTION_SCOPE.md). Do not reconstruct scope with a consumer-specific parser or infer it from branch names, PR descriptions or prose checklists.
 
-### 2.1 Ordinary Issue lifecycle
+READONLY does not imply WRITE. WRITE does not imply CREATE or DELETE. DENY applies before operation allowlists. Missing/empty authority remains absent. Current body/base evidence, supersession, completion and invalidation are evaluated by the existing lifecycle authorities.
 
-An ordinary Issue follows this norm:
+Changing the governed body invalidates the old authorization; it is not an in-place expansion of an already-issued grant. Rework outside the approved task needs a new/current authorization through the governed process. A failure to fit the accepted scope is a real contract issue, not permission to bypass it.
 
-1. Record the problem, request, or decision in the appropriate ordinary Issue
-   form.
-2. Resolve the issue-level decision and acceptance outcome without requiring a
-   session plan.
-3. When execution is actually being prepared, derive one or more bounded
-   Implementation Issues from the source Issue. Add session-specific detail to
-   those Implementations, not to every ordinary Issue.
-4. Keep the ordinary Issue as the source record. Its creation, linkage,
-   implementation, and closure are separate events; authorizing an
-   Implementation does not automatically close or mutate the source Issue.
+## 4. Cross-artifact identity
 
-An ordinary Issue can therefore be useful before implementation is selected,
-while work is waiting on a decision, or after an Implementation has completed.
+Implementation identity is repository plus Implementation number. The authorization additionally binds its canonical body digest and base evidence. Session task remains that Implementation. Leaf branch and PR bind the exact governed task and integration route. Execution evidence binds that task, digest, base, branch and head.
 
-### 2.2 Implementation lifecycle
+New canonical Change operations instead target a selected Source Issue. The authorized Source set is explicit. For delegated Sessions, the requested Source must belong to both signed and freshly observed current Source sets. No first/primary Source inference is allowed.
 
-The Implementation lifecycle is an evidence projection with these current
-statuses:
+The existing Implementation-task `change.implement` compatibility claim supports only its established PR-publication/branch-side path. It is not a Change-root grant and cannot bypass Source membership. Branch advance remains bound to the Implementation's exact branch, never a Source sibling or protected base.
 
-```text
-DRAFT -> READY -> AUTHORIZED -> COMPLETED
-                  |      |
-                  |      +-----> ABORTED
-                  +------------> INVALIDATED
+These joins must be verified explicitly. Do not use one variable named `issue` to equate task, Source root, native parent, PR closing target and branch identity.
 
-AUTHORIZED + body/base drift -> INVALIDATED
-AUTHORIZED + explicit newer Implementation -> SUPERSEDED
-```
+## 5. Integration routing
 
-The status names are the current `ImplementationLifecycleStatus` values. The
-terminal side states are evidence outcomes, not automatic repository
-migrations.
+Where Issue integration is enabled, the semantic route is Implementation leaf to canonical Source integration, then parent Epic integration, then the governed default branch. Standalone and explicitly supported in-flight routing remain separate declared cases.
 
-- `draft` means the contract is absent or not yet a valid complete canonical
-  body.
-- `ready` means the body projects to a valid contract but no current
-  authorization record has admitted it.
-- `authorized` means an explicit authorization record matches the current
-  Implementation identity, canonical body digest, repository, and base
-  evidence. The implementation session may use only that current contract and
-  its derived scope.
-- `completed` is reported only when the exact current authorization, bound
-  execution evidence, and recomputed conformance result are all authoritative
-  and conformant. A caller-supplied completion assertion is not authority.
-- `aborted` is reported only from a #679-bound Change/Session identity whose
-  Change state is `ABORTED`; the historical authorization remains inspectable,
-  but it is no longer current execution authority.
-- `invalidated` means current evidence no longer matches the authorization,
-  including body or repository/base drift.
-- `superseded` means explicit provider evidence identifies a newer
-  Implementation.
+The native parent and current routing contract determine the target. A Source list is not an ordered target selector. Sibling merge order does not create a dependency DAG. Downstream execution consumes physically integrated producer state, not a closed Issue or an unmerged sibling worktree.
 
-The `impl` commands project and verify this lifecycle; they do not persist an
-alternative lifecycle store. Authorization produces immutable evidence for one
-event. It does not edit GitHub, create a branch or pull request, or grant scope
-outside the canonical contract. A session must stop if its authorization is no
-longer current.
+Implementation, Source and Epic evidence must name the exact target ref and revision. Acceptance on a Source branch is not acceptance on main.
 
-## 3. Implementation contract
+## 6. Principal profiles
 
-The v1 Core contract is `version: 1` with schema `1.0.0`, exposed from the
-`implementation-contract` package entry point. Its GitHub Issue Form adapter
-is `.github/ISSUE_TEMPLATE/implementation.yml`, generated from
-`.github/inari/issues/implementation.json`. The normalized Implementation
-body is canonical; title, labels, assignees, Projects metadata, and comments
-are not contract identity.
+Local delegated tasks consume current Authority-signed binding and Admission Session state. Remote human-operated requests consume verified Repository Access Assertions and Runtime-owned subject/operation authorization. Both use the same task/Source/scope semantics where the operation is task-bound.
 
-The contract contains:
+A remote caller is not required to create an ephemeral Session key simply to invoke Inari. Conversely, an eligibility assertion does not manufacture an Implementation authorization or bypass a delegated Session's requirements. See [Authorization](./AGENT_CAPABILITY_AUTHORIZATION.md).
 
-- repository identity and one or more source Issue references;
-- the session objective, non-goals, architecture decision, affected
-  components, invariants, and compatibility constraints;
-- independent `READONLY`, `WRITE`, `CREATE`, `DELETE`, and `DENY` path lists;
-- prohibited operations, immutable areas, and prerequisites;
-- acceptance criteria, targeted tests, required checks, and observable
-  postconditions; and
-- base branch, optional base revision/freshness before authorization,
-  implementation branch, and execution dependencies.
+## 7. Evidence and terminalization
 
-`WRITE` is an explicit allowlist and defaults to empty. `CREATE` and `DELETE`
-are never inferred from `WRITE`; `DENY` narrows every matching allowlist. The
-execution-scope projection is derived only from a current #572
-`ImplementationAuthorizationRecord` plus fresh verification evidence. It has
-no scope override input, and body drift, supersession, or stale repository/base
-evidence fails closed.
+Verification evidence must identify the contract, subject, code revision and execution boundary it actually proved. Source-only tests cannot prove installation, browser or live-provider behavior. A stale successful run cannot validate a changed contract/head.
 
-## 4. Current `impl` command surface
+Implementation completion, Source acceptance and Epic acceptance are independently evaluated. A child PR closing relation is not permission to close its Source or Epic. Publishing a PR never implies approval, merge, release or repository setting changes.
 
-<!-- BEGIN GENERATED IMPLEMENTATION COMMAND SURFACE -->
+## 8. Format and command authority
 
-The current command contract is version `1.18.0` (`urn:inari:command-contract:1.18.0`).
-The `impl` namespace projects these operations from the command contract:
+The current public Implementation APIs and CLI contract are defined by the existing parser, authorization/lifecycle modules and generated command metadata. This document introduces no command spelling. Use the installed version's help only within the repository's permitted operational policy; the current organization suspension of agent Inari use is not lifted here.
 
-| Command                         | Command ID       | Metadata summary                                                                                                    |
-| ------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `inari impl plan <number>`      | `impl.plan`      | Draft a bounded Implementation recommendation from authoritative Issue evidence without granting authority.         |
-| `inari impl show <number>`      | `impl.show`      | Show the current Implementation body, canonical contract projection, and authorization state.                       |
-| `inari impl validate <number>`  | `impl.validate`  | Validate an existing Implementation body against the canonical contract without mutation.                           |
-| `inari impl authorize <number>` | `impl.authorize` | Authorize one current canonical Implementation body through the #572 Core boundary.                                 |
-| `inari impl inspect <number>`   | `impl.inspect`   | Inspect Implementation lifecycle and provider-authoritative parent/source relationships.                            |
-| `inari impl verify <number>`    | `impl.verify`    | Verify a pull request and its authoritative diff against one current authorized Implementation.                     |
-| `inari impl frontier <number>`  | `impl.frontier`  | Compose the bounded Implementation Frontier from repository evidence and project it through the authoritative Core. |
-
-The exact contract usage and option applicability are:
-
-- `impl plan <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
-- `impl show <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
-- `impl validate <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
-- `impl authorize <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
-- `impl inspect <number> [--repository <repository>] [--from <path>] [--capability <id> ...]`
-- `impl verify <number> [--repository <repository>] --from <path> [--capability <id> ...] --pr <number> [--execution-evidence <path>]`
-- `impl frontier <number> [--repository <repository>] [--capability <id> ...]`
-
-<!-- END GENERATED IMPLEMENTATION COMMAND SURFACE -->
-
-The Issue-specific operations and repository-backed `impl frontier` accept a
-positive Issue number. A positional-free `impl frontier --from <path>` remains
-the low-level bounded-evidence mode. The generated
-projection above owns the command IDs, version, contract ID, summaries, usage, and option
-applicability. `--capability` is repeatable. In repository-backed Issue mode,
-current authorization/conformance evidence is read through the repository
-authority seam; caller-supplied `--from` is not supplemental evidence.
-`--from` accepts a JSON input file
-or `-` for stdin; for lifecycle verification it can carry the current
-authorization, base, supersession, or completion evidence accepted by the
-existing Core boundary. `--repository` overrides the repository context for
-the governed read. Use `--json` for structured output.
-
-Author the separate Issue through the existing governed Issue operation with
-the Implementation template, for example:
-
-```text
-inari issue create --template implementation
-```
-
-Then use only the current `impl` command surface shown above to operate on
-the contract. Do not infer a new command or authorization behavior from
-prose outside the generated projection.
-
-## 5. Canonical parent and source relationships
-
-Relations are graph state, not body strings. Where the provider supports
-GitHub's native parent/sub-issue relationship, the provider relationship is
-canonical:
-
-```text
-source Issue --native parent/sub-issue--> Implementation
-```
-
-Attach an Implementation under its immediate governing source Issue through
-the existing relationship authority. `Source Issues` and `Execution
-dependencies` in the Implementation body remain canonical contract
-references, but they do not override provider relationship evidence. The
-`github.issue.parent.native` capability is the current native relationship
-authority used by Implementation inspection.
-
-Older Issues may contain a prose `Parent:` or `Parent Epic:` line. That prose
-is compatibility guidance for recognizing historical intent only. It is not a
-current parent assertion when native provider evidence is available, and it
-must not trigger silent reparenting. Reconcile an existing relationship only
-through the explicit, bounded relationship workflow after inspecting current
-provider state. This documentation introduces no automatic historical
-reparenting or bulk migration.
-
-### 5.1 Implementation-native execution identity
-
-The following topology is normative for new implementation-native execution.
-It is a binding across existing authorities, not a second semantic object or
-state store:
-
-| Artifact                     | Canonical identity/binding                                                                                                          | Authority and responsibility                                                                                                                              |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Ordinary source Issue        | `repository + Issue number`                                                                                                         | Problem, request, decision, and source/tracker acceptance. It is not an execution root.                                                                   |
-| Implementation Issue         | `repository + Implementation Issue number`                                                                                          | One bounded implementation session and its canonical contract. Multiple children of one source are independent.                                           |
-| Implementation authorization | Existing #572 record: `repository + Implementation + governedBodyDigest + base evidence`                                            | The current body digest and base-bound authorization record. A changed body is invalidation, not amendment.                                               |
-| Change                       | New execution: `Change.root = Implementation Issue`; `Change.identity = repository + root Issue`                                    | Existing Change/XState remains the sole lifecycle authority. The Change root is the Implementation for new execution.                                     |
-| Session task/capability      | `task.kind = issue` and `task.number = Implementation`; `change.implement.issue = Implementation`                                   | Existing Session Certificate and capability authorities validate the claims. Session admission must also retain the current authorization digest binding. |
-| Canonical branch             | Existing branch grammar derived from the Implementation-rooted Change                                                               | Branch naming remains owned by Branch/Change Core; one Implementation cannot claim two concurrent canonical branches.                                     |
-| Canonical PR                 | One PR projected from that Change; semantic `implements` and any recognized closing reference target the Implementation             | Existing Semantic PR Core owns relation projection. Source Issues may be contextual links, but are not the canonical closing target.                      |
-| Execution evidence           | Existing #574/#execution-evidence record bound to `Implementation + governedBodyDigest + base + branch + head`                      | Runtime evidence is immutable input to conformance; it does not create a second lifecycle.                                                                |
-| Source/tracker completion    | `source Issue` remains separately queryable and closes only through an explicit terminalization operation after admissible evidence | Source closure is not inferred from an open/closed flag, PR relation, or Implementation completion alone.                                                 |
-
-The stable implementation execution key is:
-
-```text
-key = repository identity + Implementation Issue number + current authorization body digest
-```
-
-The Change root, Session task, `change.implement` capability, canonical
-branch, canonical PR relation, execution evidence, and conformance all bind to
-that same Implementation identity. The body digest is evidence of the exact
-authorization; it is not a new Change ID namespace. The pure Core binding
-projection in `src/implementation-change-identity.ts` checks these joins and
-the focused fixtures prove that two Implementations under one source Issue do
-not alias.
-
-### 5.2 Lifecycle and compatibility rules
-
-The topology composes with, and does not replace, the existing authorities:
-
-- A new `Change` is admissible as Implementation-native only when its root
-  Issue is exactly the current Implementation Issue and the current
-  authorization record is available. A source-rooted Change is never silently
-  reinterpreted as its child Implementation.
-- A historical Issue-rooted Change remains readable and recoverable under its
-  original root. It is a compatibility projection only and is not admissible
-  for a new Implementation-native Session, branch, or PR binding unless fresh
-  evidence explicitly proves an Implementation-rooted Change. Ambiguous or
-  contradictory evidence fails closed.
-- `abort` keeps the same identity and records terminal Change evidence; it does
-  not create a replacement branch or PR. Supersession creates a new
-  Implementation and authorization identity; it never widens the old record.
-- Completion requires current authorization, execution evidence, and
-  conformance. Review rework that exceeds the authorized contract requires a
-  new bounded Implementation/session identity. Merge terminalizes the same
-  canonical Change/PR through existing merge authority; it does not introduce
-  a second merge engine.
-- Source/tracker terminalization is a later explicit operation and must remain
-  distinguishable from Change/Implementation completion.
-
-No provider mutation, Session lifecycle, ready admission, merge, or source
-closure behavior is introduced by this architecture binding. Those later
-leaves consume this identity topology and their existing authorities.
-
-## 6. Supported hierarchy examples
-
-The arrows below mean actual parent/sub-issue relationships where GitHub
-supports them; the body may retain source references for the Implementation
-contract.
-
-```text
-Epic
-└── Architecture
-    └── Implementation
-
-Epic
-└── Bug
-    ├── Implementation 1
-    └── Implementation 2
-
-Feature
-└── Implementation
-```
-
-An Epic remains a tracking and integration record. Architecture, Bug, and
-Feature Issues remain problem/decision/request records. Each Implementation
-child owns one bounded session; a second session gets a separate
-Implementation child rather than inflating the ordinary Issue or reusing an
-old authorization.
-
-## 7. Authoring and compatibility rules
-
-- Ordinary Issue forms stay lightweight. Their acceptance criteria describe
-  the requested or decided outcome; they do not require execution scopes,
-  branch/base identity, targeted tests, postconditions, or authorization.
-- The Implementation form is the place to make session planning explicit.
-  Keep its body aligned with the v1 contract and authorize only the current
-  canonical body against current base evidence.
-- A PR describes the delivered result and validation. It links the governing
-  Issue or Implementation according to the applicable PR contract; it does
-  not carry a second implementation-session authorization.
-- Native parent/sub-issue state is preferred and authoritative where
-  supported. Prose `Parent:` is retained only to help older artifacts be
-  understood; it is not a migration command.
-- No historical Issue is reparented merely because this guidance changed.
+Historical records may be read by bounded compatibility adapters. New execution must not revive the superseded Implementation-root Change architecture. Resolve migration conflicts explicitly without modifying historical evidence to pretend it was issued under today's contract.

@@ -1,218 +1,79 @@
-# Hosted Relay and MCP Worker
+# Hosted Authentication and Inari Relay
 
-This profile is the Inari-hosted front door for native MCP and the Repository
-Relay. It is separate from the direct-App Worker in `src/worker.ts` and
-`wrangler.toml`; those files remain the App-credential deployment profile.
+Status: approved target deployment under [Product Architecture Canon](./ARCHITECTURE.md). The repository still contains the earlier repository-routed Endpoint/Dashboard implementation at the observed baseline. This guide does not certify that the target routes or handshake have shipped.
 
-## Composition
+## 1. Purpose
 
-The hosted Worker composes the existing stateless MCP HTTP transport (#823),
-the Relay-backed Session executor (#821), and the Repository Relay Durable
-Object (#819). It owns only HTTP/WebSocket routing and the Durable Object
-binding. Session authority, capability admission, provider credentials, and
-execution remain with the user-owned Runtime.
+Hosted exposes a public authenticated transport to a user-owned Inari Runtime for cloud clients. It owns GitHub OAuth authentication, bounded repository-eligibility verification, assertion signing, routing and delivery control. It does not own repository semantics, normal provider effects, Session issuance, repository-work projection or an independent account system.
 
-Public routes are deliberately bounded:
+Inari Access provides both GitHub user authorization for ingress and installation authority inside Executor. A separate Endpoint App or Inari Identity App is not part of the target. See [Repository Access Assertion](./REPOSITORY_ACCESS_ASSERTION.md).
 
-- `POST /mcp` — native stateless MCP.
-- `GET /v1/relay/connect` — Runtime WebSocket ingress. It requires
-  `repositoryId`, `connectionId`, and `delegatorId`; `repositoryHost` is
-  optional and defaults to `github.com`. It always routes the Runtime role.
-- `GET /.well-known/inari` — versioned, secret-free Endpoint onboarding
-  metadata. It contains the public GitHub App identity and installation URL,
-  the supported App-user Device Flow profile, and the current Worker's Relay
-  connection base. It contains no repository identity, credential, enrollment
-  evidence, Session, or capability data.
-- `POST /v1/endpoint` — request-scoped, human-authenticated Endpoint reads for
-  the configured logical Endpoint. Installation and repository identities are
-  admitted dynamically through the GitHub App user scope; no static repository
-  binding is used.
-- `POST /v1/webhooks/github` — bounded signed GitHub App delivery admission.
-  The signed installation/repository identity becomes reconciliation input only;
-  it is not Dashboard authorization.
-- `POST /v1/auth/github/exchange` — one-shot Dashboard Authorization Code +
-  PKCE exchange. The Worker never persists the returned App-user token.
-- `GET /healthz` — non-secret deployment metadata only.
+## 2. Runtime locator and connection
 
-The Dashboard browser shell and exact `/.well-known/inari` onboarding descriptor
-are served from the Worker Static Assets directory `apps/dashboard/dist`.
-Worker routes are evaluated first for `/v1/*`, `/mcp`, unknown
-`/.well-known/*`, and `/healthz`; the exact descriptor is a negative
-`run_worker_first` exception, so it is served asset-first without allowing other
-well-known paths to fall through to the SPA shell. There is no second Dashboard
-server.
-
-The native MCP catalog also advertises the read-only `inari_issue_view` tool
-with the MCP Apps `io.modelcontextprotocol/ui` extension. App-capable hosts
-can render the stable `ui://inari/issue-view.html` resource and refresh it by
-calling that same tool through the host. Hosts without the extension continue
-to receive the existing tool result and do not need the resource.
-
-The Worker derives the Durable Object name from the immutable repository ID.
-MCP dispatch uses only the internal `REPOSITORY_RELAY` binding; there is no
-caller-selected backend URL, public dispatch endpoint, or generic proxy.
-
-Hosted Runtime connections should use the Delegator ID as their bounded
-`connectionId`, because #821 dispatches jobs to that deterministic connection:
+The Runtime creates and retains a Relay transport keypair in owner-local private storage. Its public-key fingerprint determines a stable, versioned relay locator. This key is not the Authority delegation key or the App key.
 
 ```text
-wss://HOST/v1/relay/connect?repositoryId=1330755860&repositoryHost=github.com&connectionId=runtime-id&delegatorId=runtime-id
+Runtime -> outbound WebSocket -> Hosted
+Hosted -> fresh bounded challenge -> Runtime
+Runtime -> public key + bound proof -> Hosted
+Hosted -> verify proof and locator -> activate routing
+Hosted -> confirmed relay ID + public endpoint -> Runtime/operator
 ```
 
-The Runtime still proves possession of its own key and executes the signed
-Session request locally. The hosted Worker never receives a GitHub App key,
-provider token, Runtime private key, or Session authority state.
+The proof binds protocol/domain, intended Hosted origin, challenge, public key and connection attempt. Challenges expire and cannot be reused. The locator is derived from the validated canonical public key, not accepted as an arbitrary string chosen by a connecting peer.
 
-## Operational envelope
+The public path is conceptually `/r/<relayId>`. Exact paths/encoding are protocol-versioned producer outputs, not new CLI commands defined by this document. A confirmed connection returns the URL for client configuration. Reconnection with the same key retains the locator; replacing the key changes it. Offline status never causes fallback to another Runtime.
 
-The Repository Relay applies compile-time contract ceilings and narrower
-operational defaults for each Durable Object: 64 open connections, 16
-in-flight jobs, 120 messages per one-second window, a 30-second job deadline,
-32 retained job records, and a one-hour connection lifetime. Deployments may
-lower these values through the Durable Object options, but cannot raise the
-contract ceilings. Overload closes a WebSocket with a typed operational
-backpressure outcome or returns `503`; a job rejected before Runtime send is
-reported as `unavailable`/`not-delivered`.
+A routing slot must reject unauthorized replacement and fence old connections/results by connection generation. An explicit reconnect policy handles simultaneous connections for the same key. It must not silently route a job to whichever socket last wrote a map entry.
 
-Job records, possession nonces, and connection attachments have deterministic
-deadline/retention cleanup. A send followed by disconnect or storage failure
-remains `possibly-delivered` and is never converted into an automatic retry.
-Hibernation heartbeat uses the Workers auto-response pair (`relay:ping` /
-`relay:pong`) and does not enter the message-rate path.
+The operator supplies the locator to the client. Knowing it grants no repository authority. Private repository access is verified during authentication, not through publicly readable Canon discovery.
 
-Optional telemetry receives only bounded transport facts: a pseudonymous
-repository key, connection/job correlation, surface, timing, delivery state,
-failure class, and resource counters. Request/result bodies, signatures,
-credentials, tokens, and provider responses are not part of the telemetry
-interface. With the hosted profile's default sink, each event is emitted as a
-JSON log line through `console.log` and is available in the Cloudflare Workers
-Observability Logs for the `gh-inari-hosted-relay` service. An injected
-`Env.telemetry` sink remains available for deterministic tests; it is not
-required by the deployed Worker or Durable Object. Operational limits are
-backpressure controls, not authorization.
+## 3. Request path
 
-Alert on sustained `failureClass` values of `overloaded`, `rate-limited`, or
-`transport`, and on rising `counters.connections`, `counters.inFlightJobs`,
-`counters.retainedJobs`, or `counters.messagesInWindow`. `cpu-active` event
-`durationMs` and `counters.cpuActiveMs` provide CPU-cost indicators. These
-signals describe transport pressure and runtime cost; they do not contain
-request or result payloads.
+Hosted verifies the caller through Inari Access OAuth and checks eligibility for the selected repository/App installation. It forwards the signed, request-bound Repository Access Assertion plus the bounded request to the selected live Runtime. The user token is discarded and never enters the Relay job or Runtime request.
 
-## Build and deploy
+Runtime verifies the assertion and current Executor binding and performs semantic admission. Responses return through the same correlated delivery path. Hosted does not interpret Issue/PR/Change state, select the execution App, or turn an error into a success.
 
-```sh
-pnpm run hosted-worker:build
-pnpm exec wrangler deploy --config wrangler.hosted.toml
-```
+Runtime-owned MCP/Control adapters implement product operations. Hosted MCP terminates only the supported HTTP/protocol/authentication transport, not a second product catalog or semantic executor. The same rule applies to any hosted static UI: repository data and actions come from user-owned services.
 
-The hosted build first runs the Dashboard build and requires
-`apps/dashboard/dist/index.html` before packaging the Worker. It then reads the
-checked public deployment metadata from `wrangler.hosted.toml`, validates it
-through the canonical endpoint-onboarding contract, and emits
-`apps/dashboard/dist/.well-known/inari` plus its Static Assets JSON header.
-The reference `wrangler.hosted.toml` publishes that directory as Static Assets
-and declares the `RepositoryRelayDurableObject` binding with its explicit
-migration.
+## 4. State and retention
 
-Configure the non-secret Endpoint and public App metadata:
+Persist service configuration, permitted OAuth client configuration and service signing secrets through the deployment's protected secret/configuration facilities. Do not persist GitHub user tokens, refresh tokens, user profiles, repository membership, raw requests/responses or a semantic repository database.
 
-```text
-INARI_ENDPOINT_ID=dashboard-endpoint
-INARI_ENDPOINT_DEPLOYMENT=shared-hosted
-INARI_GITHUB_APP_ID=<numeric App database ID>
-INARI_GITHUB_APP_CLIENT_ID=<public OAuth client ID>
-INARI_GITHUB_APP_SLUG=<App slug>
-INARI_GITHUB_APP_INSTALLATION_URL=https://github.com/apps/<slug>/installations/new
-INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow
-INARI_GITHUB_APP_CALLBACK_URL=https://HOST/dashboard/oauth/callback
-```
+Live routing associates relay locator with authenticated connection generation. It is reconstructible after reconnect; a permanent Runtime registration database is not required. Hibernation attachments are bounded connection metadata, not account records.
 
-Set the non-secret provider host partition in the deployment Wrangler
-configuration before running `hosted-worker:build` if `github.com` is not used.
-Do not override descriptor-backed public metadata only at deploy time: the
-onboarding descriptor is already a Static Asset by then and must be built from
-the same checked configuration that is deployed.
+Finite authentication transaction state, nonce fences and delivery metadata may be retained for their safety window. Delivery records contain correlation, connection generation, deadline and delivery/result classification, not reusable credentials. Any result retention must be explicitly bounded and secret-safe; full payload caching is not the default.
 
-The onboarding descriptor requires these non-secret public App variables:
-`INARI_GITHUB_APP_ID`, `INARI_GITHUB_APP_CLIENT_ID`,
-`INARI_GITHUB_APP_SLUG`, `INARI_GITHUB_APP_INSTALLATION_URL`, and
-`INARI_GITHUB_APP_USER_AUTH_PROFILE=device-flow`. For Dashboard browser
-authorization, configure the exact registered
-`INARI_GITHUB_APP_CALLBACK_URL` and store the confidential client secret only
-with `wrangler secret put INARI_GITHUB_APP_CLIENT_SECRET`. Configure the
-webhook secret separately with
-`wrangler secret put INARI_GITHUB_WEBHOOK_SECRET`. The descriptor exposes the
-callback URI but never either secret. The hosted build fails closed when its
-required public values are missing or invalid. Do not put an App private key,
-installation token, user access token, Runtime credential, or other credential
-in Worker variables or Durable Object state.
+A restart must not erase the evidence needed to distinguish not-delivered from possibly-delivered. If safe recovery cannot be proved, return unknown/unavailable and let Runtime reconciliation decide. Stateless identity does not mean zero safety state.
 
-The direct-App deployment remains independent and continues to use:
+## 5. Delivery and abuse controls
 
-```sh
-pnpm run worker:build
-pnpm exec wrangler deploy --config wrangler.toml
-```
+Apply message/body limits while reading, not after unbounded buffering. Bound connections, in-flight work, retention, deadlines and per-caller/per-locator traffic. Refuse overload before send when possible.
 
-## Composed Endpoint and Dashboard certification
+Distinguish not-delivered, possibly-delivered and result-observed. After send or an ambiguous send failure, reconnect does not authorize replay. Delivery completion is not semantic verification. Runtime owns idempotency and provider reread.
 
-Before integrating the hosted Endpoint and Dashboard Epic, run the bounded
-composition oracle and its Node test. It uses in-memory provider and Relay
-transports, exercises the actual Worker, Endpoint, webhook, OAuth, and
-Dashboard modules, and prints only the certified Epic and current-main SHAs:
+TLS protects each transport hop. This design does not claim payload end-to-end encryption or protection from a malicious Relay seeing traffic. Hosted can deny service or forge an assertion if its signing authority is compromised; Runtime's separate authorization limits, rather than a transparency claim, constrain resulting effects.
 
-```sh
-node scripts/endpoint-dashboard-certification.mjs
-node --test test/endpoint-dashboard-certification.test.mjs
-```
+## 6. Configuration and key rotation
 
-The package suite invokes the same oracle after package-runtime and release
-certification. The oracle never performs provider mutation and does not retain
-tokens, private keys, signed bodies, or raw provider responses.
+OAuth callback/client configuration must match the actual Inari Access App used by the target Executor binding. A dedicated-App flow does not automatically configure shared Hosted OAuth. Do not accept an arbitrary client's callback, issuer, key URL or backend URL as trusted configuration.
 
-## Live relay certification
+Assertion issuer trust and signing-key rotation are explicit Runtime configuration. Relay transport-key replacement is a separate local operation. App key rotation remains Executor-owned. None of the three rotations implies another.
 
-Live certification contacts a deployed Worker and is transport-only. It checks
-`/healthz`, the native `POST /mcp` initialize exchange, the Runtime WebSocket
-upgrade, the production possession handshake, `relay:ping`/`relay:pong`, and a
-bounded malformed-frame close. It does not execute a semantic mutation; the
-controlled certification remains the semantic parity and failure-semantics
-oracle.
+Remote Control initially uses explicit endpoint, component identity and trust material. Hosted does not become a PKI or discover owner secret paths. Loss of Hosted removes remote connectivity; local governance and owner state remain usable.
 
-The direct environment form uses these inputs. The private key is read from
-the environment or, preferably, from a local file; never put it in argv.
+## 7. Deployment transition
 
-```sh
-export INARI_RELAY_LIVE_URL='https://HOST'
-export INARI_RELAY_LIVE_REPOSITORY_ID='1330755860'
-export INARI_RELAY_LIVE_REPOSITORY_HOST='github.com' # optional
-export INARI_RELAY_DELEGATOR_ID='runtime-id'
-export INARI_RELAY_DELEGATOR_PRIVATE_KEY_FILE='/secure/local/delegator-ed25519.pem'
-node scripts/relay-certification.mjs --mode live
-```
+At the observed baseline, `src/hosted-worker.ts`, the Relay modules and `wrangler.hosted.toml` still implement the earlier Endpoint model. Existing build/deploy commands describe that code, not this target. Do not deploy an unchanged build and label it assertion-based Relay conformance.
 
-Alternatively, set `INARI_RELAY_LIVE_CONFIG_FILE` to a local JSON file. A
-relative `privateKeyFile` is resolved relative to that file:
+The old repository-ID Durable Object routing must migrate to relay-locator routing with explicit protocol/version and client migration. Existing bounded delivery/backpressure mechanics are reused where their guarantees remain valid. Hosted work readers, semantic execution, repository caches and webhook-driven repository projection are removed from this deployment rather than hidden behind compatibility flags.
 
-```json
-{
-  "url": "https://HOST",
-  "repositoryId": "1330755860",
-  "repositoryHost": "github.com",
-  "delegatorId": "runtime-id",
-  "privateKeyFile": "./delegator-ed25519.pem"
-}
-```
+Static public onboarding metadata may remain for transport/version/authentication discovery. It must not become a repository binding authority. Repository/work observations are requested from Runtime. Direct App deployment is retired as described in [its retirement notice](./CLOUDFLARE_WORKER_DEPLOYMENT.md).
 
-The equivalent environment variable is also accepted as
-`INARI_RELAY_LIVE_CONFIG`. The file and key must be readable by the local
-operator and must remain outside retained certification evidence. The command
-returns `pending` when required configuration is absent, `failed` when a
-configured deployment or protocol check fails, and `passed` only after all
-deployment checks contact the real Worker over the network. An injected test
-transport (used only by this script's own unit tests) can complete the same
-normalized checks but is reported as `verified`, never `passed` — that status
-is reserved for the real-network path so downstream consumers cannot mistake
-a fixture run for a deployed proof. Evidence contains only bounded status
-fields and check summaries; it never contains the private key, signature,
-token, or raw provider response.
+No new `inari relay connect` spelling is promised by this guide. Public commands and MCP metadata are published by the canonical command/protocol producers when implemented.
+
+## 8. Certification
+
+Separate deterministic protocol tests, real-process Runtime composition, packed public-client/browser tests and live Hosted/GitHub proof. Record exact package/deployment revision, authentication App and target binding, wrong-target denials, no-token-retention evidence, reconnect/unknown-delivery behavior and operation-level postcondition verification.
+
+A health response, OAuth callback, successful WebSocket upgrade or transport-only live probe is not proof of repository readiness or a successful governed operation. See [Verification Architecture](./VERIFICATION_ARCHITECTURE.md).

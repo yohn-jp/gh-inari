@@ -1,46 +1,41 @@
-# Non-loopback local Runtime
+# Explicit Remote Runtime Components
 
-Loopback is the default. To select all-interface listening for a new local
-Runtime setup, set `INARI_LOCAL_RUNTIME_BIND=0.0.0.0` before running both
-`inari executor setup` and `inari admission setup`. The setting is recorded in
-each component's local configuration. `0.0.0.0` is only a listen address;
-Admission discovers and connects to Executor at `127.0.0.1` over HTTPS, and CLI
-discovers the Admission route at `127.0.0.1`. OS-assigned ports are recorded
-only in local Runtime discovery state.
+Status: operator/deployment contract under [Runtime Component Boundaries](./RUNTIME_COMPONENT_BOUNDARIES.md). The target uses explicit endpoint and peer configuration; it does not introduce automatic PKI or a general remote-access server.
 
-Non-loopback services refuse to start until both components have valid mTLS
-material under their private configuration directories. Each component uses
-these owner-only files:
+## 1. Scope
 
-| File                      | Purpose                                                                      |
-| ------------------------- | ---------------------------------------------------------------------------- |
-| `mtls-certificate.pem`    | This component's certificate, with a URI SAN for its configured component ID |
-| `mtls-private-key.pem`    | This component's private key                                                 |
-| `mtls-ca-certificate.pem` | Public CA certificate that issued both component certificates                |
+Loopback remains the local default. SSH forwarding can expose the authenticated local Console without making every Runtime component publicly reachable. An all-interface listen address is not a routable peer identity or a discovery result.
 
-Issue distinct certificates for the IDs in `admission/config.json` and
-`executor/config.json`. The Admission certificate must include
-`URI:urn:inari:local:admission:<admission-id>`; the Executor certificate must
-include `URI:urn:inari:local:executor:<executor-id>`. The issuing CA must be a
-valid CA certificate. Each private key must match its component certificate.
-Keep the Admission and Executor private keys in their respective component
-directories and set their file mode to `0600`; the directories are created
-with mode `0700`. Do not pass key bytes through CLI arguments, Session input,
-or Agent child environment.
+Remote component placement uses a configured endpoint, expected component ID and trusted TLS material. Executor may be separately hosted without sharing its secret filesystem with Console, Admission or Authority. Remote Authority and automatic certificate issuance/distribution are not included in this completion scope.
 
-The trust CA certificate is public material. The Runtime Authority signing
-key and the GitHub App-user credentials remain in their existing custody
-locations; they are not used as TLS identities.
+## 2. Transport trust
 
-The runtime verifies certificate validity, private-key matching, CA trust,
-and the peer's configured URI identity. Admission also keeps the existing
-Executor ID check in its health protocol. Session and Capability authorization
-continues at Admission and remains required for governed operations.
+Use distinct component certificates and owner-local private keys. The existing mTLS identity vocabulary binds role plus component ID using the `urn:inari:local:<role>:<id>` URI form. Verify certificate validity, key match, issuing trust and the exact configured peer identity, not merely a trusted CA.
 
-The TLS private-key bytes stay in their component directories. Runtime code
-does not put them in Agent child environments, CLI semantic input, status HTML,
-or repository artifacts.
+`admission`, `executor` and `control` are distinct roles. Admission execution/evidence routes and Control owner-observation routes must reject the other role where that route separation applies. A browser is not a component mTLS principal and must never receive these keys.
 
-The bind policy is recorded during setup. To return to loopback, set
-`INARI_LOCAL_RUNTIME_BIND=loopback` and set up both components in a fresh
-`INARI_CONFIG_HOME`; loopback remains the default when the variable is unset.
+Non-loopback startup is fail-closed without valid security material. TLS authentication does not replace repository, Session, subject or capability admission. Do not fall back to plaintext, another endpoint or local secret-file reads after authentication failure.
+
+## 3. Current configuration versus target
+
+At the observed main baseline, the local non-loopback configuration includes component-owned `mtls-certificate.pem`, `mtls-private-key.pem` and `mtls-ca-certificate.pem` files. Existing setup can record a listen policy, while local discovery still selects local peer addresses. That implementation is not proof of arbitrary cross-host endpoint provisioning.
+
+The separate Executor observation producer adds a Control-authenticated HTTP seam. It does not itself complete endpoint persistence, Control certificate provisioning, remote enrollment or remote Authority. Those capabilities must be certified at their actual boundary before this guide describes them as available.
+
+Use only the installed release's supported setup/configuration workflow. This document does not add command flags or authorize manual mutation of internal configuration to bypass readiness.
+
+## 4. Operator browser boundary
+
+Console authentication retains Host/Origin, CSRF, expiry, repository/config-generation binding, confirmation and request/upload size checks. Loopback and an SSH tunnel are transport properties, not user authorization.
+
+A machine-scoped discovery view may expose only allowed public operational data. Repository actions are verified server-side against their selected immutable context. Switching a route cannot retarget an existing action or token to another repository.
+
+## 5. Separation from Hosted Relay
+
+Hosted Relay provides a public ingress over a user-owned outbound connection and routes by relay locator. Its transport key and assertion issuer trust are distinct from component mTLS and Authority delegation. Configuring one does not authorize the others.
+
+Do not expose Executor's raw provider client, shell execution or unrestricted owner filesystem through either remote path. Cloud requests remain bounded Inari protocol operations.
+
+## 6. Verification
+
+Test correct peers, wrong role, wrong component ID, wrong server, expired/untrusted material, unavailable endpoints and restart/reconfiguration. Distinguish separate-process fixtures from real separate-host certification. No test may copy Executor private material into another component's home to simulate a working connection.

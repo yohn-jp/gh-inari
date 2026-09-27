@@ -1,76 +1,46 @@
 # Contributing
 
-Thanks for your interest in contributing. This project is pre-1.0 — expect
-breaking changes between minor versions until 1.0.
+This project is pre-1.0. Compatibility changes require an explicit governed decision; a version number alone is not permission to break a supported contract.
 
-## Before you start
+## Authority before implementation
 
-- Blank Issues are disabled. Open and discuss one concrete Issue before
-  implementation.
-- Include the Issue number in the branch name: `<type>/<issue-number>-<slug>`
-  (e.g. `feat/42-add-init-command`), where `<type>` is one of `feat`, `fix`,
-  `docs`, `refactor`, `test`, `chore`.
-- Keep a pull request scoped to one closing Issue.
+Read [AGENTS.md](./AGENTS.md), the organization governance it references and the [Product Architecture Canon](./docs/ARCHITECTURE.md). Work from a current accepted task and its actual integration route, scope and verification obligations.
 
-## Development setup
+Ordinary Issues describe intent and acceptance. Implementations describe bounded execution. Architecture changes are approved by the product owner in the design review, not inferred by the implementing worker. A worker may propose a correction but cannot modify its own authority to justify it.
 
-Requires Node.js >= 22.13 and [pnpm](https://pnpm.io/) 11.18.0.
+Internal functions, modules, algorithms and test organization remain implementation choices inside approved boundaries. Public semantics, identity, trust, capability, secret/state ownership, recovery and compatibility changes do not.
+
+## Development environment
+
+Requires Node.js 24 or newer and the package-manager version pinned in [package.json](./package.json).
 
 ```bash
-pnpm install
-pnpm run build
-pnpm test
-pnpm run typecheck
-pnpm run format:check
-pnpm run lint
+pnpm install --frozen-lockfile
 pnpm run verify
 ```
 
-## Making changes
+Run focused checks while editing and the task's required final verification against the stable head. Distinguish source, built, installed, process/browser and live-provider proof as described in [Verification Architecture](./docs/VERIFICATION_ARCHITECTURE.md).
 
-1. Create a branch off `main` using the Issue number.
-2. Keep changes focused — a bug fix shouldn't carry along unrelated refactors.
-3. Add or update tests next to the file they cover, as `<name>.test.ts`
-   (or `<name>.test.mjs` under `scripts/`), using `node:test` +
-   `node:assert/strict`.
-4. Run `pnpm run verify` before opening a PR.
-5. Update `README.md` in the same PR as any user-visible behavior change.
+## Branches and changes
 
-## Generated `dist/` output
+Use the governed isolated branch/worktree and current base. Implementation, Source integration, Epic integration and main are different roles. Never implement directly on an integration branch/main or consume an unmerged sibling as an implicit dependency.
 
-`dist/**` is build output and is gitignored — it is never committed. The
-npm package builds it at `prepack` time
-([`package.json`](package.json)), and the precompiled `gh` extension
-release builds it as an intermediate step inside
-[`scripts/build-gh-extension-release.sh`](scripts/build-gh-extension-release.sh).
-`pnpm run build` above is still expected locally to verify your change
-compiles, but its `dist/` output should not be included in your commits.
+Follow the task/repository branch contract and canonical parent/routing evidence. Do not guess parentage from a name, add an unrelated closing reference or reinterpret a Source set as an ordered target selector.
 
-## Commit messages
+Reuse canonical helpers and owner ports. Do not add speculative abstractions, duplicate parsers, credential fallbacks or unrelated refactors. Generated organization files are changed at their canonical source, not forked in this repository.
 
-This repo uses [Conventional Commits](https://www.conventionalcommits.org/):
-`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`.
+## Code and generated output
 
-## Code conventions
+TypeScript is strict ESM/NodeNext; relative source imports use the emitted `.js` extension. Prefer full words and comments explaining intent. Use existing test primitives and keep evidence tied to the behavior being proved.
 
-- TypeScript, strict mode, ESM (`module: NodeNext`). Relative imports use
-  explicit `.js` extensions (e.g. `./cli.js`), even though the source file is
-  `.ts` — required by NodeNext module resolution.
-- Use full words in identifiers, not abbreviations.
-- Comments explain **why**, not what.
+`dist/**` is generated and not committed. Package build and conformance validate produced artifacts; a source-only test is not package proof. Do not edit generated native templates independently of their repository semantic source.
 
 ## Pull requests
 
-- Describe what changed and why.
-- Link exactly one Issue using a closing reference such as `Closes #123`.
-- Keep the pull request template sections.
-- CI (typecheck, lint, test, build, package check) must pass.
-- The `Governance / validate-pr` check enforces the branch-name and
-  linked-Issue contract via the organization-owned reusable workflow in
-  `yohn-jp/.github`, which validates semantics through the published
-  `gh-inari` package.
+Use the canonical PR template and describe actual changes, task authority, validation and review focus. Conventional Commit prefixes describe the change. Do not fabricate an Issue, acceptance result or test pass to fill a field. Preserve the explicitly requested lifecycle and any audit-only restriction.
 
-## Reporting bugs / requesting features
+A PR may be published for review with unavailable verification clearly stated; that does not make it merge-ready. Required CI/governance and the applicable human review remain gates. Creating/fixing a PR is not permission to merge, close Issues, change Rulesets or release.
 
-Use GitHub Issues. For security issues, see [SECURITY.md](SECURITY.md)
-instead of filing a public issue.
+## Security
+
+Report security issues through [SECURITY.md](./SECURITY.md). Never place operator credentials, private keys, tokens or raw secret-bearing evidence in an Issue, PR, log or test artifact.

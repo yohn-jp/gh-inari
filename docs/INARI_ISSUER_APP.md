@@ -1,174 +1,53 @@
-# Inari App Principal and Effect Authorizer
+# Inari Access: App Principal and Credential Profiles
 
-This document retains its historical filename for compatibility. The
-canonical implementation surfaces are `src/github/app-principal.ts` and
-`src/github/effect-authorizer.ts`; `src/github/issuer-authority.ts` is a
-compatibility module only.
+Status: normative provider boundary under [Product Architecture Canon](./ARCHITECTURE.md). This historical filename is retained as a link, not a separate Issuer architecture. The public App name is Inari Access.
 
-Runtime signer provisioning and per-runtime key ownership are documented in the subordinate
-[`Delegator operations runbook`](./DELEGATOR_OPERATIONS.md).
+## 1. One App identity, separate uses
 
-This document is the implementation contract for Issues #217 and #464. The product and
-trust-boundary architecture remains
-[`CHANGE_CONTROL_PLANE.md`](./CHANGE_CONTROL_PLANE.md); this document does
-not introduce a second semantic policy owner.
+Inari Access is a GitHub App identity, not an Executor, policy engine, reviewer or repository authority. Hosted ingress uses its GitHub App user-authorization profile; user-owned Executor uses its installation-execution profile. There is no additional Endpoint App or Inari Identity App in the approved target.
 
-## Role
+App database ID, OAuth client ID, App slug, installation ID and repository ID are different identities. Bind and verify each at its relevant boundary. The historical `inari-issuer` name in code/provenance does not define a second App or require every dedicated App to share a slug.
 
-The Inari GitHub App is the App Principal for provider access. The trusted
-composition contains two distinct capabilities: a least-privilege repository
-evidence reader used before admission, and an Effect Authorizer used only to
-admit already-planned effects. The App Principal is not a semantic API, a
-frontend, a reviewer, or a merge authority.
+## 2. User-authorization profile
 
-Inari Core computes and validates `ChangeEffect` values. The Effect Authorizer
-accepts only those explicit effects and checks the credential boundary around
-their application. It does not derive branch names, choose lifecycle
-transitions, validate PR policy, or implement idempotency and recovery.
+Hosted authenticates a GitHub user and observes repository eligibility through the configured App installation. The GitHub user token stays only in the bounded authentication/verification operation. Hosted signs a [Repository Access Assertion](./REPOSITORY_ACCESS_ASSERTION.md), then discards the token. It does not forward the token or perform normal GitHub mutations.
 
-## Permission ceiling
+GitHub App user tokens are constrained by both user and App permissions/resources. This does not guarantee the token is read-only when both possess write permission. Hosted's permitted use is authentication and eligibility observation only; no-storage is not a substitute for enforcing that use boundary.
 
-The App ceiling is deliberately limited to repository evidence reads plus the
-initial effect set. `metadata: read` is GitHub's automatic baseline.
+The OAuth App/client identity used for the assertion must match the execution App identity confirmed by Executor. Dedicated-App onboarding therefore needs matching authorized OAuth configuration. A shared OAuth token is not proof for a different dedicated execution App.
 
-| Trusted capability           | GitHub App permission ceiling                           |
-| ---------------------------- | ------------------------------------------------------- |
-| Pre-admission evidence reads | `contents: read`, `issues: read`, `pull_requests: read` |
-| `CREATE_BRANCH`              | `contents: write`                                       |
-| `DELETE_BRANCH`              | `contents: write`                                       |
-| `CREATE_PULL_REQUEST`        | `pull_requests: write`                                  |
-| `MARK_PULL_REQUEST_READY`    | `pull_requests: write`                                  |
-| `CLOSE_PULL_REQUEST`         | `pull_requests: write`                                  |
+## 3. Installation-execution profile
 
-The read capability cannot apply a Change effect, and the Effect Authorizer
-cannot be used as a general evidence reader. The mutation ceiling remains:
+Executor owns App private keys, credential generations and repository-to-App/installation bindings. Its broker acquires narrowly scoped installation authority for the exact admitted repository/operation and does not return a reusable token or generic client to a caller.
 
-| Initial `ChangeEffect`    | GitHub App permission  |
-| ------------------------- | ---------------------- |
-| `CREATE_BRANCH`           | `contents: write`      |
-| `DELETE_BRANCH`           | `contents: write`      |
-| `CREATE_PULL_REQUEST`     | `pull_requests: write` |
-| `MARK_PULL_REQUEST_READY` | `pull_requests: write` |
-| `CLOSE_PULL_REQUEST`      | `pull_requests: write` |
+Evidence reads are a separate bounded read capability from mutation. The initial effect ceiling covers repository evidence plus governed branch creation/deletion and PR creation, ready and close. It does not implicitly grant Issue write, administration, workflow changes, review/approval or merge.
 
-The App Principal does not request Issue write, administration, Actions,
-workflow, review/approval, or merge permissions. `issues: read` is read-only
-evidence access and is never part of a mutation request. When one effect is applied,
-the short-lived credential is requested with only that effect's required
-permission. A Change issuance containing branch and PR effects requests the
-union of those two requirements.
+An operation outside the implemented admitted effect set remains unsupported until its owning contract is explicitly approved and implemented. The product's semantic merge API is not proof that this App profile has merge authority. Never substitute caller OAuth credentials to bypass a missing provider capability.
 
-## Credential boundary
+## 4. Evidence and effect separation
 
-The two credential boundaries are
-`withRepositoryReadCapability` and
-`TrustedInstallationCredentialBroker.withScopedInstallationCredential`:
+The read capability performs only allowed repository-bound evidence requests. The Effect Authorizer accepts only an already planned and admitted effect; it does not choose names, derive artifacts, decide lifecycle policy or implement a generic GitHub proxy.
 
-```text
-pre-admission evidence request
-        │ no App credential
-        ▼
-trusted App provider
-        │ obtains a fresh read credential
-        │ selects one repository and read-only permissions
-        ▼
-repository-read capability
-        │ GET evidence only; host + immutable repository ID bound
-        ▼
-evidence / admission
-        │
-        └── credential is discarded when the read operation ends
+Scope evidence must bind App, installation, provider host, immutable repository, current locator and requested permissions. Check exact permission ceiling and expiry, reject excess/unselected scope, and sanitize provider/broker failures. The installation credential is contained for the scoped operation and discarded according to the broker contract.
 
-admitted Change effect
-        │ no App credential
-        ▼
-trusted Effect Authorizer
-        │ obtains a fresh mutation credential
-        │ selects one repository and admitted permissions
-        ▼
-scoped mutation capability
-        │ apply(ChangeEffect), no token return value
-        ▼
-GitHub effect adapter
-        │
-        └── credential is discarded when the scoped operation ends
-```
+Executor compares the assertion's repository/App/installation evidence with its own current binding. Hosted never creates or overwrites that binding. Verification success must not make stale credential generations current.
 
-The App private key and installation token exist only inside the trusted
-Credential Broker implementation. The request, scope evidence, mutation
-receipt, and Effect Authorizer errors contain no credential value. Broker
-errors are sanitized at the Effect Authorizer boundary so an accidental
-token-bearing provider error cannot cross to a caller.
+## 5. Custody and onboarding
 
-The broker must obtain a new short-lived credential for each operation; it
-must not cache or return a reusable bearer credential. The read capability
-exposes only repository-scoped GET evidence. The mutation capability exposes
-only the repository-scoped mutation operation. Neither exposes a token,
-private key, authorization header, or general GitHub client.
+Dedicated repository Apps and explicit manual shared Apps use the same App-scoped custody and repository-binding model. A shared App does not gain isolation by copying its PEM into per-repository directories.
 
-## Identity and scope proof
+Manifest conversion is Executor-owned. The temporary conversion code crosses only the authorized enrollment boundary; key material is received and stored inside Executor. App creation and repository installation are distinct human/provider steps. Binding becomes verified only after authoritative installation/repository observation.
 
-Every Effect Authorizer operation carries all of these identities:
+Service OAuth client secrets needed for Hosted authentication are distinct from the App signing private key. Their provisioning and callback binding must be explicit. No App private key or installation token enters Hosted, browser state, repository files, generic Setup JSON, Relay jobs or retained evidence.
 
-- App identity: `kind=github-app`, slug `inari-issuer`, configured App ID,
-  principal `app:inari-issuer`.
-- Installation identity: App ID, installation ID, and GitHub host.
-- Repository identity: GitHub host, immutable decimal repository ID, and
-  `owner/name` locator.
-- Requested capability: the exact effect-derived permission set.
+## 6. Rotation, revocation and publication
 
-The broker must return scope evidence proving that:
+Prepare/enroll and verify the replacement before switching an active binding. Prove normal execution with the candidate before optionally retiring old access. Do not delete an App credential still referenced by another repository. Authority and Relay key rotation are separate operations.
 
-- the App and installation identities match;
-- for pre-admission reads, the selected repository ID and locator are derived
-  from the provider response, with the host fixed to the configured canonical
-  host;
-- for post-admission mutations, the selected repository ID and locator match
-  the admitted `IssuerCredentialRequest.target`;
-- the installation host matches the scoped repository host;
-- the credential is restricted to the selected repository;
-- the granted permissions exactly match the requested effect capability,
-  apart from GitHub's automatic metadata read permission; and
-- the expiry is present and in the future.
+Provider execution identity remains App-backed; the authenticated requester is recorded as bounded provenance, not impersonated by changing the GitHub credential. Commit authorship, publication identity, human review and merge authority remain distinct.
 
-Unknown fields, missing identity, host/repository/installation mismatch,
-unselected repository scope, excess permission, and expired credentials fail
-closed. Owner/name is never accepted as a substitute for the host plus
-repository ID tuple.
+## 7. Migration
 
-## Trusted execution
+Direct App as a separate execution deployment is retired. Reuse its canonical broker/Core/effect implementation only behind the user-owned Executor. Remove deployment-specific trust/context assumptions rather than declaring an Actions runner or Worker to be the semantic authority.
 
-The Effect Authorizer accepts only an explicit trusted execution context from the
-protected remote runtime:
-
-- runtime `github-actions`;
-- event `workflow_dispatch` or trusted `workflow_call`;
-- protected workflow ref and immutable workflow commit SHA;
-- `workflowTrust=protected` and `codeExecution=trusted-only`;
-- `fork=false` and `pullRequest=false`.
-
-`pull_request`, `pull_request_target`, fork execution, PR merge refs,
-untrusted checkout, and unknown events cannot obtain App Principal Provider
-Credentials. A
-privileged runtime must execute its protected workflow and canonical Inari
-dependencies without checking out or executing PR-controlled code. Repository
-protection, owner review, and immutable dependency controls protect the code
-that constructs the trusted context.
-
-## Authority separation
-
-The requester may be a human or agent, while the provider effect is performed
-as the Inari App Principal. Commit authorship remains implementation
-provenance. Review and approval belong to a human or independent reviewer; the
-Effect Authorizer has no approve/review operation and cannot
-approve its own PR. Merge admission remains repository policy and is outside
-this module.
-
-## Boundary with Issue #218
-
-This issue establishes the typed Effect Authorizer and Credential Broker
-contract. It does not
-add an Actions workflow, workflow dispatch API, checkout behavior, semantic
-request routing, effect journal, projection verification, or retry executor.
-Those are trusted execution responsibilities of Issue #218 and must consume
-this boundary without moving semantic policy into workflow YAML.
+The old provider contract and public symbols are implementation evidence, not a permanent license for parallel execution. [Architecture Convergence](./ARCHITECTURE_CONVERGENCE.md) records the remaining migration and certification gates.
