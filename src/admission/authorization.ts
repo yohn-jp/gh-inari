@@ -30,7 +30,12 @@ import { canonicalJsonString, type CanonicalJsonValue } from "../agent-authority
 import { createAuthorizedExecution, type AuthorizedExecution } from "../authorized-execution.js";
 import { changeReadRequest } from "../change-execution-port.js";
 import { validateChangeProjectionResult, type ChangeProjectionResult } from "../change.js";
-import { tryAuthorizeImplementation, type ImplementationAuthorizationInput } from "../implementation-authorization.js";
+import {
+  tryAuthorizeImplementation,
+  type ImplementationAuthorizationInput,
+  type ImplementationAuthorizationRecord,
+} from "../implementation-authorization.js";
+import { observeImplementationTaskTermination } from "../implementation-task-termination.js";
 import {
   projectImplementationSessionAuthorizationBinding,
   type ImplementationSessionAuthorizationBinding,
@@ -123,28 +128,22 @@ export async function currentBranchPolicyInput(
   stage: RuntimeFailureStage,
 ): Promise<LocalBranchPolicyInput> {
   const input = await readCurrentBranchPolicyInput(repository, implementation, options, stage);
-  if (input.sources === undefined) return input;
   const pinned = options.runtimeAuthority;
   const subject = {
     repository,
     authority: { id: pinned.id, publicKeyFingerprint: delegatorPublicKeyFingerprint(pinned.key) },
+    task: { kind: "issue" as const, number: implementation },
   };
-  const evidence = validateEvidence(
-    await options.readEvidence({
-      version: 1,
-      repository: evidenceRepository(repository),
-      authorityId: pinned.id,
-      issue: implementation,
-      implementationIssue: implementation,
-    }),
-    subject,
-    pinned,
+  const { current } = await currentTaskEvidence(subject, options, {
+    issue: implementation,
     stage,
-  );
-  const current = currentImplementationAuthorization(evidence, { kind: "issue", number: implementation }, true, stage);
+    includeSources: input.sources !== undefined,
+  });
+  if (input.sources === undefined) return input;
+  const currentSources = current.binding.sources;
   if (
-    current.binding.sources === undefined ||
-    canonicalJsonString(current.binding.sources as unknown as CanonicalJsonValue) !==
+    currentSources === undefined ||
+    canonicalJsonString(currentSources as unknown as CanonicalJsonValue) !==
       canonicalJsonString(input.sources as unknown as CanonicalJsonValue)
   )
     deny(stage, "ADMISSION_BRANCH_OBSERVATION_STALE", "Current Implementation Source evidence is inconsistent.");
@@ -318,11 +317,20 @@ function validateEvidence(
   readonly authority: { readonly ref: string; readonly sha: string };
   readonly change: ChangeProjectionResult;
   readonly implementation: Record<string, unknown>;
+  readonly taskTermination?: unknown;
   readonly reviewEvidence?: unknown;
 } {
   if (
     !isRecord(value) ||
-    !exactKeys(value, ["repository", "authority", "runtimeAuthority", "change", "implementation", "reviewEvidence"])
+    !exactKeys(value, [
+      "repository",
+      "authority",
+      "runtimeAuthority",
+      "change",
+      "implementation",
+      "reviewEvidence",
+      "taskTermination",
+    ])
   )
     deny(stage, "ADMISSION_EVIDENCE_MALFORMED", "Executor evidence response is malformed.");
   const repositoryResult = validateIssuerRepositoryIdentity(value.repository);
@@ -356,6 +364,7 @@ function validateEvidence(
     authority,
     change: projection.projection,
     implementation: value.implementation,
+    ...(value.taskTermination === undefined ? {} : { taskTermination: value.taskTermination }),
     ...(value.reviewEvidence === undefined ? {} : { reviewEvidence: value.reviewEvidence }),
   };
 }
@@ -385,6 +394,7 @@ function currentImplementationAuthorization(
   readonly binding: ImplementationSessionAuthorizationBinding;
   readonly scope: NonNullable<ReturnType<typeof tryProjectImplementationScope>["projection"]>;
   readonly sources: readonly IssueReference[];
+  readonly authorization: ImplementationAuthorizationRecord;
 } {
   const implementationEvidence = evidence.implementation;
   const authorizationInput: ImplementationAuthorizationInput = {
@@ -416,7 +426,101 @@ function currentImplementationAuthorization(
   const scope = tryProjectImplementationScope(currentInput);
   if (!scope.valid || scope.projection === undefined)
     deny(stage, "ADMISSION_IMPLEMENTATION_SCOPE_UNAVAILABLE", "Current Implementation scope is unavailable.");
-  return { binding: bindingProjection, scope: scope.projection, sources: authorization.contract.sources };
+  return {
+    binding: bindingProjection,
+    scope: scope.projection,
+    sources: authorization.contract.sources,
+    authorization: authorization.authorization,
+  };
+}
+
+function authoritativeTerminationAbsence(value: unknown, authorization: ImplementationAuthorizationRecord): boolean {
+  if (
+    !isRecord(value) ||
+    !exactKeys(value, ["status", "provenance", "recordProvenance"]) ||
+    value.status !== "absent" ||
+    !isRecord(value.provenance) ||
+    Object.keys(value.provenance).length < 1 ||
+    Object.keys(value.provenance).length > 4 ||
+    !Object.values(value.provenance).every(
+      (entry) => typeof entry === "string" && entry.length >= 1 && entry.length <= 128,
+    ) ||
+    !Array.isArray(value.recordProvenance) ||
+    value.recordProvenance.length !== 0
+  )
+    return false;
+  const normalized = observeImplementationTaskTermination(
+    { status: "authoritative", provenance: value.provenance, records: [] },
+    authorization,
+  );
+  return normalized.status === "absent";
+}
+
+interface CurrentTaskEvidence {
+  readonly evidence: ReturnType<typeof validateEvidence>;
+  readonly current: ReturnType<typeof currentImplementationAuthorization>;
+}
+
+/**
+ * Re-read the current Implementation, then bind a second Executor evidence
+ * read to that exact current authorization so task termination is checked at
+ * the same task boundary as the current Change and Implementation evidence.
+ */
+async function currentTaskEvidence(
+  binding: Pick<LocalSessionBinding, "repository" | "authority" | "task">,
+  options: AdmissionAuthorizationOptions,
+  input: {
+    readonly issue: number;
+    readonly stage: RuntimeFailureStage;
+    readonly includeSources: boolean;
+  },
+): Promise<CurrentTaskEvidence> {
+  if (binding.task.kind !== "issue")
+    deny(input.stage, "ADMISSION_TASK_MISMATCH", "Execution Session has no Implementation Issue task.");
+  const request = {
+    version: 1 as const,
+    repository: evidenceRepository(binding.repository),
+    authorityId: binding.authority.id,
+    issue: input.issue,
+    implementationIssue: binding.task.number,
+  };
+  const preliminaryEvidence = validateEvidence(
+    await options.readEvidence(request),
+    binding,
+    options.runtimeAuthority,
+    input.stage,
+  );
+  if (preliminaryEvidence.taskTermination !== undefined)
+    deny(input.stage, "ADMISSION_EVIDENCE_MALFORMED", "Executor returned unrequested task termination evidence.");
+  const preliminaryCurrent = currentImplementationAuthorization(
+    preliminaryEvidence,
+    binding.task,
+    input.includeSources,
+    input.stage,
+  );
+  const evidence = validateEvidence(
+    await options.readEvidence({ ...request, taskTerminationAuthorization: preliminaryCurrent.authorization }),
+    binding,
+    options.runtimeAuthority,
+    input.stage,
+  );
+  const current = currentImplementationAuthorization(evidence, binding.task, input.includeSources, input.stage);
+  if (
+    canonicalJsonString(preliminaryCurrent.authorization as unknown as CanonicalJsonValue) !==
+    canonicalJsonString(current.authorization as unknown as CanonicalJsonValue)
+  )
+    deny(
+      input.stage,
+      "ADMISSION_IMPLEMENTATION_UNAUTHORIZED",
+      "Current Implementation changed during task termination observation.",
+    );
+  if (!authoritativeTerminationAbsence(evidence.taskTermination, current.authorization))
+    deny(
+      input.stage,
+      "ADMISSION_IMPLEMENTATION_UNAUTHORIZED",
+      "Current task termination evidence does not permit this Session.",
+    );
+  return { evidence, current };
 }
 
 const CHANGE_OPERATIONS: ReadonlySet<ExecutionIntent["operation"]> = new Set([
@@ -541,17 +645,11 @@ export async function currentSessionChange(
 ): Promise<ChangeProjectionResult> {
   if (binding.task.kind !== "issue")
     deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "The Session has no Implementation task.");
-  const evidence = validateEvidence(
-    await options.readEvidence({
-      version: 1,
-      repository: evidenceRepository(binding.repository),
-      authorityId: binding.authority.id,
-      issue: binding.task.number,
-      implementationIssue: binding.task.number,
-    }),
-    binding,
-    options.runtimeAuthority,
-  );
+  const { evidence } = await currentTaskEvidence(binding, options, {
+    issue: binding.task.number,
+    stage: "implementation-admission",
+    includeSources: binding.implementationBinding?.sources !== undefined,
+  });
   return evidence.change;
 }
 
@@ -562,6 +660,11 @@ export async function admitSession(
 ): Promise<AdmittedSession> {
   await requireCurrentBranchObservation(binding, options, "session-registration");
   const current = await currentTrust(binding, options);
+  await currentTaskEvidence(binding, options, {
+    issue: binding.task.number,
+    stage: "session-registration",
+    includeSources: binding.implementationBinding?.sources !== undefined,
+  });
   const snapshot = createAdmissionSession(binding, current, {
     environment: options.environment,
     now: options.now?.(),
@@ -619,16 +722,12 @@ export async function authorizeExecutionIntent(
   if (issue === undefined || binding.task.kind !== "issue" || (!changeOperation && binding.task.number !== issue))
     deny("implementation-admission", "ADMISSION_TASK_MISMATCH", "Execution task does not match Session.");
   if (changeOperation) requireSignedChangeRoot(binding, issue);
-  const evidenceValue = await options.readEvidence({
-    version: 1,
-    repository: evidenceRepository(binding.repository),
-    authorityId: binding.authority.id,
+  const { evidence, current } = await currentTaskEvidence(binding, options, {
     issue,
-    implementationIssue: binding.task.number,
+    stage: "implementation-admission",
+    includeSources: binding.implementationBinding?.sources !== undefined,
   });
-  const evidence = validateEvidence(evidenceValue, binding, options.runtimeAuthority);
   const sourceBound = binding.implementationBinding?.sources !== undefined;
-  const current = currentImplementationAuthorization(evidence, binding.task, sourceBound);
   if (
     sourceBound &&
     (binding.implementationBinding === undefined ||

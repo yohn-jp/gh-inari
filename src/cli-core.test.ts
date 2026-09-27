@@ -602,6 +602,14 @@ function localTrustEvidence(authority: Delegator): {
   };
 }
 
+function taskTerminationAbsence() {
+  return {
+    status: "absent",
+    provenance: { source: "github-git-data", commit: "a".repeat(40) },
+    recordProvenance: [],
+  } as const;
+}
+
 function localImplementationEvidence(
   issue: number,
   repositoryId: string,
@@ -748,8 +756,26 @@ test("session start registers a production-verifiable binding and bounded proven
       async resolveRepository() {
         return { repositoryHost: "github.com", repositoryId: "123456789", nameWithOwner: "acme/inari" };
       },
-      async readEvidence() {
-        return localTrustEvidence(local.authority);
+      async readEvidence(request) {
+        const trust = localTrustEvidence(local.authority);
+        if (request.issue === undefined) return trust;
+        const baseHead = "a".repeat(40);
+        const branch = `feat/${request.implementationIssue ?? request.issue}-local-cli-admission-path`;
+        const projection = localChangeProjection(request.issue, "123456789", branch, baseHead);
+        const evidence = {
+          ...trust,
+          change: projection,
+          implementation: localImplementationEvidence(
+            request.implementationIssue ?? request.issue,
+            "123456789",
+            branch,
+            baseHead,
+            projection,
+          ),
+        };
+        return request.taskTerminationAuthorization === undefined
+          ? evidence
+          : { ...evidence, taskTermination: taskTerminationAbsence() };
       },
       async readBranchPolicy() {
         return localBranchPolicy("feat/1029-local-cli-admission-path", 1029);
@@ -877,11 +903,14 @@ test("local Change commands use the production Admission authority and its exact
       const trust = localTrustEvidence(local.authority);
       if (request.issue === undefined) return trust;
       const projection = localChangeProjection(issue, "123456789", branch, currentHead);
-      return {
+      const evidence = {
         ...trust,
         change: projection,
         implementation: localImplementationEvidence(issue, "123456789", branch, baseHead, projection),
       };
+      return request.taskTerminationAuthorization === undefined
+        ? evidence
+        : { ...evidence, taskTermination: taskTerminationAbsence() };
     },
     execute: async (execution): Promise<AuthorizedExecutionResult> => {
       if (execution.operation === "change.issue") {
@@ -1175,11 +1204,14 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
     readEvidence: async (request) => {
       const trust = localTrustEvidence(local.authority);
       if (request.issue === undefined) return trust;
-      return {
+      const evidence = {
         ...trust,
         change: projection,
         implementation: localImplementationEvidence(issue, "123456789", branch, baseHead, projection),
       };
+      return request.taskTerminationAuthorization === undefined
+        ? evidence
+        : { ...evidence, taskTermination: taskTerminationAbsence() };
     },
     readGovernedContract: async (request) => {
       contractReads.push(request);
@@ -1509,8 +1541,21 @@ test("session close selects only inherited INARI_SESSION_ID through the producti
       async verifyReady() {
         return { ok: true };
       },
-      async readEvidence() {
-        return localTrustEvidence(local.authority);
+      async readEvidence(request) {
+        const trust = localTrustEvidence(local.authority);
+        if (request.issue === undefined) return trust;
+        const baseHead = "a".repeat(40);
+        const implementation = request.implementationIssue ?? request.issue;
+        const branch = `feat/${implementation}-local-cli-admission-path`;
+        const projection = localChangeProjection(request.issue, "123456789", branch, baseHead);
+        const evidence = {
+          ...trust,
+          change: projection,
+          implementation: localImplementationEvidence(implementation, "123456789", branch, baseHead, projection),
+        };
+        return request.taskTerminationAuthorization === undefined
+          ? evidence
+          : { ...evidence, taskTermination: taskTerminationAbsence() };
       },
       async execute() {
         throw new Error("session close must not execute Change mutations");
