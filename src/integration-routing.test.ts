@@ -65,6 +65,91 @@ test("issue integration routing projects each convergence PR role", () => {
   );
 });
 
+test("Source and Epic integration roles route without Implementation identities", () => {
+  const source = projectIntegrationRouting({
+    version: 1,
+    kind: "integration-routing",
+    role: "issue-integration",
+    sourceIssue,
+    epic,
+    relationships: { sourceIssueParent: epic },
+    branches: {
+      default: "main",
+      issue: "issue/680-source-routing",
+      epic: "epic/640-dashboard",
+    },
+    head: "issue/680-source-routing",
+    base: "epic/640-dashboard",
+  });
+  assert.equal(source.mode, "issue-integration");
+  assert.equal(source.implementation, undefined);
+  assert.equal(source.expectedHead, "issue/680-source-routing");
+  assert.equal(source.expectedBase, "epic/640-dashboard");
+
+  const epicOnly = projectIntegrationRouting({
+    version: 1,
+    kind: "integration-routing",
+    role: "epic-integration",
+    epic,
+    branches: { default: "main", epic: "epic/640-dashboard" },
+    head: "epic/640-dashboard",
+    base: "main",
+  });
+  assert.equal(epicOnly.mode, "issue-integration");
+  assert.equal(epicOnly.implementation, undefined);
+  assert.equal(epicOnly.sourceIssue, undefined);
+  assert.equal(epicOnly.expectedHead, "epic/640-dashboard");
+  assert.equal(epicOnly.expectedBase, "main");
+});
+
+test("Source and Epic integration roles require canonical relationship facts", () => {
+  const missingSourceParent = tryProjectIntegrationRouting({
+    version: 1,
+    kind: "integration-routing",
+    role: "issue-integration",
+    sourceIssue,
+    epic,
+    branches: { default: "main", issue: "issue/680-source-routing", epic: "epic/640-dashboard" },
+    head: "issue/680-source-routing",
+    base: "epic/640-dashboard",
+  });
+  assert.equal(missingSourceParent.valid, false);
+  assert.ok(
+    missingSourceParent.diagnostics.some((entry) => entry.code === "INTEGRATION_ROUTING_RELATIONSHIP_REQUIRED"),
+  );
+
+  const wrongSourceParent = tryProjectIntegrationRouting({
+    version: 1,
+    kind: "integration-routing",
+    role: "issue-integration",
+    sourceIssue,
+    epic,
+    relationships: { sourceIssueParent: { ...repository, number: 641 } },
+    branches: { default: "main", issue: "issue/680-source-routing", epic: "epic/640-dashboard" },
+    head: "issue/680-source-routing",
+    base: "epic/640-dashboard",
+  });
+  assert.equal(wrongSourceParent.valid, false);
+  assert.ok(wrongSourceParent.diagnostics.some((entry) => entry.code === "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH"));
+
+  const wrongEpicRef = tryProjectIntegrationRouting({
+    version: 1,
+    kind: "integration-routing",
+    role: "epic-integration",
+    epic: { ...repository, number: 641 },
+    branches: { default: "main", epic: "epic/640-dashboard" },
+    head: "epic/640-dashboard",
+    base: "main",
+  });
+  assert.equal(wrongEpicRef.valid, false);
+  assert.ok(
+    wrongEpicRef.diagnostics.some(
+      (entry) =>
+        entry.code === "INTEGRATION_ROUTING_BRANCH_MISMATCH" || entry.code === "INTEGRATION_ROUTING_HEAD_MISMATCH",
+    ),
+  );
+});
+
 test("routing rejects cross-Issue, cross-Epic, and layer-skipping relationships", () => {
   const wrongSource = tryProjectIntegrationRouting(
     issueRoute({
