@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -370,16 +370,24 @@ function remoteSemanticArtifactResponses(
 const isolatedConfigHome = mkdtempSync(path.join(os.tmpdir(), "inari-cli-config-"));
 const isolatedEnvironment = { INARI_CONFIG_HOME: isolatedConfigHome };
 
+function captureCliProcess(
+  argv: readonly string[],
+  dependencies: Parameters<typeof runCli>[1] = {},
+): { readonly exitCode: number; readonly stdout: string; readonly stderr: string } {
+  const moduleUrl = new URL("./cli.ts", import.meta.url).href;
+  const source = `import { runCli } from ${JSON.stringify(moduleUrl)}; process.exitCode = await runCli(${JSON.stringify(argv)}, ${JSON.stringify(dependencies)});`;
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: { ...process.env, ...isolatedEnvironment },
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  return { exitCode: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
+}
+
 async function captureHelp(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
-  const originalLog = console.log;
-  const lines: string[] = [];
-  console.log = (line: string) => lines.push(line);
-  try {
-    const exitCode = await runCli([...argv]);
-    return { exitCode, output: lines.join("\n") };
-  } finally {
-    console.log = originalLog;
-  }
+  const result = captureCliProcess(argv);
+  return { exitCode: result.exitCode, output: result.stdout + result.stderr };
 }
 
 test("--help exits 0 and prints root usage naming the governed domains", async () => {
@@ -389,43 +397,38 @@ test("--help exits 0 and prints root usage naming the governed domains", async (
   assert.match(output, /issue/);
   assert.match(output, /\bpr\b/);
   assert.match(output, /template/);
-  assert.match(output, /unsupported commands are rejected locally/);
 });
 
-test("no arguments prints root usage matching --help", async () => {
+test("no arguments use Canon root usage failure", async () => {
   const { exitCode, output } = await captureHelp([]);
-  assert.equal(exitCode, 1);
+  assert.notEqual(exitCode, 0);
+  assert.match(output, /no command/i);
   assert.match(output, /Usage: inari <command>/);
 });
 
-test("issue --help prints only issue operations, not pr's", async () => {
+test("Canon route help scopes commands to the issue family", async () => {
   const { exitCode, output } = await captureHelp(["issue", "--help"]);
   assert.equal(exitCode, 0);
   assert.match(output, /Usage: inari issue <command>/);
-  assert.match(output, /issue create/);
+  assert.match(output, /Commands:/);
+  assert.match(output, /\bcreate\b/);
   assert.doesNotMatch(output, /pr create/);
 });
 
-test("issue create --help prints that leaf's usage and an example, not the full command tree", async () => {
+test("Canon issue create help projects the command contract grammar", async () => {
   const { exitCode, output } = await captureHelp(["issue", "create", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari issue create \[--template <template>\]/);
-  assert.match(output, /generic array values repeat as --field name=<value>/);
-  assert.match(output, /checklist values repeat as --field name=<option-id>/);
-  assert.match(output, /Example:/);
+  assert.match(output, /Usage: inari issue create .*--title <title>/);
+  assert.match(output, /--field <<name>=<value>>/);
   assert.doesNotMatch(output, /pr create/);
   assert.doesNotMatch(output, /issue normalize/);
 });
 
-test("pr create short help projects branch requirements and checklist field syntax", async () => {
+test("Canon PR create help projects required branch and title options", async () => {
   const { exitCode, output } = await captureHelp(["pr", "create", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(
-    output,
-    /Usage: inari pr create \[--template <template>\] --title <title> --head <branch> --base <branch>/,
-  );
-  assert.match(output, /generic array values repeat as --field name=<value>/);
-  assert.match(output, /checklist values repeat as --field name=<option-id>/);
+  assert.match(output, /Usage: inari pr create .*--title <title>.*--head <branch>.*--base <branch>/);
+  assert.match(output, /--field <<name>=<value>>/);
 });
 
 test("pr routing exposes the canonical read-only Core result", async () => {
@@ -563,33 +566,68 @@ test("pr publish exposes the same stable classification as Core", async () => {
   }
 });
 
-test("template import --help prints that leaf's usage", async () => {
+test("Canon template import help projects the required input option", async () => {
   const { exitCode, output } = await captureHelp(["template", "import", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari template import --from/);
+  assert.match(output, /Usage: inari template import --from <path>/);
 });
 
-test("--help=full prints the complete command and option reference", async () => {
+test("Canon full root help renders the compiled route tree", async () => {
   const { exitCode, output } = await captureHelp(["--help=full"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /issue normalize <number>/);
-  assert.match(output, /pr normalize <number>/);
-  assert.match(output, /--require-capability/);
-  assert.match(output, /skill \[scenario\]/);
+  assert.match(output, /Usage: inari <command>/);
+  assert.match(output, /issue\tissue commands/);
+  assert.match(output, /pr\tpr commands/);
+  assert.match(output, /skill\t/);
 });
 
-test("pr sync help exposes the complete canonical --from envelope", async () => {
+test("Canon setup help and discovery preserve each nested product route", () => {
+  const help = captureCliProcess(["setup", "--help"]);
+  assert.equal(help.exitCode, 0, help.stderr);
+  assert.match(help.stdout, /Usage: inari setup <command>/);
+  assert.match(help.stdout, /\bstatus\b/);
+  assert.match(help.stdout, /\bnext\b/);
+  assert.match(help.stdout, /\bconsole\b/);
+
+  const group = captureCliProcess(["setup", "--help=json"]);
+  assert.equal(group.exitCode, 0, group.stderr);
+  const groupHelp = JSON.parse(group.stdout) as {
+    readonly commands: readonly { readonly id: string; readonly route: readonly string[] }[];
+  };
+  assert.deepEqual(
+    groupHelp.commands.map(({ id, route }) => ({ id, route })),
+    [
+      { id: "setup.console", route: ["setup", "console"] },
+      { id: "setup.next", route: ["setup", "next"] },
+      { id: "setup.status", route: ["setup", "status"] },
+    ],
+  );
+
+  const child = captureCliProcess(["setup", "status", "--help=json"]);
+  assert.equal(child.exitCode, 0, child.stderr);
+  const childHelp = JSON.parse(child.stdout) as {
+    readonly commands: readonly {
+      readonly id: string;
+      readonly route: readonly string[];
+      readonly fields: readonly { readonly key: string }[];
+    }[];
+  };
+  assert.equal(childHelp.commands.length, 1);
+  const childCommand = childHelp.commands[0];
+  assert.ok(childCommand);
+  assert.deepEqual(
+    { id: childCommand.id, route: childCommand.route },
+    { id: "setup.status", route: ["setup", "status"] },
+  );
+  assert.ok(childCommand.fields.some(({ key }) => key === "detail"));
+  assert.ok(childCommand.fields.some(({ key }) => key === "repository-id"));
+});
+
+test("Canon PR sync help projects its option and positional grammar", async () => {
   const { exitCode, output } = await captureHelp(["pr", "sync", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari pr sync <number> .*--from <path>/);
+  assert.match(output, /Usage: inari pr sync .*--from <path>.*<number>/);
   assert.doesNotMatch(output, /--field/);
-  assert.match(output, /fields \(object\)/);
-  assert.match(output, /title \(string\)/);
-  assert.match(output, /head \(string\)/);
-  assert.match(output, /base \(string\)/);
-  assert.match(output, /draft \(boolean\)/);
-  assert.match(output, /maintainerCanModify \(boolean\)/);
-  assert.match(output, /`fields` must be the semantic object/);
 });
 
 test("issue sync help explains that omitted values are preserved", async () => {
@@ -1046,18 +1084,18 @@ test("skill with an unknown scenario returns a stable machine-readable error", a
   }
 });
 
-test("skill --help prints a scenario index without full playbook content", async () => {
+test("Canon skill help projects the delegated optional scenario grammar", async () => {
   const { exitCode, output } = await captureHelp(["skill", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari skill \[scenario\]/);
-  assert.match(output, /author-issue/);
+  assert.match(output, /Usage: inari skill \[<scenario>\]/);
+  assert.match(output, /List bounded operational playbooks/);
   assert.doesNotMatch(output, /Invariants:/);
 });
 
-test("skill <scenario> --help prints that scenario's summary, not the full playbook", async () => {
+test("Canon skill scenario help stays at the delegated route boundary", async () => {
   const { exitCode, output } = await captureHelp(["skill", "author-issue", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari skill author-issue/);
+  assert.match(output, /Usage: inari skill \[<scenario>\]/);
   assert.doesNotMatch(output, /Invariants:/);
 });
 
@@ -1067,25 +1105,25 @@ test("skill never falls through to the real gh binary", async () => {
   assert.equal(await runCli(["skill", "bogus-scenario"]), 2);
 });
 
-test("no arguments exits 1", async () => {
+test("no arguments use Canon's usage exit status", async () => {
   const originalLog = console.log;
   console.log = () => {};
   try {
     const exitCode = await runCli([]);
-    assert.equal(exitCode, 1);
+    assert.equal(exitCode, 2);
   } finally {
     console.log = originalLog;
   }
 });
 
-test("unknown command exits 1", async () => {
+test("unknown command uses Canon's usage exit status", async () => {
   const originalLog = console.log;
   const originalError = console.error;
   console.log = () => {};
   console.error = () => {};
   try {
     const exitCode = await runCli(["bogus"]);
-    assert.equal(exitCode, 1);
+    assert.equal(exitCode, 2);
   } finally {
     console.log = originalLog;
     console.error = originalError;
@@ -1189,24 +1227,27 @@ test("an earlier unrelated invalid option is not relabeled merely because --body
   });
 });
 
-test("unknown and hostile argv are rejected locally without process delegation", async () => {
+test("unknown and hostile argv stay in Canon usage handling without command execution", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "inari-hostile-argv-"));
+  const marker = path.join(directory, "executed");
   const cases: readonly (readonly string[])[] = [
     ["repo", "view", "--json", "name"],
     ["pr", "legacy", "--state", "open", "--json"],
-    ["repo", "view", "--help", "--json"],
-    ["--unknown-option=$(touch /tmp/inari-should-not-run)", "--json"],
+    [`--unknown-option=$(touch ${marker})`, "--json"],
     ["--json", "--", "repo", "view"],
   ];
-  for (const argv of cases) {
-    const result = await captureJson(argv);
-    assert.equal(result.exitCode, 1, argv.join(" "));
-    const code = (result.output.error as { code?: string } | undefined)?.code;
-    assert.ok(code === "UNKNOWN_COMMAND" || code === "INVALID_OPTION", argv.join(" "));
-    if (code === "UNKNOWN_COMMAND")
-      assert.match(
-        String((result.output.error as { message?: string } | undefined)?.message),
-        /closed command surface/u,
-      );
+  try {
+    for (const argv of cases) {
+      const result = captureCliProcess(argv);
+      assert.equal(result.exitCode, 2, argv.join(" "));
+      const usage = JSON.parse(result.stderr) as { error?: { kind?: string; code?: string } };
+      assert.equal(usage.error?.kind, "usage", argv.join(" "));
+      assert.ok(usage.error?.code === "unknown-command" || usage.error?.code === "unknown-option", argv.join(" "));
+      assert.doesNotMatch(result.stdout + result.stderr, /touch|inari-hostile-argv/, argv.join(" "));
+    }
+    assert.equal(existsSync(marker), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -1522,53 +1563,22 @@ test("template import warns on the CLI when --to writes outside discoverable sem
 });
 
 test("version comes from real package metadata", async () => {
-  const lines: string[] = [];
-  const originalLog = console.log;
-  console.log = (line: string) => lines.push(line);
-  try {
-    const root = fileURLToPath(new URL("..", import.meta.url));
-    const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as {
-      name?: string;
-      version?: string;
-    };
-    assert.equal(await runCli(["--version"]), 0);
-    assert.equal(lines[0], `${packageJson.name} ${packageJson.version}`);
-  } finally {
-    console.log = originalLog;
-  }
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as {
+    name?: string;
+    version?: string;
+  };
+  const result = captureCliProcess(["--version"]);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout.trim(), packageJson.version);
 });
 
-test("machine-readable version reports the invocation contract and capabilities", async () => {
-  const lines: string[] = [];
-  const originalLog = console.log;
-  console.log = (line: string) => lines.push(line);
-  try {
-    assert.equal(
-      await runCli(["--version", "--json"], {
-        packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
-      }),
-      0,
-    );
-    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
-    assert.equal(output.ok, true);
-    assert.equal(output.name, "gh-inari");
-    assert.equal(output.version, "0.3.0");
-    assert.equal(output.protocol, 1);
-    assert.equal(output.commandContractVersion, COMMAND_CONTRACT_VERSION);
-    assert.deepEqual(output.invocation, {
-      canonical: "inari",
-      direct: "gh-inari",
-      fallback: "npx --yes gh-inari",
-    });
-    assert.deepEqual(output.capabilities, [
-      "canonical-invocation",
-      "machine-readable-version",
-      "capability-diagnostics",
-    ]);
-    assert.equal(JSON.stringify(output).includes("extension"), false);
-  } finally {
-    console.log = originalLog;
-  }
+test("Canon machine-readable version projects installed package identity", async () => {
+  const result = captureCliProcess(["--version", "--json"], {
+    packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), { name: "gh-inari", version: "0.3.0" });
 });
 
 test("minimum-version checks use bounded SemVer precedence in version and diagnose paths", async () => {
@@ -1658,6 +1668,71 @@ test("diagnose reports only the standalone canonical runtime contract", async ()
   } finally {
     console.log = originalLog;
   }
+});
+
+test("root diagnostic aliases remain bounded transitions to named readiness routes", async () => {
+  for (const alias of ["--diagnose", "--doctor"]) {
+    const result = await captureJson([alias, "--json"], {
+      packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runCanonicalDiagnosticCommand: (args) => {
+        assert.deepEqual(args, ["version", "--json"]);
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            ok: true,
+            name: "gh-inari",
+            version: "0.3.0",
+            protocol: 1,
+            commandContractVersion: COMMAND_CONTRACT_VERSION,
+            capabilities: [...RUNTIME_CAPABILITIES],
+            invocation: { canonical: "inari" },
+          }),
+          stderr: "",
+        };
+      },
+    });
+    assert.equal(result.exitCode, 0, alias);
+    assert.equal(result.output.ok, true, alias);
+    assert.equal((result.output.canonical as { status?: string }).status, "ready", alias);
+  }
+});
+
+test("unknown and incomplete option prefixes stay in the Canon usage boundary", async () => {
+  for (const argv of [
+    ["--unknown-option", "issue", "create", "--json"],
+    ["setup", "--unknown-setup-option", "--json"],
+  ]) {
+    const result = captureCliProcess(argv);
+    assert.equal(result.exitCode, 2, argv.join(" "));
+    let usage: { error?: { kind?: string; code?: string } };
+    try {
+      usage = JSON.parse(result.stderr) as { error?: { kind?: string; code?: string } };
+    } catch {
+      assert.fail(`${argv.join(" ")} did not emit structured Canon usage: ${result.stderr}`);
+    }
+    assert.equal(usage.error?.kind, "usage", argv.join(" "));
+    assert.ok(
+      usage.error?.code === "unknown-command" ||
+        usage.error?.code === "unknown-option" ||
+        usage.error?.code === "missing-option-value",
+      argv.join(" "),
+    );
+    assert.doesNotMatch(result.stdout + result.stderr, /GOVERNED_CREATE_OPTION/, argv.join(" "));
+  }
+
+  for (const argv of [
+    ["--repository", "--json", "issue", "create"],
+    ["setup", "--repository", "--json"],
+  ]) {
+    const incomplete = captureCliProcess(argv);
+    assert.equal(incomplete.exitCode, 2, argv.join(" "));
+    assert.match(incomplete.stderr, /error: unknown option/u, argv.join(" "));
+    assert.match(incomplete.stderr, /Usage: inari <command>/u, argv.join(" "));
+  }
+
+  const unknownChildOption = captureCliProcess(["setup", "status", "--unknown-setup-option", "--json"]);
+  assert.notEqual(unknownChildOption.exitCode, 0);
+  assert.doesNotMatch(unknownChildOption.stdout + unknownChildOption.stderr, /Usage: inari <command>/u);
 });
 
 test("invalid create input is rejected after target governance is resolved and before mutation", async () => {

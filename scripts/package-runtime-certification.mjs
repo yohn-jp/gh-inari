@@ -342,9 +342,12 @@ function certifyInstalledRuntime(consumerDirectory, installedPackageDirectory, e
       invoke(launcher, ["--version", "--json"], { cwd: consumerDirectory, env: environment }),
       `${name} version`,
     );
-    if (version.ok !== true || version.name !== packageJson.name || version.version !== packageJson.version)
+    if (
+      JSON.stringify(Object.keys(version).sort()) !== JSON.stringify(["name", "version"]) ||
+      version.name !== packageJson.name ||
+      version.version !== packageJson.version
+    )
       fail(`installed ${name} returned an invalid exact runtime identity`);
-    if (!Array.isArray(version.capabilities)) fail(`installed ${name} returned no runtime capabilities`);
 
     const preflight = jsonOutput(
       invoke(launcher, ["--diagnose", "--json"], { cwd: consumerDirectory, env: environment }),
