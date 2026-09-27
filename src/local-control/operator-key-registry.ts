@@ -184,12 +184,9 @@ export function enrollLocalOperatorPublicKey(
   if (current !== undefined && existingKey !== undefined) {
     if (existingKey.publicKey.x !== publicKey.x)
       throw conflict("Local operator key ID is bound to different public bytes.");
-    if (
-      existingKey.status === "active" &&
-      (current.generation === expected || existingKey.enrolledGeneration === (expected ?? 0) + 1)
-    ) {
-      return current;
-    }
+    const isImmediateRetry =
+      current.generation === (expected ?? 0) + 1 && existingKey.enrolledGeneration === current.generation;
+    if (existingKey.status === "active" && isImmediateRetry) return current;
     throw conflict("Local operator key is already enrolled or revoked.");
   }
 
@@ -217,7 +214,9 @@ export function revokeLocalOperatorPublicKey(
   const existingKey = current.keys.find((key) => key.keyId === keyId);
   if (existingKey === undefined) throw conflict("Local operator key is not enrolled.");
   if (existingKey.status === "revoked") {
-    if (existingKey.revokedGeneration === expected + 1 || current.generation === expected) return current;
+    const isImmediateRetry =
+      current.generation === expected + 1 && existingKey.revokedGeneration === current.generation;
+    if (isImmediateRetry) return current;
     throw conflict("Local operator key registry generation changed.");
   }
 

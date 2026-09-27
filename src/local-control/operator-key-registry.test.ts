@@ -44,6 +44,10 @@ test("Runtime operator public keys enroll, retain versioned revocation, and rere
     assert.equal(first.keys[0]?.keyId, operatorPublicKeyId(firstKey));
     assert.equal(first.keys[0]?.status, "active");
     assert.deepEqual(enrollLocalOperatorPublicKey(firstKey, null, environment), first);
+    assert.throws(
+      () => enrollLocalOperatorPublicKey(firstKey, 1, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
+    );
 
     const second = enrollLocalOperatorPublicKey(secondKey, 1, environment);
     assert.equal(second.generation, 2);
@@ -52,25 +56,39 @@ test("Runtime operator public keys enroll, retain versioned revocation, and rere
       () => enrollLocalOperatorPublicKey(operatorKey(), 1, environment),
       localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
     );
+    assert.throws(
+      () => enrollLocalOperatorPublicKey(firstKey, null, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
+    );
 
     const revoked = revokeLocalOperatorPublicKey(first.keys[0]!.keyId, 2, environment);
     assert.equal(revoked.generation, 3);
     assert.equal(revoked.keys[0]?.status, "revoked");
     assert.equal(revoked.keys[0]?.status === "revoked" ? revoked.keys[0].revokedGeneration : undefined, 3);
     assert.deepEqual(revokeLocalOperatorPublicKey(first.keys[0]!.keyId, 2, environment), revoked);
-    assert.deepEqual(readLocalOperatorKeyRegistry(environment), revoked);
+    assert.throws(
+      () => revokeLocalOperatorPublicKey(first.keys[0]!.keyId, 3, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
+    );
+    const third = enrollLocalOperatorPublicKey(operatorKey(), 3, environment);
+    assert.equal(third.generation, 4);
+    assert.throws(
+      () => revokeLocalOperatorPublicKey(first.keys[0]!.keyId, 2, environment),
+      localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
+    );
+    assert.deepEqual(readLocalOperatorKeyRegistry(environment), third);
     assert.throws(
       () => revokeLocalOperatorPublicKey(first.keys[0]!.keyId, 1, environment),
       localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
     );
     assert.throws(
-      () => enrollLocalOperatorPublicKey(firstKey, 3, environment),
+      () => enrollLocalOperatorPublicKey(firstKey, 4, environment),
       localControlCode("LOCAL_CONTROL_CONFIG_CONFLICT"),
     );
 
     const file = localComponentPath("runtime", "operator-keys/registry.json", environment);
     const persisted = await readFile(file, "utf8");
-    assert.equal(JSON.parse(persisted).generation, 3);
+    assert.equal(JSON.parse(persisted).generation, 4);
     assert.equal(persisted.includes('"d"'), false);
     assert.equal(persisted.includes("privateKey"), false);
     assert.equal(persisted.includes("credential"), false);
