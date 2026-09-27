@@ -120,6 +120,27 @@ test("exposes only bounded Git object operations and uses conditional updateRefs
   assert.equal(Object.keys(data).sort().join(","), "scope");
 });
 
+test("creates a metadata ref with an atomic zero-beforeOid updateRefs assertion", async () => {
+  const fake = transportFor();
+  const data = capability(fake.transport);
+  const metadataBranch = "inari/task-termination";
+  assert.deepEqual(
+    await data.compareAndAdvanceRef({
+      branch: metadataBranch,
+      beforeOid: "0".repeat(40),
+      afterOid: commit,
+      force: false,
+    }),
+    { status: "updated" },
+  );
+  assert.deepEqual(fake.graphql[0]?.variables, {
+    input: {
+      repositoryId: "R_kgDO466000001",
+      refUpdates: [{ name: `refs/heads/${metadataBranch}`, beforeOid: "0".repeat(40), afterOid: commit, force: false }],
+    },
+  });
+});
+
 test("rejects unsupported modes, force updates, malformed provider trees, and scope drift", async () => {
   const fake = transportFor();
   const data = capability(fake.transport);
