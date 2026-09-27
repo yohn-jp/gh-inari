@@ -480,9 +480,13 @@ Session's delegated authority
 ```
 
 For remote human-operated execution, the verified assertion establishes
-identity/eligibility first. The Runtime's explicit subject/operation
-authorization supplies the semantic grant; eligibility is not that grant.
-The same current-policy, task, state, and provider-effect limits then apply.
+identity/eligibility first. The Runtime operator's current explicit grant in
+Runtime-owned owner configuration binds the immutable GitHub user ID and
+provider host to semantic operation IDs, an immutable repository ID, and exact
+targets. Admission matches that grant to the assertion and request, then
+intersects it with current repository/task policy, state, and provider-effect
+limits. Hosted eligibility and assertion validity do not supply the semantic
+grant.
 
 No later layer adds a permission absent from an earlier required gate.
 
@@ -879,13 +883,19 @@ versioned, tested interfaces.
 Changes to issuer trust, subject authorization, permission mapping, key
 custody, signature domain, replay semantics, compatibility, or remote
 bootstrap are architecture changes. Implementers do not invent them to make
-a missing producer seam disappear.
+a missing producer seam disappear. The remote subject decision is a Runtime
+operator grant for exact immutable GitHub user IDs, semantic operation IDs,
+and targets in Runtime-owned owner configuration. Admission consumes only a
+current grant, intersected with current repository and task policy. Missing,
+stale, revoked, or mismatched host/user/repository/operation/target grants
+deny; usernames and Hosted eligibility cannot replace them.
 
 Dedicated-App Hosted OAuth registration/callback/client authentication and
-remote subject/operation authorization require explicit implementation
-contracts before those paths can be advertised as complete. Their absence
-must not be hidden by accepting arbitrary callback metadata or granting every
-visible repository full App authority.
+the Runtime owner grant producer/Admission consumer require explicit
+implementation contracts before those paths can be advertised as complete.
+Their absence must not be hidden by accepting arbitrary callback metadata or
+granting every visible repository full App authority. Hosted does not issue
+semantic grants or hold the Runtime owner configuration.
 
 ## 23. Completion condition
 
