@@ -1,7 +1,16 @@
-import { bindHandlers, compileProduct, defineCommands, type CompiledField } from "@yohn-jp/cli-canon";
+import {
+  bindHandlers,
+  compileProduct,
+  defineCommands,
+  option,
+  positional,
+  type CompiledField,
+} from "@yohn-jp/cli-canon";
 import type { NodeDelegatedCommandSource } from "@yohn-jp/cli-canon/node";
 import type { CliResult } from "@yohn-jp/cli-canon/node";
 import type { ProductPackageIdentity } from "@yohn-jp/cli-canon";
+import { z } from "zod";
+import { executeCliArtifactReconciliation, type CliDependencies } from "./cli-core.js";
 import {
   getOption,
   INARI_COMMANDS,
@@ -14,15 +23,66 @@ import {
 const PRODUCT_NAME = "inari";
 const DELEGATED_SOURCE_ID = "inari-legacy-command-core";
 const RESERVED_SHELL_FLAGS = new Set(["--help", "-h", "--version", "--json"]);
-const EMPTY_COMMANDS = defineCommands({});
+const ARTIFACT_NUMBER = z
+  .string()
+  .regex(/^[1-9]\d*$/u, "expected a positive integer")
+  .transform(Number)
+  .refine(Number.isSafeInteger, "expected a safe positive integer");
 
-export function compileInariCliProduct(packageMetadata: ProductPackageIdentity, description: string) {
+/** #1194: these routes converge to Canon for command identity, grammar, Help, and dispatch. */
+export const ARTIFACT_RECONCILIATION_COMMANDS = defineCommands({
+  "issue.reconcile": {
+    route: ["issue", "reconcile"],
+    summary: "Safely reconcile one existing Issue through the Core artifact reconciler.",
+    examples: ["inari issue reconcile 42"],
+    input: {
+      number: positional(ARTIFACT_NUMBER, { metavar: "number" }),
+      repository: option("--repository", z.string(), {
+        aliases: ["-R"],
+        metavar: "repository",
+        description: "GitHub repository override.",
+        placement: "after-route",
+      }),
+    },
+    result: z.unknown(),
+  },
+  "pr.reconcile": {
+    route: ["pr", "reconcile"],
+    summary: "Safely reconcile one existing pull request through the Core artifact reconciler.",
+    examples: ["inari pr reconcile 42"],
+    input: {
+      number: positional(ARTIFACT_NUMBER, { metavar: "number" }),
+      repository: option("--repository", z.string(), {
+        aliases: ["-R"],
+        metavar: "repository",
+        description: "GitHub repository override.",
+        placement: "after-route",
+      }),
+    },
+    result: z.unknown(),
+  },
+});
+
+function artifactReconciliationHandlers(dependencies: CliDependencies) {
+  return bindHandlers(ARTIFACT_RECONCILIATION_COMMANDS)({
+    "issue.reconcile": ({ number, repository }) =>
+      executeCliArtifactReconciliation("issue", number, repository, dependencies),
+    "pr.reconcile": ({ number, repository }) =>
+      executeCliArtifactReconciliation("pr", number, repository, dependencies),
+  });
+}
+
+export function compileInariCliProduct(
+  packageMetadata: ProductPackageIdentity,
+  description: string,
+  dependencies: CliDependencies = {},
+) {
   return compileProduct({
     name: PRODUCT_NAME,
     description,
     packageMetadata,
-    commands: EMPTY_COMMANDS,
-    handlers: bindHandlers(EMPTY_COMMANDS)({}),
+    commands: ARTIFACT_RECONCILIATION_COMMANDS,
+    handlers: artifactReconciliationHandlers(dependencies),
   });
 }
 

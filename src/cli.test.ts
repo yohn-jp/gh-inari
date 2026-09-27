@@ -7,7 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { GitHubAdapter, type GitHubPullRequest } from "./github/index.js";
+import { GitHubAdapter, type GitHubArtifactRequest, type GitHubPullRequest } from "./github/index.js";
+import { renderPullRequestArtifact } from "./artifact.js";
 import {
   nativeTestTransport,
   type FixtureCommandResult,
@@ -38,6 +39,7 @@ import { publishLocalRuntimeEndpoint } from "./local-control/runtime-discovery.j
 import { readLocalSessionBinding, readLocalSessionChangeIssueProvenance } from "./cli/runtime/session-launcher.js";
 import { createRepositoryBranchPolicy } from "./repository-branch-policy.js";
 import { compileRepositoryGovernedContract } from "./governance.js";
+import { parsePullRequestTemplate } from "./pull-request-template.js";
 
 class CliStubTransport implements FixtureCommandTransport {
   private readonly callHistory: string[][] = [];
@@ -429,6 +431,15 @@ test("Canon PR create help projects required branch and title options", async ()
   assert.equal(exitCode, 0);
   assert.match(output, /Usage: inari pr create .*--title <title>.*--head <branch>.*--base <branch>/);
   assert.match(output, /--field <<name>=<value>>/);
+});
+
+test("Canon owns the public issue and PR reconcile grammar and Help", async () => {
+  for (const domain of ["issue", "pr"] as const) {
+    const { exitCode, output } = await captureHelp([domain, "reconcile", "--help"]);
+    assert.equal(exitCode, 0);
+    assert.match(output, new RegExp(`Usage: inari ${domain} reconcile <number>`));
+    assert.match(output, /--repository <repository>/);
+  }
 });
 
 test("pr routing exposes the canonical read-only Core result", async () => {
@@ -4400,14 +4411,202 @@ async function captureJson(
 ): Promise<{ exitCode: number; output: Record<string, unknown> }> {
   const originalLog = console.log;
   const lines: string[] = [];
+  const cliOutput: string[] = [];
   console.log = (line: string) => lines.push(line);
   try {
-    const exitCode = await runCli([...argv], dependencies);
-    return { exitCode, output: JSON.parse(lines[0] ?? "{}") as Record<string, unknown> };
+    const exitCode = await runCli([...argv], {
+      ...dependencies,
+      writeResult: (result) => {
+        if (result.stdout !== "") cliOutput.push(result.stdout);
+        if (result.stderr !== "") cliOutput.push(result.stderr);
+      },
+    });
+    return { exitCode, output: JSON.parse(lines[0] ?? cliOutput[0] ?? "{}") as Record<string, unknown> };
   } finally {
     console.log = originalLog;
   }
 }
+
+function artifactReconciliationCliFixture(input: {
+  readonly domain: "issue" | "pr";
+  readonly body: string;
+  readonly templates?: readonly { readonly path: string; readonly source: string; readonly sha: string }[];
+  readonly stale?: boolean;
+  readonly possibleEffect?: boolean;
+}) {
+  const isIssue = input.domain === "issue";
+  const templatePath = isIssue ? ".github/ISSUE_TEMPLATE/feature.yml" : ".github/PULL_REQUEST_TEMPLATE.md";
+  const defaultTemplate = {
+    path: templatePath,
+    source: isIssue ? REMOTE_ISSUE_TEMPLATE : "## Summary\n\nDescribe the change.\n",
+    sha: "reconcile-template-sha",
+  };
+  const templates = input.templates ?? [defaultTemplate];
+  const blobs = new Map(templates.map((template) => [template.sha, template.source]));
+  const tree = templates.map((template) => ({ path: template.path, type: "blob", sha: template.sha }));
+  let artifact: Record<string, unknown> = isIssue
+    ? {
+        number: 80,
+        title: "feat: reconcile",
+        body: input.body,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }
+    : {
+        number: 81,
+        title: "feat: reconcile",
+        body: input.body,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      };
+  const reads = { artifact: 0, updates: 0 };
+  const route = isIssue ? "issues/80" : "pulls/81";
+  const transport = {
+    request: async (request: GitHubArtifactRequest) => {
+      const endpoint = request.path.replace(/^repos\/acme\/inari\/?/u, "");
+      if (endpoint === "")
+        return { status: 200, body: { id: 100000157, full_name: "acme/inari", default_branch: "main" } };
+      if (endpoint === "git/trees/main?recursive=1")
+        return { status: 200, body: { sha: GOVERNANCE_TREE_SHA, truncated: false, tree } };
+      if (endpoint.startsWith("git/blobs/")) {
+        const sha = decodeURIComponent(endpoint.slice("git/blobs/".length));
+        const source = blobs.get(sha);
+        return source === undefined
+          ? { status: 404, body: { message: "not found" } }
+          : { status: 200, body: { sha, encoding: "base64", content: Buffer.from(source).toString("base64") } };
+      }
+      if (endpoint === route && request.method === "GET") {
+        reads.artifact += 1;
+        const observed =
+          input.stale && reads.artifact === 2 ? { ...artifact, title: "feat: concurrent edit" } : artifact;
+        return { status: 200, body: observed };
+      }
+      if (endpoint === route && request.method === "PATCH") {
+        reads.updates += 1;
+        artifact = { ...artifact, ...request.body };
+        return input.possibleEffect
+          ? { status: 500, body: { message: "provider response lost after possible effect" } }
+          : { status: 200, body: artifact };
+      }
+      return { status: 404, body: { message: "not found" } };
+    },
+  };
+  return {
+    reads,
+    dependencies: {
+      createAdapter: (options: ConstructorParameters<typeof GitHubAdapter>[0]) =>
+        new GitHubAdapter({ ...options, transport }),
+    },
+  };
+}
+
+function markedIssueBody(body: string, path = ".github/ISSUE_TEMPLATE/feature.yml"): string {
+  return `${body}\n<!-- inari:template ${JSON.stringify({ version: "1", kind: "issue", path })} -->\n`;
+}
+
+function reorderedIssueBody(): string {
+  const sections = ["### Problem", "### Proposal", "### Non-goals", "### Acceptance criteria"].map((heading) => {
+    const start = REMOTE_ISSUE_BODY.indexOf(heading);
+    const laterHeadings = ["### Problem", "### Proposal", "### Non-goals", "### Acceptance criteria"]
+      .map((candidate) => REMOTE_ISSUE_BODY.indexOf(candidate))
+      .filter((index) => index > start);
+    const end = laterHeadings.length === 0 ? REMOTE_ISSUE_BODY.length : Math.min(...laterHeadings);
+    return REMOTE_ISSUE_BODY.slice(start, end).trim();
+  });
+  return markedIssueBody([sections[1], sections[0], sections[2], sections[3]].join("\n\n"));
+}
+
+test("issue and PR reconcile routes forward Core outcomes and retry evidence unchanged", async () => {
+  const canonicalIssue = markedIssueBody(REMOTE_ISSUE_BODY);
+  const canonicalPr = renderPullRequestArtifact(
+    parsePullRequestTemplate("## Summary\n\nDescribe the change.\n", {
+      id: "default",
+      type: "pull-request-default",
+      kind: "pull-request",
+      name: "Default",
+      path: ".github/PULL_REQUEST_TEMPLATE.md",
+    }),
+    { fields: { summary: "A deterministic pull request summary" } },
+  );
+  const cases = [
+    {
+      name: "Issue unchanged",
+      domain: "issue" as const,
+      body: canonicalIssue,
+      expectedOutcome: "unchanged",
+      expectedExit: 0,
+    },
+    {
+      name: "PR unchanged",
+      domain: "pr" as const,
+      body: canonicalPr,
+      expectedOutcome: "unchanged",
+      expectedExit: 0,
+    },
+    {
+      name: "Issue reconciled",
+      domain: "issue" as const,
+      body: reorderedIssueBody(),
+      expectedOutcome: "reconciled",
+      expectedExit: 0,
+      expectedEffect: "applied",
+    },
+    {
+      name: "Issue blocked",
+      domain: "issue" as const,
+      body: "not a canonical artifact\n",
+      templates: [
+        { path: ".github/ISSUE_TEMPLATE/bug.yml", source: REMOTE_ISSUE_TEMPLATE, sha: "bug-sha" },
+        { path: ".github/ISSUE_TEMPLATE/feature.yml", source: REMOTE_ISSUE_TEMPLATE, sha: "feature-sha" },
+      ],
+      expectedOutcome: "blocked",
+      expectedExit: 2,
+    },
+    {
+      name: "Issue safely retryable after stale observation",
+      domain: "issue" as const,
+      body: reorderedIssueBody(),
+      stale: true,
+      expectedOutcome: "safe-pre-effect-retry",
+      expectedExit: 3,
+      expectedEffect: "not-started",
+      expectedRetry: "safe",
+    },
+    {
+      name: "Issue ambiguous after a possible effect",
+      domain: "issue" as const,
+      body: reorderedIssueBody(),
+      possibleEffect: true,
+      expectedOutcome: "possible-effect-ambiguity",
+      expectedExit: 3,
+      expectedEffect: "possible",
+      expectedRetry: "fresh-observation-required",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const fixture = artifactReconciliationCliFixture(testCase);
+    const number = testCase.domain === "issue" ? "80" : "81";
+    const result = await captureJson(
+      [testCase.domain, "reconcile", number, "--repository", "acme/inari"],
+      fixture.dependencies,
+    );
+    assert.equal(result.exitCode, testCase.expectedExit, `${testCase.name}: ${JSON.stringify(result.output)}`);
+    assert.equal(result.output.operation, `${testCase.domain}.reconcile`, testCase.name);
+    assert.equal(result.output.domain, testCase.domain, testCase.name);
+    assert.equal(result.output.outcome, testCase.expectedOutcome, testCase.name);
+    if (testCase.expectedEffect !== undefined)
+      assert.equal(result.output.effect, testCase.expectedEffect, testCase.name);
+    if (testCase.expectedRetry !== undefined) assert.equal(result.output.retry, testCase.expectedRetry, testCase.name);
+    assert.equal(fixture.reads.updates, testCase.possibleEffect || testCase.expectedOutcome === "reconciled" ? 1 : 0);
+  }
+});
 
 async function runIssueValidateDirectFields(
   argv: readonly string[],

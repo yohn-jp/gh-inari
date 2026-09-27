@@ -81,6 +81,11 @@ import {
   updateGovernedExistingArtifact,
 } from "./reconciliation.js";
 import {
+  ARTIFACT_RECONCILIATION_VERSION,
+  executeArtifactReconciliation,
+  type ArtifactReconciliationResult,
+} from "./artifact-reconciliation-executor.js";
+import {
   discoverSemanticTemplates,
   importNativeTemplate,
   renderSemanticCompactSchema,
@@ -3864,6 +3869,22 @@ async function runArtifactCommand(
     throw invalidArtifactNumberError(domain, rest[0]);
   }
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
+}
+
+/** Execute one Canon-validated public reconcile route through the Core executor. */
+export async function executeCliArtifactReconciliation(
+  domain: "issue" | "pr",
+  number: number,
+  repository: string | undefined,
+  dependencies: CliDependencies = {},
+): Promise<ArtifactReconciliationResult> {
+  const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
+  const adapter = createAdapter(dependencies, root, repository);
+  return executeArtifactReconciliation(adapter, {
+    version: ARTIFACT_RECONCILIATION_VERSION,
+    domain,
+    number,
+  });
 }
 
 async function runIntegrationRoutingCommand(rest: readonly string[], parsed: ParsedArgs): Promise<number> {

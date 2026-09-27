@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { cliFailure, jsonOutput, type CliOutcome } from "@yohn-jp/cli-canon";
 import { runNodeCli, type CliResult } from "@yohn-jp/cli-canon/node";
 import packageJson from "../package.json" with { type: "json" };
 import type { ProductPackageIdentity } from "@yohn-jp/cli-canon";
@@ -14,6 +15,7 @@ import {
   compileInariCliProduct,
   createLegacyDelegatedCommandSource,
 } from "./cli-composition.js";
+import type { ArtifactReconciliationResult } from "./artifact-reconciliation-executor.js";
 
 interface DiagnosticCommandResult {
   readonly status: number | null;
@@ -42,6 +44,8 @@ interface CanonicalDiagnosticProjection {
 export interface CliDependencies extends CoreCliDependencies {
   /** Test seam for probing the canonical standalone `inari` executable. */
   readonly runCanonicalDiagnosticCommand?: (args: readonly string[]) => DiagnosticCommandResult;
+  /** Test seam for capturing the terminal result of the public Canon shell. */
+  readonly writeResult?: (result: CliResult) => void;
 }
 
 /**
@@ -332,9 +336,21 @@ async function runDiagnosticWithCanonicalProbe(argv: string[], dependencies: Cli
   return canonical.status === "ready" ? 0 : 2;
 }
 
-function writeCliResult(result: CliResult): void {
+function writeCliResult(result: CliResult, dependencies: CliDependencies): void {
+  if (dependencies.writeResult !== undefined) {
+    dependencies.writeResult(result);
+    return;
+  }
   if (result.stdout !== "") process.stdout.write(result.stdout);
   if (result.stderr !== "") process.stderr.write(result.stderr);
+}
+
+function projectArtifactReconciliationResult(result: ArtifactReconciliationResult): CliOutcome {
+  const output = jsonOutput({ operation: `${result.domain}.reconcile`, ...result });
+  if (output.status === "failure" || result.outcome === "unchanged" || result.outcome === "reconciled") {
+    return output;
+  }
+  return cliFailure("domain", output.output, result.outcome === "blocked" ? 2 : 3, "stdout");
 }
 
 /** The public CLI enters the compiled CLI Canon product and its standard shell. */
@@ -353,10 +369,13 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     return { exitCode, stdout: "", stderr: "" };
   });
   const metadata = (dependencies.packageMetadata ?? packageJson) as ProductPackageIdentity;
-  const product = compileInariCliProduct(metadata, packageJson.description);
+  const product = compileInariCliProduct(metadata, packageJson.description, dependencies);
   const result = await runNodeCli(product, normalizedArgv, {
     delegatedSources: [delegated],
+    resultPresenter: {
+      success: (execution) => projectArtifactReconciliationResult(execution.result as ArtifactReconciliationResult),
+    },
   });
-  writeCliResult(result);
+  writeCliResult(result, dependencies);
   return result.exitCode;
 }

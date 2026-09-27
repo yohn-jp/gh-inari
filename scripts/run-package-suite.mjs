@@ -5,6 +5,7 @@
 // installed tarball.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -1232,6 +1233,255 @@ function certifyInstalledCli(consumer, installed, packageName) {
   console.log("installed CLI verified: Canon root shell and delegated skill route from the exact packed artifact");
 }
 
+async function certifyArtifactReconciliationCli(entrypoint, consumer, label) {
+  const issueTemplatePath = ".github/ISSUE_TEMPLATE/feature.yml";
+  const issueTemplate = [
+    "name: Feature",
+    "description: Feature",
+    'title: "feat: "',
+    "body:",
+    "  - type: textarea",
+    "    id: summary",
+    "    attributes:",
+    "      label: Summary",
+    "    validations:",
+    "      required: true",
+    "  - type: textarea",
+    "    id: context",
+    "    attributes:",
+    "      label: Context",
+    "    validations:",
+    "      required: true",
+    "",
+  ].join("\n");
+  const pullRequestTemplatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const pullRequestTemplate = "## Summary\n\nDescribe the change.\n";
+  const issueMarker = `<!-- inari:template ${JSON.stringify({ version: "1", kind: "issue", path: issueTemplatePath })} -->`;
+  const pullRequestMarker = `<!-- inari:template ${JSON.stringify({ version: "1", kind: "pull_request", path: pullRequestTemplatePath })} -->`;
+  const canonicalIssueBody = `### Summary\n\nA deterministic summary\n\n### Context\n\nAdditional context\n\n${issueMarker}\n`;
+  const reorderedIssueBody = `### Context\n\nAdditional context\n\n### Summary\n\nA deterministic summary\n\n${issueMarker}\n`;
+  const canonicalPullRequestBody = `## Summary\n\nA deterministic pull request summary\n\n${pullRequestMarker}\n`;
+  const scenarios = [
+    {
+      name: "Issue unchanged",
+      domain: "issue",
+      number: 80,
+      body: canonicalIssueBody,
+      expectedOutcome: "unchanged",
+      expectedStatus: 0,
+      expectedPatches: 0,
+    },
+    {
+      name: "PR unchanged",
+      domain: "pr",
+      number: 81,
+      body: canonicalPullRequestBody,
+      expectedOutcome: "unchanged",
+      expectedStatus: 0,
+      expectedPatches: 0,
+    },
+    {
+      name: "Issue reconciled",
+      domain: "issue",
+      number: 80,
+      body: reorderedIssueBody,
+      expectedOutcome: "reconciled",
+      expectedStatus: 0,
+      expectedPatches: 1,
+    },
+    {
+      name: "Issue blocked by template ambiguity",
+      domain: "issue",
+      number: 80,
+      body: canonicalIssueBody.replace(`${issueMarker}\n`, ""),
+      duplicateIssueTemplate: true,
+      expectedOutcome: "blocked",
+      expectedStatus: 2,
+      expectedPatches: 0,
+    },
+    {
+      name: "Issue stale observation",
+      domain: "issue",
+      number: 80,
+      body: reorderedIssueBody,
+      stale: true,
+      expectedOutcome: "safe-pre-effect-retry",
+      expectedStatus: 3,
+      expectedRetry: "safe",
+      expectedPatches: 0,
+    },
+    {
+      name: "Issue possible-effect ambiguity",
+      domain: "issue",
+      number: 80,
+      body: reorderedIssueBody,
+      possibleEffect: true,
+      expectedOutcome: "possible-effect-ambiguity",
+      expectedStatus: 3,
+      expectedRetry: "fresh-observation-required",
+      expectedPatches: 1,
+    },
+  ];
+  let activeScenario;
+  let activeArtifact;
+  let artifactReads = 0;
+  let patches = 0;
+  const blobSources = new Map();
+  const sendJson = (response, status, body) => {
+    const encoded = JSON.stringify(body);
+    response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) });
+    response.end(encoded);
+  };
+  const server = http.createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      const pathname = decodeURIComponent(url.pathname);
+      if (request.method === "GET" && pathname === "/repos/acme/inari") {
+        sendJson(response, 200, { id: 100000157, full_name: "acme/inari", default_branch: "main" });
+        return;
+      }
+      if (request.method === "GET" && pathname === "/repos/acme/inari/git/trees/main") {
+        const entries = activeScenario.duplicateIssueTemplate
+          ? [
+              { path: issueTemplatePath, type: "blob", sha: "issue-template" },
+              { path: ".github/ISSUE_TEMPLATE/feature-copy.yml", type: "blob", sha: "issue-template-copy" },
+            ]
+          : activeScenario.domain === "issue"
+            ? [{ path: issueTemplatePath, type: "blob", sha: "issue-template" }]
+            : [{ path: pullRequestTemplatePath, type: "blob", sha: "pull-request-template" }];
+        sendJson(response, 200, { sha: "reconcile-tree-sha", truncated: false, tree: entries });
+        return;
+      }
+      if (request.method === "GET" && pathname.startsWith("/repos/acme/inari/git/blobs/")) {
+        const sha = pathname.slice("/repos/acme/inari/git/blobs/".length);
+        const source = blobSources.get(sha);
+        if (source === undefined) sendJson(response, 404, { message: "not found" });
+        else
+          sendJson(response, 200, { sha, encoding: "base64", content: Buffer.from(source, "utf8").toString("base64") });
+        return;
+      }
+      const resource = activeScenario.domain === "issue" ? "issues" : "pulls";
+      const artifactPath = `/repos/acme/inari/${resource}/${activeScenario.number}`;
+      if (request.method === "GET" && pathname === artifactPath) {
+        artifactReads += 1;
+        const observed =
+          activeScenario.stale && artifactReads === 2
+            ? { ...activeArtifact, title: "feat: concurrent edit" }
+            : activeArtifact;
+        sendJson(response, 200, observed);
+        return;
+      }
+      if (request.method === "PATCH" && pathname === artifactPath) {
+        patches += 1;
+        const chunks = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        activeArtifact = { ...activeArtifact, ...JSON.parse(Buffer.concat(chunks).toString("utf8")) };
+        if (activeScenario.possibleEffect)
+          sendJson(response, 500, { message: "provider response lost after possible effect" });
+        else sendJson(response, 200, activeArtifact);
+        return;
+      }
+      sendJson(response, 404, { message: "not found" });
+    } catch (error) {
+      sendJson(response, 500, { message: error instanceof Error ? error.message : "controlled provider failed" });
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("artifact reconciliation provider did not bind");
+  const environment = {
+    ...process.env,
+    GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
+    GH_TOKEN: "reconcile-fixture-token",
+  };
+  delete environment.GITHUB_TOKEN;
+  delete environment.GITHUB_ENTERPRISE_TOKEN;
+  try {
+    for (const scenario of scenarios) {
+      activeScenario = scenario;
+      activeArtifact =
+        scenario.domain === "issue"
+          ? {
+              number: scenario.number,
+              title: "feat: reconcile",
+              body: scenario.body,
+              state: "open",
+              html_url: "https://github.com/acme/inari/issues/80",
+              labels: [],
+              assignees: [],
+            }
+          : {
+              number: scenario.number,
+              title: "feat: reconcile",
+              body: scenario.body,
+              state: "open",
+              html_url: "https://github.com/acme/inari/pull/81",
+              draft: false,
+              head: { ref: "feature" },
+              base: { ref: "main" },
+            };
+      artifactReads = 0;
+      patches = 0;
+      blobSources.clear();
+      if (scenario.duplicateIssueTemplate) {
+        blobSources.set("issue-template", issueTemplate);
+        blobSources.set("issue-template-copy", issueTemplate);
+      } else if (scenario.domain === "issue") blobSources.set("issue-template", issueTemplate);
+      else blobSources.set("pull-request-template", pullRequestTemplate);
+
+      const result = await new Promise((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [entrypoint, scenario.domain, "reconcile", String(scenario.number), "--repository", "acme/inari", "--json"],
+          {
+            cwd: consumer,
+            env: environment,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        let stdout = "";
+        let stderr = "";
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error(`${label} ${scenario.name} timed out: ${stdout}${stderr}`));
+        }, 20_000);
+        child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+        child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+        child.once("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+        child.once("close", (status) => {
+          clearTimeout(timer);
+          resolve({ status, stdout, stderr });
+        });
+      });
+      if (result.status !== scenario.expectedStatus || result.stderr !== "")
+        throw new Error(`${label} ${scenario.name} exited ${String(result.status)}: ${result.stdout}${result.stderr}`);
+      let projection;
+      try {
+        projection = JSON.parse(result.stdout.trim());
+      } catch {
+        throw new Error(`${label} ${scenario.name} did not emit one JSON result: ${result.stdout}`);
+      }
+      if (projection.operation !== `${scenario.domain}.reconcile` || projection.outcome !== scenario.expectedOutcome)
+        throw new Error(`${label} ${scenario.name} returned an unexpected projection: ${result.stdout}`);
+      if (scenario.expectedRetry !== undefined && projection.retry !== scenario.expectedRetry)
+        throw new Error(`${label} ${scenario.name} changed Core retry evidence: ${result.stdout}`);
+      if (patches !== scenario.expectedPatches)
+        throw new Error(
+          `${label} ${scenario.name} made ${patches} provider mutation(s), expected ${scenario.expectedPatches}`,
+        );
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+  console.log(`${label} CLI reconciler verified: unchanged, reconciled, blocked, stale, and ambiguous outcomes`);
+}
+
 function packageJsonVersion(installed) {
   const packagePath = path.join(installed, "package.json");
   return JSON.parse(fs.readFileSync(packagePath, "utf8")).version;
@@ -1266,6 +1516,7 @@ async function certifyInstalledSetupConsole(tarballPath, packageName) {
     if (!path.relative(repoRoot, installed).startsWith(".."))
       throw new Error("installed package resolved inside the checkout");
     certifyInstalledCli(consumer, installed, packageName);
+    await certifyArtifactReconciliationCli(path.join(installed, "dist", "index.js"), consumer, "packed installed");
     certifyInstalledContractPackage(consumer, packageName);
     certifyInstalledImplementationTaskTerminationPackage(consumer, packageName);
     certifyInstalledArtifactReconciliationPackage(consumer, packageName);
@@ -1351,6 +1602,13 @@ async function main() {
     if (!fs.existsSync(path.join(dashboardDist, file))) {
       throw new Error(`Dashboard build output is missing apps/dashboard/dist/${file}`);
     }
+  }
+
+  const builtConsumer = fs.mkdtempSync(path.join(os.tmpdir(), "gh-inari-built-cli-reconcile-"));
+  try {
+    await certifyArtifactReconciliationCli(path.join(repoRoot, "dist", "index.js"), builtConsumer, "built");
+  } finally {
+    fs.rmSync(builtConsumer, { recursive: true, force: true });
   }
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
