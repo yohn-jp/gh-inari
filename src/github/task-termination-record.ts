@@ -14,11 +14,15 @@ import {
 import type { GitHubBranchAdvanceCapability } from "./git-data-capability.js";
 
 export const TASK_TERMINATION_RECORD_DIRECTORY = ".inari/task-termination" as const;
+export const TASK_TERMINATION_METADATA_BRANCH = "inari/task-termination" as const;
+const ZERO_OID = "0".repeat(40);
 
 type Snapshot = {
   readonly observation: ImplementationTaskTerminationObservationResult;
+  /** Existing metadata head, or the accepted base commit for first creation. */
   readonly head?: string;
   readonly tree?: string;
+  readonly metadataExists?: boolean;
 };
 
 export type TaskTerminationFinalization =
@@ -72,13 +76,32 @@ async function snapshot(
 ): Promise<Snapshot> {
   if (!sameRepository(authorization, capability)) return { observation: invalid(authorization) };
   try {
-    const ref = await capability.readRef(authorization.base.branch);
-    if (ref === undefined || ref.ref !== `refs/heads/${authorization.base.branch}`) {
+    const baseRef = await capability.readRef(authorization.base.branch);
+    if (baseRef === undefined) {
       return { observation: unavailable(authorization) };
     }
-    const commit = await capability.readCommit(ref.sha);
+    if (baseRef.ref !== `refs/heads/${authorization.base.branch}` || baseRef.sha !== authorization.base.revision) {
+      return { observation: invalid(authorization) };
+    }
+    const metadataRef = await capability.readRef(TASK_TERMINATION_METADATA_BRANCH);
+    if (metadataRef !== undefined && metadataRef.ref !== `refs/heads/${TASK_TERMINATION_METADATA_BRANCH}`) {
+      return { observation: invalid(authorization) };
+    }
+    const head = metadataRef?.sha ?? baseRef.sha;
+    const commit = await capability.readCommit(head);
     const tree = await capability.readTree(commit.treeSha);
-    if (commit.sha !== ref.sha || tree.sha !== commit.treeSha) return { observation: invalid(authorization) };
+    if (commit.sha !== head || tree.sha !== commit.treeSha) return { observation: invalid(authorization) };
+    if (metadataRef === undefined) {
+      return {
+        observation: observeImplementationTaskTermination(
+          { status: "authoritative", provenance: { source: "github-git-data", commit: baseRef.sha }, records: [] },
+          authorization,
+        ),
+        head,
+        tree: tree.sha,
+        metadataExists: false,
+      };
+    }
     const entries = tree.entries.filter((entry) => entry.path === pathFor(authorization));
     if (entries.length > 1 || (entries.length === 1 && (entries[0]?.type !== "blob" || entries[0].mode !== "100644"))) {
       return { observation: invalid(authorization) };
@@ -86,11 +109,12 @@ async function snapshot(
     if (entries.length === 0) {
       return {
         observation: observeImplementationTaskTermination(
-          { status: "authoritative", provenance: { source: "github-git-data", commit: ref.sha }, records: [] },
+          { status: "authoritative", provenance: { source: "github-git-data", commit: metadataRef.sha }, records: [] },
           authorization,
         ),
-        head: ref.sha,
+        head: metadataRef.sha,
         tree: tree.sha,
+        metadataExists: true,
       };
     }
     if (capability.readBlob === undefined) return { observation: unavailable(authorization) };
@@ -108,13 +132,14 @@ async function snapshot(
       observation: observeImplementationTaskTermination(
         {
           status: "authoritative",
-          provenance: { source: "github-git-data", commit: ref.sha },
+          provenance: { source: "github-git-data", commit: metadataRef.sha },
           records: [{ record, provenance: { path: pathFor(authorization) } }],
         },
         authorization,
       ),
-      head: ref.sha,
+      head: metadataRef.sha,
       tree: tree.sha,
+      metadataExists: true,
     };
   } catch {
     return { observation: unavailable(authorization) };
@@ -178,10 +203,23 @@ export async function finalizeTaskTerminationRecord(
   } catch {
     return { status: "denied", observation: before.observation };
   }
+  // Git-object creation is inert. Recheck the fixed base immediately before the ref effect.
+  try {
+    const baseRef = await capability.readRef(authorization.base.branch);
+    if (
+      baseRef === undefined ||
+      baseRef.ref !== `refs/heads/${authorization.base.branch}` ||
+      baseRef.sha !== authorization.base.revision
+    ) {
+      return { status: "denied", observation: invalid(authorization) };
+    }
+  } catch {
+    return { status: "denied", observation: unavailable(authorization) };
+  }
   try {
     await capability.compareAndAdvanceRef({
-      branch: authorization.base.branch,
-      beforeOid: before.head,
+      branch: TASK_TERMINATION_METADATA_BRANCH,
+      beforeOid: before.metadataExists ? before.head : ZERO_OID,
       afterOid,
       force: false,
     });
