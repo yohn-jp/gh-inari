@@ -12,6 +12,7 @@ import {
   prepareIssueArtifact,
   preparePullRequestArtifact,
   projectExistingArtifact,
+  recoverExistingArtifactValues,
   removeHtmlComments,
   renderIssueArtifact,
   renderPullRequestArtifact,
@@ -96,6 +97,40 @@ test("Issue validation and rendering are deterministic and reversible", () => {
     metadata: { title: "feat: preserve native labels" },
   });
   assert.deepEqual(prepared.artifact.labels, ["enhancement"]);
+});
+
+test("existing Issue sections use CommonMark headings and recovery reports unmatched source ranges", () => {
+  const fields = {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests"],
+  };
+  const canonical = renderIssueArtifact(issueContractFixture, fields);
+  const commonMarkHeading = canonical.replace("### Problem", "   ###   Problem ###");
+  const parsed = parseExistingIssueArtifact(issueContractFixture, commonMarkHeading);
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, fields);
+
+  const recovered = recoverExistingArtifactValues(issueContractFixture, `Unmatched preamble\n\n${canonical}`);
+  assert.deepEqual(recovered.values, fields);
+  assert.equal(recovered.coverage.complete, false);
+  assert.equal(recovered.coverage.unmatchedLineCount, 1);
+  assert.deepEqual(recovered.coverage.unmatchedRanges, [{ startLine: 1, endLine: 1 }]);
+  assert.equal(recovered.coverage.truncated, false);
+  assert.equal(
+    parseExistingIssueArtifact(issueContractFixture, `Unmatched preamble\n\n${canonical}`).diagnostics[0]?.code,
+    "EXISTING_EXTRA_CONTENT",
+  );
+
+  const orphanParagraphs = Array.from({ length: 20 }, (_, index) => `Unmatched paragraph ${index + 1}`).join("\n\n");
+  const boundedCoverage = recoverExistingArtifactValues(
+    issueContractFixture,
+    `${orphanParagraphs}\n\n${canonical}`,
+  ).coverage;
+  assert.equal(boundedCoverage.unmatchedLineCount, 20);
+  assert.equal(boundedCoverage.unmatchedRanges.length, 16);
+  assert.equal(boundedCoverage.truncated, true);
 });
 
 test("Issue rendering uses governed option labels while preserving semantic values", () => {
@@ -380,6 +415,10 @@ test("PR HTML comments and placeholders remain non-semantic during parsing", () 
   const body = [
     "<!-- Repository guidance -->",
     "",
+    "<!--",
+    "## Comment heading is opaque",
+    "-->",
+    "",
     "## Summary",
     "<!-- Explain the change. -->",
     "A useful summary",
@@ -462,6 +501,35 @@ test("unsafe multi-select labels are rejected at the canonical boundary", () => 
       return true;
     },
   );
+});
+
+test("Issue recovery coverage excludes unrendered Issue Form documentation", () => {
+  const fields = {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests"],
+  };
+  const documentation = issueContractFixture.sections.filter((section) => section.kind === "documentation");
+  const inputs = issueContractFixture.sections.filter((section) => section.kind === "input");
+  const contract: CanonicalContract = {
+    ...issueContractFixture,
+    sections: [
+      ...documentation.map((section, index) => ({ ...section, render: { ...section.render, order: index } })),
+      ...inputs.map((section, index) => ({
+        ...section,
+        render: { ...section.render, order: documentation.length + index },
+      })),
+    ],
+  };
+  const [problem, category, ...remaining] = renderIssueArtifact(contract, fields).split(/(?=^### )/mu);
+  assert.ok(problem?.startsWith("### Problem"));
+  assert.ok(category?.startsWith("### Category"));
+  const reordered = [category, problem, ...remaining].join("");
+  const recovered = recoverExistingArtifactValues(contract, reordered);
+  assert.deepEqual(recovered.values, fields);
+  assert.equal(recovered.coverage.complete, true);
+  assert.equal(recovered.coverage.unmatchedLineCount, 0);
 });
 
 test("round-trip mismatches use the shared bounded field diagnostic contract", () => {
@@ -1316,6 +1384,50 @@ test("wrong-template and unparseable existing bodies are distinguished", () => {
   assert.equal(wrong.classification, "wrong-template");
   const malformed = validateExistingIssueArtifact(issueContractFixture, "not a canonical artifact\n");
   assert.equal(malformed.classification, "unparseable");
+});
+
+test("comment-only PR template preamble does not hide wrong-template evidence", () => {
+  const contract = parsePullRequestTemplate(
+    [
+      "<!-- Pull request summary -->",
+      "",
+      "## Summary",
+      "<!-- Explain the change. -->",
+      "",
+      "## Validation",
+      "",
+      "- [ ] Tests",
+      "",
+    ].join("\n"),
+    {
+      id: "default",
+      type: "pull-request-default",
+      kind: "pull-request",
+      name: "default",
+      path: ".github/PULL_REQUEST_TEMPLATE.md",
+    },
+  );
+  const parsed = parseExistingPullRequestArtifact(contract, "## Other\n\nLegacy body\n");
+  assert.equal(parsed.parsed, false);
+  assert.equal(parsed.diagnostics[0]?.code, "EXISTING_WRONG_TEMPLATE");
+  assert.equal(
+    validateExistingPullRequestArtifact(contract, "## Other\n\nLegacy body\n").classification,
+    "wrong-template",
+  );
+});
+
+test("unknown checklist items remain unparseable under AST task-list decoding", () => {
+  const body = renderIssueArtifact(issueContractFixture, {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests"],
+  }).replace("- [x] Tests cover the behavior", "- [x] Unrecognized checklist entry");
+  const parsed = parseExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(parsed.parsed, false);
+  assert.equal(parsed.diagnostics[0]?.code, "EXISTING_UNKNOWN_CHECKLIST_ITEM");
+  assert.deepEqual(parsed.values, {});
+  assert.equal(validateExistingIssueArtifact(issueContractFixture, body).classification, "unparseable");
 });
 
 test("PR placeholder-only sections reconstruct as omitted semantic values", async () => {
