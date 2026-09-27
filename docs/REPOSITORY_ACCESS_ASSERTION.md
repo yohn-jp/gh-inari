@@ -43,6 +43,9 @@ own read capability.
 Admission decides whether the authenticated subject may request the specific
 semantic operation. Repository visibility is only an ingress prerequisite.
 Missing subject policy or current evidence is denial, not a full App grant.
+The Runtime operator owns subject/operation/target grants in Runtime-owned
+owner configuration; Admission consumes the current grant at invocation.
+Hosted does not issue or manage these grants.
 
 ## 3. Trust assumption
 
@@ -167,8 +170,15 @@ Failures return bounded categories, not provider bodies or credentials.
 ## 9. Eligibility versus semantic authority
 
 An authenticated user with repository read access does not automatically gain
-Inari Access write powers. The Runtime's explicit policy must authorize that
-subject for the requested semantic operation.
+Inari Access write powers. The Runtime operator records grants in Runtime-owned
+owner configuration. Each grant binds an immutable GitHub user ID and exact
+provider host to permitted semantic operation IDs, an immutable repository ID,
+and exact targets. Admission matches the verified assertion and request to
+that current grant, then intersects it with current repository policy and,
+where applicable, task policy. A missing or revoked grant, stale owner
+configuration generation, or wrong host, user ID, repository, operation, or
+target denies. A display name, OAuth success, installation permission, or
+valid assertion alone cannot supply the grant.
 
 For task-bound operations, current Implementation authorization, Source
 membership, branch/base, execution scope, and protected paths still apply.
@@ -178,10 +188,10 @@ For non-task operations, use the existing owner/read/control authority for
 that operation. Do not manufacture `change.implement` merely to perform a
 read or expose control/enrollment routes to every remote caller.
 
-The exact remote subject-to-operation admission mapping is a required
-implementation contract. Until present and verified, the missing mapping
-fails closed. This does not require inventing a Hosted Session issuance
-protocol or a new user role database.
+The Runtime owner configuration producer and Admission's current-grant
+consumer are separate implementation seams. Until both are present and
+verified, remote admission fails closed. This does not require a Hosted
+Session issuance protocol or a new Hosted user role database.
 
 ## 10. Replay and retry
 

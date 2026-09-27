@@ -60,6 +60,18 @@ App key, or Authority private signing key.
 
 A remote Repository Access Assertion is another bounded caller-evidence
 input, not permission to bypass local policy or auto-issue full capabilities.
+Admission consumes current Runtime operator grants for exact immutable GitHub
+user IDs, provider hosts, semantic operation IDs, immutable repository IDs,
+and targets from Runtime-owned owner configuration. It matches each verified
+remote subject and request to a current grant and intersects that grant with
+current repository/task policy. Missing or revoked grants, stale owner
+configuration generations, or grants for the wrong host, user ID,
+repository, operation, or target deny before effects.
+
+The Runtime operator owns grant management and persistence at the owner
+configuration boundary. That owner producer does not make Admission a
+credential store or let Hosted issue semantic grants. Admission's current-
+grant consumer must fail closed when the owner evidence is unavailable.
 
 ### Executor
 
@@ -91,7 +103,7 @@ Console code to load every private component through a barrel import.
 Hosted owns transient OAuth verification and its service-signed assertion.
 Relay owns authenticated Runtime connections and bounded delivery state.
 They do not own repository semantic state, task authorization, provider
-execution, or a central Inari Session store.
+execution, Runtime operator grants, or a central Inari Session store.
 
 ## 3. Existing module ownership
 

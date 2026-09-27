@@ -184,6 +184,13 @@ causes its existing Sessions to fail closed. An unavailable, failed, invalid,
 or mismatched read denies. Hosted eligibility does not grant the Runtime
 operator permission to finalize the record.
 
+For remote human-operated work, Admission intersects a current explicit
+Runtime operator grant with current repository and, where applicable, task
+policy. The grant binds the immutable GitHub user ID and provider host to
+semantic operation IDs, an immutable repository ID, and exact targets. A
+grant cannot widen current Implementation authorization, Source membership,
+branch/base, execution scope, or effect preconditions.
+
 The #1213 task-bound `change.implement` compatibility claim remains restricted
 to Implementation publication/branch-side composition. It is not an
 Implementation-root Change grant and does not add a new capability ceiling.
@@ -207,7 +214,14 @@ trustworthy. Runtime explicitly trusts the issuer for identity and eligibility
 facts, then independently performs subject/operation admission.
 
 Repository visibility alone never grants all App write permissions or the
-entire Runtime Authority ceiling. Missing subject authorization fails closed.
+entire Runtime Authority ceiling. The Runtime operator owns the explicit
+subject/operation/target grants in Runtime-owned owner configuration; Hosted
+issues no semantic grant. Admission accepts a remote invocation only when the
+verified assertion matches a current grant and the current repository/task
+policy. Missing or revoked grants, stale owner configuration generations, or
+a mismatch in provider host, immutable user ID, repository, semantic operation,
+or target deny. OAuth success, installation permission, assertion validity,
+and display names do not supply a grant.
 
 ### ARC-06: Relay identity is a locator
 
