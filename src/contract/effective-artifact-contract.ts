@@ -262,7 +262,7 @@ function rootPropertyPointer(name: string): string {
   return `/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`;
 }
 
-function buildSchemaNativeInputSchema(contract: SchemaNativeArtifactContract): JsonSchemaDocument {
+export function buildSchemaNativeInputSchema(contract: SchemaNativeArtifactContract): JsonSchemaDocument {
   const rootSchema = contract.schema;
   const sourceProperties = isRecord(rootSchema.properties) ? rootSchema.properties : undefined;
   if (sourceProperties === undefined) {

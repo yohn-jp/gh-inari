@@ -188,3 +188,110 @@ test("fails closed for any governed pull-request property, since the native temp
       ),
   );
 });
+
+test("schema-native Issue Forms project reversible strings and choices and reject structured controls", () => {
+  const input = {
+    version: "2",
+    kind: "issue",
+    id: "schema-issue",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        summary: { type: "string", minLength: 1 },
+        category: { type: "string", enum: ["bug", "feature"] },
+      },
+      required: ["summary"],
+      additionalProperties: false,
+    },
+    bindings: {
+      "/summary": { authority: { kind: "supplied" }, presentation: { control: "multiline" } },
+      "/category": {
+        authority: { kind: "supplied" },
+        presentation: { control: "choice", options: { bug: "Bug", feature: "Feature" } },
+      },
+    },
+  };
+  const form = projectArtifactContractToIssueForm(input);
+  assert.deepEqual(
+    form.document.body.map((field) => ({ type: field.type, id: field.id })),
+    [
+      { type: "dropdown", id: "category" },
+      { type: "textarea", id: "summary" },
+    ],
+  );
+  assert.equal((form.document.body[1]?.attributes as Record<string, unknown>).label, "summary");
+
+  const unsupported = structuredClone(input);
+  (unsupported.schema.properties as Record<string, unknown>).summary = {
+    type: "object",
+    properties: { text: { type: "string" } },
+    additionalProperties: false,
+  };
+  assert.throws(
+    () => projectArtifactContractToIssueForm(unsupported),
+    (error: unknown) =>
+      error instanceof NativeTemplateProjectionError &&
+      error.violations.some((violation) => violation.code === "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY"),
+  );
+});
+
+test("schema-native PR templates accept bounded structured values and reject unbounded arrays", () => {
+  const input = {
+    version: "2",
+    kind: "pull_request",
+    id: "structured",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        verification: {
+          type: "array",
+          maxItems: 4,
+          items: {
+            type: "object",
+            properties: { command: { type: "string" }, outcome: { type: "string", enum: ["passed", "failed"] } },
+            required: ["command", "outcome"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["verification"],
+      additionalProperties: false,
+    },
+    bindings: { "/verification": { authority: { kind: "supplied" }, presentation: { control: "checklist" } } },
+  };
+  const projection = projectArtifactContractToPullRequestTemplate(input);
+  assert.match(projection.content, /## inari-field:verification/u);
+  assert.doesNotMatch(projection.content, /JSON\.stringify|"properties"/u);
+
+  const unbounded = structuredClone(input);
+  const verification = (unbounded.schema.properties as Record<string, Record<string, unknown>>).verification;
+  delete verification.maxItems;
+  assert.throws(
+    () => projectArtifactContractToPullRequestTemplate(unbounded),
+    (error: unknown) =>
+      error instanceof NativeTemplateProjectionError &&
+      error.violations.some((violation) => violation.code === "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY"),
+  );
+});
+
+test("schema-native Issue Form and PR template capabilities follow Core caller-schema projection", () => {
+  const unsupportedRootPattern = {
+    version: "2",
+    id: "patterned",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { summary: { type: "string", minLength: 1 } },
+      patternProperties: { "^x-": { type: "string" } },
+      additionalProperties: false,
+    },
+    bindings: { "/summary": { authority: { kind: "supplied" } } },
+  };
+
+  assert.throws(() => projectArtifactContractToIssueForm({ ...unsupportedRootPattern, kind: "issue" }));
+  assert.throws(() =>
+    projectArtifactContractToPullRequestTemplate({ ...unsupportedRootPattern, kind: "pull_request" }),
+  );
+});
