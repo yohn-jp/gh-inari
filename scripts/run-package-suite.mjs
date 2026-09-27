@@ -30,6 +30,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/artifact-observation-identity.d.ts",
   "dist/artifact-observation-identity.js",
   "dist/artifact-observation-identity.js.map",
+  "dist/artifact-reconciliation-executor.d.ts",
+  "dist/artifact-reconciliation-executor.js",
+  "dist/artifact-reconciliation-executor.js.map",
   "dist/artifact-contract-governance.d.ts",
   "dist/artifact-contract-governance.js",
   "dist/artifact-contract-governance.js.map",
@@ -856,6 +859,152 @@ function certifyInstalledContractPackage(consumer, packageName) {
   console.log("installed contract runtime verified: public package subpath resolves and validates Draft 2020-12");
 }
 
+function certifyInstalledArtifactReconciliationPackage(consumer, packageName) {
+  const smokePath = path.join(consumer, "artifact-reconciliation-runtime.mjs");
+  const source = String.raw`
+import assert from "node:assert/strict";
+import {
+  assertArtifactObservationIdentityCurrent,
+  compileIssueFormYaml,
+  executeArtifactReconciliation,
+  GitHubTransportError,
+  renderIssueArtifact,
+} from "__PACKAGE_NAME__";
+
+const LF = String.fromCharCode(10);
+const templatePath = ".github/ISSUE_TEMPLATE/feature.yml";
+const templateSource = [
+  "name: Feature",
+  "description: Feature",
+  "body:",
+  "  - type: textarea",
+  "    id: summary",
+  "    attributes:",
+  "      label: Summary",
+  "    validations:",
+  "      required: true",
+  "  - type: textarea",
+  "    id: context",
+  "    attributes:",
+  "      label: Context",
+  "    validations:",
+  "      required: true",
+  "",
+].join(LF);
+const localContract = compileIssueFormYaml(templateSource, {
+  id: "feature",
+  name: "Feature",
+  path: templatePath,
+  type: "issue-form",
+  kind: "issue",
+});
+const canonicalBody = renderIssueArtifact(localContract, {
+  fields: { summary: "A summary", context: "More context" },
+});
+function reorderedBody(body) {
+  const marker = body.split(LF).find((line) => line.startsWith("<!-- inari:template"));
+  assert.ok(marker);
+  const markerFree = body.replace(marker, "");
+  const summaryStart = markerFree.indexOf("### Summary");
+  const contextStart = markerFree.indexOf("### Context");
+  assert.ok(summaryStart >= 0 && contextStart > summaryStart);
+  const prefix = markerFree.slice(0, summaryStart);
+  const summary = markerFree.slice(summaryStart, contextStart).trim();
+  const context = markerFree.slice(contextStart).trim();
+  return prefix + context + LF + LF + summary + LF + LF + marker + LF;
+}
+function fixture(body, options = {}) {
+  const templates = options.ambiguous
+    ? [
+        { path: templatePath, source: templateSource },
+        { path: ".github/ISSUE_TEMPLATE/feature-copy.yml", source: templateSource },
+      ]
+    : [{ path: templatePath, source: templateSource }];
+  const blobs = new Map(templates.map((template, index) => ["blob-" + index, template.source]));
+  const entries = templates.map((template, index) => ({ path: template.path, type: "blob", sha: "blob-" + index }));
+  let issue = {
+    number: 80,
+    title: "feat: reconcile",
+    body,
+    state: "open",
+    url: "https://github.com/acme/inari/issues/80",
+    labels: [],
+    assignees: [],
+    repositoryId: "123",
+    repositoryHost: "github.com",
+  };
+  const counts = { updates: 0 };
+  return {
+    counts,
+    snapshot: () => ({ ...issue }),
+    adapter: {
+      async resolveRepositoryContext() {
+        return {
+          hostname: "github.com",
+          host: "github.com",
+          owner: "acme",
+          name: "inari",
+          nameWithOwner: "acme/inari",
+          url: "https://github.com/acme/inari",
+          repositoryId: "123",
+        };
+      },
+      async getRepositoryDefaultBranch() { return "main"; },
+      async getRepositoryTree() { return { sha: "tree-1", entries }; },
+      async getRepositoryBlob(sha) { return blobs.get(sha); },
+      async getIssue() {
+        if (options.observationFailure) throw new GitHubTransportError("issue.read", "read unavailable");
+        return { ...issue };
+      },
+      async updateIssue(number, artifact, _deadline, observationIdentity) {
+        counts.updates += 1;
+        if (options.stale) issue = { ...issue, title: "feat: concurrent edit" };
+        assertArtifactObservationIdentityCurrent("issue", observationIdentity, issue, number);
+        issue = { ...issue, title: artifact.title, body: artifact.body };
+        if (options.ambiguousEffect) throw new Error("update response lost");
+        return { ...issue };
+      },
+    },
+  };
+}
+const request = { version: 1, domain: "issue", number: 80 };
+const unchanged = fixture(canonicalBody);
+assert.equal((await executeArtifactReconciliation(unchanged.adapter, request)).outcome, "unchanged");
+assert.equal(unchanged.counts.updates, 0);
+
+const reconciled = fixture(reorderedBody(canonicalBody));
+const recovered = await executeArtifactReconciliation(reconciled.adapter, request);
+assert.equal(recovered.outcome, "reconciled");
+assert.equal(reconciled.snapshot().body, canonicalBody);
+
+const unmarked = canonicalBody
+  .split(LF)
+  .filter((line) => !line.startsWith("<!-- inari:template"))
+  .join(LF);
+const blocked = fixture(unmarked, { ambiguous: true });
+const blockedResult = await executeArtifactReconciliation(blocked.adapter, request);
+assert.equal(blockedResult.outcome, "blocked");
+assert.equal(blockedResult.routing.kind, "template-selection-required");
+assert.equal(blocked.counts.updates, 0);
+
+const stale = fixture(reorderedBody(canonicalBody), { stale: true });
+const staleResult = await executeArtifactReconciliation(stale.adapter, request);
+assert.equal(staleResult.outcome, "safe-pre-effect-retry");
+assert.equal(staleResult.effect, "not-started");
+
+const ambiguous = fixture(reorderedBody(canonicalBody), { ambiguousEffect: true });
+const ambiguousResult = await executeArtifactReconciliation(ambiguous.adapter, request);
+assert.equal(ambiguousResult.outcome, "possible-effect-ambiguity");
+assert.equal(ambiguousResult.effect, "possible");
+assert.equal(ambiguousResult.retry, "fresh-observation-required");
+`;
+  fs.writeFileSync(smokePath, source.replace("__PACKAGE_NAME__", packageName));
+  run(process.execPath, [smokePath], { cwd: consumer });
+  console.log(
+    "installed Core reconciliation verified: unchanged, recovered, blocked, stale, and possible-effect outcomes resolve from the packed public API",
+  );
+}
+
 // Walks every shape the "exports" map can take: a direct string target, an
 // array of fallback targets, or a conditions object whose values may
 // themselves be any of these (nested conditions such as node/import/require).
@@ -1000,6 +1149,7 @@ async function certifyInstalledSetupConsole(tarballPath, packageName) {
     if (!path.relative(repoRoot, installed).startsWith(".."))
       throw new Error("installed package resolved inside the checkout");
     certifyInstalledContractPackage(consumer, packageName);
+    certifyInstalledArtifactReconciliationPackage(consumer, packageName);
     const environment = { ...process.env, INARI_CONFIG_HOME: path.join(root, "config") };
     for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) delete environment[name];
     child = spawn(
