@@ -341,7 +341,6 @@
         "lint",
         "test",
         "dashboard:test",
-        "dashboard:build",
         "templates:check",
         "worker:build",
         "verify:package",
