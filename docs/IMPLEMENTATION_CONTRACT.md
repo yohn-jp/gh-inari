@@ -250,6 +250,16 @@ An Implementation leaf PR links the Implementation and binds its exact
 branch/base/head. A Source integration PR binds the Source and its composed
 acceptance. An Epic integration PR binds the product-level integration.
 
+The Source integration acceptance is a versioned record finalized by an
+authorized independent reviewer. It binds immutable repository and Source
+identities, the governed Source integration PR and exact head SHA, the current
+Source criteria version/digest, reviewer identity and current authority, and
+an explicit result for each criterion. Current repository policy determines
+reviewer independence. Change `ACCEPTED` checks, reviews, governance, and
+merge-policy evidence remains necessary but does not itself prove these
+criteria. Source and Epic composition consume the current Source acceptance
+result separately from task conformance and Change policy acceptance.
+
 The accepted topology may be:
 
 ```text
@@ -305,6 +315,13 @@ current Inari authorization.
 Completion requires the exact admitted task's evidence and conformance.
 A merged leaf does not close its Source or Epic without their acceptance
 checks. A Source being closed elsewhere does not magically certify a task.
+Source completion fails closed if the acceptance record is missing,
+unavailable, invalid, stale, mismatched, dismissed, or revoked, including a
+changed integration head or criteria version/digest or lost reviewer authority
+or independence. Historical Source data remains readable with bounded
+classification, but without a current versioned record it cannot be reported
+as accepted. The record grants no merge or provider mutation authority;
+neither Runtime nor Relay receives a GitHub user token to obtain it.
 
 Review rework inside the admitted contract follows its current validity and
 scope rules. Work beyond that contract requires a newly authorized bounded

@@ -78,6 +78,14 @@ A Source may have multiple contributing Implementations. Its completion must
 be evaluated against composed evidence, not inferred from child count or the
 last merged PR.
 
+For the governed Source integration candidate, an authorized independent
+reviewer finalizes a repository-owned, versioned Source acceptance record. It
+binds the immutable repository and Source identities, governed integration PR,
+exact head SHA, current Source criteria version/digest, reviewer identity and
+authority, and an explicit result for every criterion. Current repository
+policy determines reviewer authorization and independence. The App and Hosted
+cannot approve their own PR or mint this reviewer acceptance.
+
 ### 4.3 Change
 
 The canonical target identity is:
@@ -239,6 +247,17 @@ is verified as reviewable. REVIEW is not review approval or successful CI.
 The required current checks, reviews, governance, and merge-policy conditions
 are actually satisfied. A cached green badge or a child PR's checks cannot
 prove the current composed candidate accepted.
+
+This is Change policy acceptance for the exact current candidate, distinct
+from the reviewer's Source criteria acceptance. Source completion requires
+both applicable current Change policy evidence and a current Source acceptance
+record whose results satisfy every Source criterion. A missing, unavailable,
+invalid, mismatched, stale, dismissed, or revoked record fails closed. A changed
+integration PR head or Source criteria version/digest, or lost reviewer
+authorization or independence, invalidates its use for completion. Recheck
+these bindings and current repository policy when the record is used; neither
+an earlier review nor a branch name alone certifies the current candidate.
+The record grants no merge or provider mutation authority.
 
 ### 6.5 MERGED
 
@@ -603,6 +622,9 @@ implicit user-token fallback.
 
 `MERGED` is reported only after authoritative reread. Source or Epic closure
 remains its own acceptance decision and cannot be inferred from one leaf merge.
+Source and Epic composition consume the current Source acceptance result at
+their respective boundaries; an Epic cannot infer a Source's criteria results
+from integrated leaves or Change `ACCEPTED` alone.
 
 ## 25. Product boundaries
 

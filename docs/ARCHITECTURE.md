@@ -161,6 +161,17 @@ Source Change publication and Implementation leaf publication are different
 objects. An Epic is a composed tracking/integration boundary, not an
 Implementation Session.
 
+An authorized independent reviewer finalizes the repository-owned, versioned
+Source acceptance record for the exact composed Source candidate. It binds
+immutable repository and Source identities, the governed Source integration PR,
+its exact head revision, the current Source criteria version/digest, reviewer
+identity and current authority, and an explicit result for each criterion.
+Current Change `ACCEPTED` policy evidence remains necessary for its Change;
+checks, reviews, and merge policy alone do not establish Source criteria
+acceptance. Source completion requires the current record and composed
+acceptance evidence, not leaf PR success or child Issue closure. The record
+grants neither merge nor provider mutation authority.
+
 Task termination is a separate Implementation lifecycle event. Only an
 explicitly authorized Runtime operator may finalize a versioned termination
 record owned by the repository, bound to the immutable repository, the
