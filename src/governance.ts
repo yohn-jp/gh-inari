@@ -9,6 +9,7 @@ import {
 } from "./contract/issue-form.js";
 import { ArtifactContractValidationError } from "./contract/artifact-contract.js";
 import { EffectiveArtifactContractCompilationError } from "./contract/effective-artifact-contract.js";
+import type { ArtifactObservationIdentity } from "./artifact-observation-identity.js";
 import {
   assertCanonicalContract,
   type CanonicalContract,
@@ -941,9 +942,10 @@ export async function updateGovernedIssue(
   adapter: GitHubAdapter,
   issueNumber: number,
   artifact: ValidatedRenderedIssueArtifact,
+  observationIdentity: ArtifactObservationIdentity,
 ): Promise<GovernedMutationResult<GitHubIssue>> {
   await verifyGovernedMutationFreshness(adapter, artifact.provenance);
-  const updated = await adapter.updateIssue(issueNumber, artifact);
+  const updated = await adapter.updateIssue(issueNumber, artifact, undefined, observationIdentity);
   const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);
   return { artifact: updated, governance };
 }
@@ -1013,9 +1015,10 @@ export async function updateGovernedPullRequest(
   adapter: GitHubAdapter,
   pullRequestNumber: number,
   artifact: ValidatedRenderedPullRequestArtifact,
+  observationIdentity: ArtifactObservationIdentity,
 ): Promise<GovernedMutationResult<GitHubPullRequest>> {
   await verifyGovernedMutationFreshness(adapter, artifact.provenance);
-  const updated = await adapter.updatePullRequest(pullRequestNumber, artifact);
+  const updated = await adapter.updatePullRequest(pullRequestNumber, artifact, undefined, observationIdentity);
   const governance = await reconcileGovernanceAfterMutation(adapter, artifact.provenance);
   return { artifact: updated, governance };
 }

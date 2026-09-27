@@ -29,6 +29,7 @@ import { prepareIssueArtifact, preparePullRequestArtifact } from "./artifact.js"
 import { runCli } from "./cli.js";
 import { normalizeSemanticTemplate, renderSemanticNative } from "./semantic-template.js";
 import { PullRequestPolicyError } from "./pr-policy.js";
+import { createArtifactObservationIdentity } from "./artifact-observation-identity.js";
 
 class StubGovernanceTransport implements FixtureCommandTransport {
   readonly calls: readonly string[][];
@@ -1070,7 +1071,22 @@ test("successful Issue update keeps identity when post-effect governance crosses
     metadata: { title: "Remote issue updated" },
   }).artifact;
 
-  const result = await updateGovernedIssue(adapter, 52, prepared);
+  const result = await updateGovernedIssue(
+    adapter,
+    52,
+    prepared,
+    createArtifactObservationIdentity("issue", {
+      number: 52,
+      title: "Remote issue updated",
+      body: "### Remote field\n\nold\n",
+      state: "open",
+      url: updatedIssue.html_url,
+      labels: [],
+      assignees: [],
+      repositoryId: "100000200",
+      repositoryHost: "github.com",
+    }),
+  );
   assert.equal(result.artifact.number, 52);
   assert.equal(result.artifact.url, updatedIssue.html_url);
   assert.equal(result.governance.reconciled, false);
@@ -1101,6 +1117,7 @@ test("successful pull-request update keeps identity when post-effect governance 
       }),
     ),
     command(JSON.stringify(updatedPullRequest)),
+    command(JSON.stringify(updatedPullRequest)),
     command(JSON.stringify({ default_branch: "main" })),
     command(
       JSON.stringify({
@@ -1117,7 +1134,21 @@ test("successful pull-request update keeps identity when post-effect governance 
     metadata: { title: "feat: updated", head: "feature", base: "main" },
   }).artifact;
 
-  const result = await updateGovernedPullRequest(adapter, 53, prepared);
+  const result = await updateGovernedPullRequest(
+    adapter,
+    53,
+    prepared,
+    createArtifactObservationIdentity("pr", {
+      number: 53,
+      title: "feat: updated",
+      body: "## Summary\n\nUpdated summary.\n",
+      state: "open",
+      url: updatedPullRequest.html_url,
+      draft: false,
+      head: "feature",
+      base: "main",
+    }),
+  );
   assert.equal(result.artifact.number, 53);
   assert.equal(result.artifact.url, updatedPullRequest.html_url);
   assert.equal(result.governance.reconciled, false);

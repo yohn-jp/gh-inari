@@ -5350,7 +5350,7 @@ async function runExistingRemediation(
     return 0;
   }
 
-  const mutated = await updateGovernedExistingArtifact(adapter, domain, number, desired);
+  const mutated = await updateGovernedExistingArtifact(adapter, domain, number, read, desired);
   console.log(
     JSON.stringify({
       ok: true,
@@ -5956,6 +5956,7 @@ function classifyExitCode(error: unknown): number {
     return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN") return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("ARTIFACT_CONTRACT_")) return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("ARTIFACT_OBSERVATION_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_REMOTE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_EXECUTION_")) return EXIT_REMOTE;
   if (

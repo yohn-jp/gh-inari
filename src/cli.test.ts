@@ -2850,6 +2850,19 @@ test("pr edit mutates every supported metadata field and omits draft from PATCH"
     command(
       JSON.stringify({
         number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 81,
         title: "feat: renamed",
         body: REMOTE_PR_BODY,
         state: "open",
@@ -2897,6 +2910,60 @@ test("pr edit mutates every supported metadata field and omits draft from PATCH"
     assert.ok(update.includes("maintainer_can_modify=false"));
     assert.equal(
       update.some((argument) => argument.startsWith("draft=")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("PR remediation fails closed when the target changes after its initial read", async () => {
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature", sha: "head-a" },
+        base: { ref: "main", sha: "base-a" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+    command(
+      JSON.stringify({
+        number: 81,
+        title: "feat: remediation",
+        body: "Concurrent provider edit",
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature", sha: "head-a" },
+        base: { ref: "release", sha: "base-b" },
+      }),
+    ),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "edit", "81", "--title", "feat: renamed", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+    });
+    assert.notEqual(exitCode, 0);
+    const output = JSON.parse(lines[0] ?? "{}") as { error?: { code?: string; message?: string } };
+    assert.equal(output.error?.code, "ARTIFACT_OBSERVATION_STALE");
+    assert.match(output.error?.message ?? "", /no update was applied/u);
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH")),
       false,
     );
   } finally {
@@ -3857,6 +3924,19 @@ test("pr sync reaches the adapter with a converged canonical body", async () => 
     ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
       sha: "pr-policy-sha",
     }),
+    command(
+      JSON.stringify({
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      }),
+    ),
     command(
       JSON.stringify({
         number: 81,
