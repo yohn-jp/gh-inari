@@ -28,6 +28,43 @@ async function temporaryEnvironment(): Promise<{ readonly root: string; readonly
   return { root, environment: { INARI_CONFIG_HOME: path.join(root, "config") } };
 }
 
+test("local config addresses preserve configured, relative, and default homes", () => {
+  const currentDirectory = process.cwd();
+  const relativeEnvironment = { INARI_CONFIG_HOME: "relative/config", HOME: "/ignored/home" };
+  const configHome = path.resolve(currentDirectory, "relative/config");
+
+  assert.equal(resolveConfigHome(relativeEnvironment), configHome);
+  assert.equal(localComponentDirectory("authority", relativeEnvironment), path.join(configHome, "authority"));
+  assert.equal(
+    localComponentPath("authority", "nested/config.json", relativeEnvironment),
+    path.join(configHome, "authority", "nested", "config.json"),
+  );
+  assert.equal(resolveConfigHome({}), path.join(os.homedir(), ".config", "inari"));
+  assert.throws(
+    () => resolveConfigHome({ INARI_CONFIG_HOME: "  " }),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "LOCAL_CONTROL_INVALID_CONFIG" &&
+      error.message === "INARI_CONFIG_HOME must not be empty.",
+  );
+  assert.throws(() => localComponentDirectory("unknown" as never, relativeEnvironment), /Unknown local component/u);
+  assert.throws(() => localComponentPath("authority", "nested//config.json", relativeEnvironment), /invalid/u);
+  assert.throws(() => localComponentPath("authority", "../config.json", relativeEnvironment), /invalid/u);
+});
+
+test("invalid component-relative directory segments fail before storage is created", async () => {
+  const { root, environment } = await temporaryEnvironment();
+  try {
+    const configHome = resolveConfigHome(environment);
+    assert.throws(() => ensureLocalComponentDirectory("cli", environment, "nested", "..", "escape"), /invalid/u);
+    assert.throws(() => ensureLocalComponentDirectory("cli", environment, "nested/"), /invalid/u);
+    await assert.rejects(lstat(configHome));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("local CLI topology is created idempotently without provisioning component identities", async () => {
   const { root, environment } = await temporaryEnvironment();
   try {

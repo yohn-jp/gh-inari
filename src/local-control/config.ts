@@ -21,6 +21,8 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { compilePaths, definePaths, resolvePaths } from "@yohn-jp/cli-canon";
+import type { PathResolutionContext } from "@yohn-jp/cli-canon";
 
 export const LOCAL_CONFIG_VERSION = 1 as const;
 export const MAX_LOCAL_CONFIG_BYTES = 64 * 1024;
@@ -271,12 +273,7 @@ function withSecureDirectory<T>(directoryPath: string, operation: (directory: Di
 }
 
 export function resolveConfigHome(environment: NodeJS.ProcessEnv = process.env): string {
-  const configured = environment.INARI_CONFIG_HOME;
-  if (configured !== undefined) {
-    if (configured.trim().length === 0) throw invalid("INARI_CONFIG_HOME must not be empty.");
-    return path.resolve(configured);
-  }
-  return path.join(os.homedir(), ".config", "inari");
+  return resolveLocalConfigPaths("cli", [], environment).configHome;
 }
 
 export function localComponentDirectory(
@@ -284,7 +281,7 @@ export function localComponentDirectory(
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
   if (!COMPONENT_NAMES.has(component)) throw invalid("Unknown local component.");
-  return path.join(resolveConfigHome(environment), component);
+  return resolveLocalConfigPaths(component, [], environment).componentDirectory;
 }
 
 export function localComponentPath(
@@ -293,11 +290,7 @@ export function localComponentPath(
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
   if (!COMPONENT_NAMES.has(component)) throw invalid("Unknown local component.");
-  const parts = relativePath.split(/[\\/]/u);
-  if (parts.length === 0 || parts.some((part) => !SAFE_SEGMENT.test(part) || part === "." || part === "..")) {
-    throw invalid("Local configuration path is invalid.");
-  }
-  return path.join(localComponentDirectory(component, environment), ...parts);
+  return resolveLocalConfigPaths(component, safeRelativeSegments(relativePath), environment, "file").componentAddress;
 }
 
 export function ensureLocalComponentDirectory(
@@ -305,11 +298,60 @@ export function ensureLocalComponentDirectory(
   environment: NodeJS.ProcessEnv = process.env,
   ...subdirectories: string[]
 ): string {
-  const directory =
-    subdirectories.length === 0
-      ? localComponentDirectory(component, environment)
-      : localComponentPath(component, path.join(...subdirectories), environment);
+  if (!COMPONENT_NAMES.has(component)) throw invalid("Unknown local component.");
+  const rawSegments = subdirectories.flatMap((segment) => segment.split(/[\\/]/u));
+  if (rawSegments.some((segment) => segment === "." || segment === "..")) {
+    throw invalid("Local configuration path is invalid.");
+  }
+  const relativePath = subdirectories.length === 0 ? undefined : path.join(...subdirectories);
+  const relativeSegments = relativePath === undefined ? [] : safeRelativeSegments(relativePath);
+  const directory = resolveLocalConfigPaths(component, relativeSegments, environment).componentAddress;
   return withSecureDirectory(resolveConfigHome(environment), () => withSecureDirectory(directory, () => directory));
+}
+
+function safeRelativeSegments(relativePath: string): string[] {
+  const parts = relativePath.split(/[\\/]/u);
+  if (parts.length === 0 || parts.some((part) => !SAFE_SEGMENT.test(part) || part === "." || part === "..")) {
+    throw invalid("Local configuration path is invalid.");
+  }
+  return parts;
+}
+
+function resolveLocalConfigPaths(
+  component: LocalComponent,
+  relativeSegments: readonly string[],
+  environment: NodeJS.ProcessEnv,
+  addressKind: "file" | "directory" = "directory",
+): { readonly configHome: string; readonly componentDirectory: string; readonly componentAddress: string } {
+  const currentDirectory = process.cwd();
+  const configuredHome = environment.INARI_CONFIG_HOME;
+  if (configuredHome !== undefined && configuredHome.trim().length === 0) {
+    throw invalid("INARI_CONFIG_HOME must not be empty.");
+  }
+  const pathSegments = relativeSegments.map((_, index) => ({ param: `relative-${index}` }));
+  const declarations = definePaths({
+    configHome: {
+      root: {
+        candidates: [{ env: "INARI_CONFIG_HOME" }, { default: "home", segments: [".config", "inari"] }],
+      },
+      kind: "directory",
+    },
+    componentDirectory: { parent: "configHome", segments: [{ param: "component" }], kind: "directory" },
+    componentAddress: { parent: "componentDirectory", segments: pathSegments, kind: addressKind },
+  });
+  const parameters: Record<string, string> = { component };
+  relativeSegments.forEach((segment, index) => {
+    parameters[`relative-${index}`] = segment;
+  });
+  const context: PathResolutionContext<string> = {
+    platform: process.platform === "win32" ? "win32" : "posix",
+    cwd: currentDirectory,
+    home: os.homedir(),
+    // CLI Canon requires absolute roots; normalize the override against the explicit cwd first to keep the old relative-env behavior.
+    env: configuredHome === undefined ? {} : { INARI_CONFIG_HOME: path.resolve(currentDirectory, configuredHome) },
+    parameters,
+  };
+  return resolvePaths(compilePaths(declarations), context);
 }
 
 function assertRecord(value: unknown, message: string): Record<string, unknown> {
@@ -511,21 +553,21 @@ function canonicalJson(value: unknown): string {
     .join(",")}}`;
 }
 
-function safeFileName(relativePath: string): { readonly directory: string; readonly fileName: string } {
-  const parts = relativePath.split(/[\\/]/u);
-  if (parts.length === 0 || parts.some((part) => !SAFE_SEGMENT.test(part) || part === "." || part === "..")) {
-    throw invalid("Local configuration path is invalid.");
-  }
-  return { directory: parts.slice(0, -1).join(path.sep), fileName: parts.at(-1) as string };
+function safeFileName(relativePath: string): {
+  readonly directorySegments: readonly string[];
+  readonly fileName: string;
+} {
+  const parts = safeRelativeSegments(relativePath);
+  return { directorySegments: parts.slice(0, -1), fileName: parts.at(-1) as string };
 }
 
 function componentDirectoryPath(
   component: LocalComponent,
-  subdirectory: string,
+  subdirectorySegments: readonly string[],
   environment: NodeJS.ProcessEnv,
 ): string {
-  const base = localComponentDirectory(component, environment);
-  return subdirectory.length === 0 ? base : path.join(base, subdirectory);
+  if (!COMPONENT_NAMES.has(component)) throw invalid("Unknown local component.");
+  return resolveLocalConfigPaths(component, subdirectorySegments, environment).componentAddress;
 }
 
 function secureFilePath(directory: DirectoryHandle, fileName: string): string {
@@ -584,8 +626,8 @@ export function readLocalJson<T>(
   validator: LocalConfigValidator<T>,
   environment: NodeJS.ProcessEnv = process.env,
 ): T | undefined {
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const { directorySegments, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directorySegments, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => readExistingJson(handle, fileName, validator)),
   );
@@ -630,8 +672,8 @@ export function readLocalPrivateFile(
   relativePath: string,
   environment: NodeJS.ProcessEnv = process.env,
 ): Buffer | undefined {
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const { directorySegments, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directorySegments, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => readExistingPrivateFile(handle, fileName)),
   );
@@ -645,8 +687,8 @@ function readExistingLocalJsonWithVisibility<T>(
   visibility: "private" | "public",
   normalize = true,
 ): T | undefined {
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const { directorySegments, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directorySegments, environment);
   const handle = openSecureDirectory(directoryPath, false, true, normalize);
   if (handle === undefined) return undefined;
   try {
@@ -772,8 +814,8 @@ export function writeLocalJson<T>(
   environment: NodeJS.ProcessEnv = process.env,
 ): T {
   const validated = validator(value);
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const { directorySegments, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directorySegments, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => {
       const existing = readExistingJson(handle, fileName, validator);
@@ -819,8 +861,8 @@ export function createLocalPrivateFile(
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_LOCAL_PRIVATE_FILE_BYTES) {
     throw new LocalControlError("LOCAL_CONTROL_CONFIG_TOO_LARGE", "Local private file size is invalid.");
   }
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const { directorySegments, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directorySegments, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => {
       if (readExistingPrivateFile(handle, fileName) !== undefined) return "exists";
@@ -853,8 +895,8 @@ export function replaceLocalJsonIfCurrent<T>(
 ): T {
   const validated = validator(next);
   const expectedValue = expected === undefined ? undefined : validator(expected);
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const { directorySegments, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directorySegments, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => {
       const existing = readExistingJson(handle, fileName, validator);
@@ -889,8 +931,8 @@ export function replaceLocalJson<T>(
   environment: NodeJS.ProcessEnv = process.env,
 ): T {
   const validated = validator(value);
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const { directorySegments, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directorySegments, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => {
       persistReplaceJson(handle, fileName, validated);
@@ -914,8 +956,8 @@ export function removeLocalJson<T>(
   shouldRemove: (value: T) => boolean,
   environment: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  const { directory, fileName } = safeFileName(relativePath);
-  const directoryPath = componentDirectoryPath(component, directory, environment);
+  const { directorySegments, fileName } = safeFileName(relativePath);
+  const directoryPath = componentDirectoryPath(component, directorySegments, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => {
       const existing = readExistingJson(handle, fileName, validator);
@@ -973,8 +1015,8 @@ export function bindLocalCliAdmissionRoute(
   });
   const admission = candidate.admission;
   if (admission === undefined) throw invalid("CLI Admission route is invalid.");
-  const { directory, fileName } = safeFileName("config.json");
-  const directoryPath = componentDirectoryPath("cli", directory, environment);
+  const { directorySegments, fileName } = safeFileName("config.json");
+  const directoryPath = componentDirectoryPath("cli", directorySegments, environment);
   return withSecureDirectory(resolveConfigHome(environment), () =>
     withSecureDirectory(directoryPath, (handle) => {
       const existing = readExistingJson(handle, fileName, validateLocalCliConfig);
