@@ -878,6 +878,115 @@ function certifyInstalledContractPackage(consumer, packageName) {
   console.log("installed contract runtime verified: public package subpath resolves and validates Draft 2020-12");
 }
 
+function certifyInstalledSchemaNativeContractPackage(consumer, packageName) {
+  const smokePath = path.join(consumer, "schema-native-contract-runtime.mjs");
+  const source = String.raw`
+import assert from "node:assert/strict";
+import {
+  compileEffectiveArtifactContract,
+  materializeSemanticArtifact,
+  parseArtifactContract,
+  projectArtifactContractToIssueForm,
+} from "__PACKAGE_NAME__/contract";
+import { parseExistingPullRequestArtifact, renderPullRequestArtifact } from "__PACKAGE_NAME__/artifact";
+
+const provenance = {
+  authority: "repository-default-branch",
+  repository: {
+    host: "github.com",
+    owner: "example",
+    name: "inari",
+    nameWithOwner: "example/inari",
+    repositoryId: "1",
+  },
+  ref: "main",
+  treeSha: "tree-sha",
+  source: {
+    path: ".github/inari/pull-requests/structured-verification.json",
+    ref: "main",
+    sha: "blob-sha",
+    digest: "source-digest",
+  },
+};
+const schema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  properties: {
+    summary: { type: "string", minLength: 1 },
+    context: {
+      type: "object",
+      properties: { component: { type: "string" }, rationale: { type: "string" } },
+      required: ["component", "rationale"],
+      additionalProperties: false,
+    },
+    verification: {
+      type: "array",
+      minItems: 1,
+      maxItems: 4,
+      items: {
+        type: "object",
+        properties: {
+          scope: { type: "string", minLength: 1 },
+          command: { type: "string", minLength: 1 },
+          outcome: { type: "string", enum: ["passed", "failed", "blocked"] },
+          summary: { type: "string", minLength: 1 },
+        },
+        required: ["scope", "command", "outcome", "summary"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["summary", "context", "verification"],
+  additionalProperties: false,
+};
+const sourceContract = {
+  version: "2",
+  kind: "pull_request",
+  id: "structured-verification",
+  schema,
+  bindings: {
+    "/summary": { authority: { kind: "supplied" } },
+    "/context": { authority: { kind: "supplied" } },
+    "/verification": { authority: { kind: "supplied" }, presentation: { control: "checklist" } },
+  },
+};
+const supplied = {
+  summary: "Keep the verification record structured",
+  context: {
+    component: "schema-native artifact pipeline",
+    rationale: "Preserve the verification facts as typed values.",
+  },
+  verification: [
+    {
+      scope: "nested contract materialization",
+      command: "node --test --import tsx test/schema-native-contract.test.mjs",
+      outcome: "passed",
+      summary: "Nested verification data survives PR Markdown projection and observation.",
+    },
+  ],
+};
+const contract = parseArtifactContract(sourceContract);
+const effective = compileEffectiveArtifactContract(contract, { provenance });
+assert.deepEqual(effective.inputSchema.properties.context, schema.properties.context);
+assert.deepEqual(effective.inputSchema.properties.verification, schema.properties.verification);
+const semantic = materializeSemanticArtifact(effective, supplied);
+assert.deepEqual(semantic.values, supplied);
+const body = renderPullRequestArtifact(contract, semantic.values);
+assert.deepEqual(parseExistingPullRequestArtifact(contract, body).values, supplied);
+assert.throws(
+  () => projectArtifactContractToIssueForm({ ...sourceContract, kind: "issue", id: "structured-issue" }),
+  (error) => error.violations?.some(
+    (violation) => violation.code === "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY",
+  ) === true,
+);
+`;
+  fs.writeFileSync(smokePath, source.replaceAll("__PACKAGE_NAME__", packageName));
+  run(process.execPath, [smokePath], { cwd: consumer });
+  console.log(
+    "installed schema-native contract verified: public materialization preserves structured PR Markdown round trip and Issue Form rejects unsupported values",
+  );
+}
+
 function certifyInstalledImplementationTaskTerminationPackage(consumer, packageName) {
   const smokePath = path.join(consumer, "implementation-task-termination-runtime.mjs");
   const source = String.raw`
@@ -1527,6 +1636,7 @@ async function certifyInstalledSetupConsole(tarballPath, packageName) {
     certifyInstalledCli(consumer, installed, packageName);
     await certifyArtifactReconciliationCli(path.join(installed, "dist", "index.js"), consumer, "packed installed");
     certifyInstalledContractPackage(consumer, packageName);
+    certifyInstalledSchemaNativeContractPackage(consumer, packageName);
     certifyInstalledImplementationTaskTerminationPackage(consumer, packageName);
     certifyInstalledArtifactReconciliationPackage(consumer, packageName);
     const environment = { ...process.env, INARI_CONFIG_HOME: path.join(root, "config") };
