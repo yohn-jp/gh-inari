@@ -5423,7 +5423,11 @@ test("#1213 an Implementation Session issues and shows only its current canonica
   });
   // Two same-repository Sources (no primary) and one cross-repository Source.
   let currentSources: Record<string, unknown>[] = [source(1208), source(1209), source(7, "987654321")];
-  const evidenceRequests: { issue?: number; implementationIssue?: number }[] = [];
+  const evidenceRequests: {
+    issue?: number;
+    implementationIssue?: number;
+    taskTerminationAuthorization?: boolean;
+  }[] = [];
   const issuedRoots: number[] = [];
   const trust = {
     repository: { repositoryHost: "github.com", repositoryId: SOURCE_REPOSITORY_ID, nameWithOwner: "acme/inari" },
@@ -5444,10 +5448,14 @@ test("#1213 an Implementation Session issues and shows only its current canonica
     readBranchPolicy: async () => sourceBranchPolicy(currentSources),
     readEvidence: async (request) => {
       if (request.issue === undefined) return trust;
-      evidenceRequests.push({ issue: request.issue, implementationIssue: request.implementationIssue });
+      evidenceRequests.push({
+        issue: request.issue,
+        implementationIssue: request.implementationIssue,
+        taskTerminationAuthorization: request.taskTerminationAuthorization !== undefined,
+      });
       const projection =
         request.issue === SOURCE_IMPLEMENTATION ? implementationProjection() : sourceChangeProjection(request.issue);
-      return {
+      const evidence = {
         ...trust,
         change: projection,
         implementation: sourceImplementationEvidence(
@@ -5457,6 +5465,16 @@ test("#1213 an Implementation Session issues and shows only its current canonica
           currentImplementationBaseEvidence,
         ),
       };
+      return request.taskTerminationAuthorization === undefined
+        ? evidence
+        : {
+            ...evidence,
+            taskTermination: {
+              status: "absent",
+              provenance: { source: "github-git-data", commit: "a".repeat(40) },
+              recordProvenance: [],
+            },
+          };
     },
     readGovernedContract: async () =>
       compileRepositoryGovernedContract(sourcePullRequestAdapter() as never, "pr", "default"),
@@ -5641,7 +5659,10 @@ test("#1213 an Implementation Session issues and shows only its current canonica
     const removed = await captureCli(["change", "show", "1209", "--json"], environment, dependencies);
     assert.notEqual(removed.exitCode, 0);
     assert.equal(JSON.parse(removed.stdout).error.details.reason, "ADMISSION_TASK_MISMATCH");
-    assert.deepEqual(evidenceRequests, [{ issue: 1209, implementationIssue: SOURCE_IMPLEMENTATION }]);
+    assert.deepEqual(evidenceRequests, [
+      { issue: 1209, implementationIssue: SOURCE_IMPLEMENTATION, taskTerminationAuthorization: false },
+      { issue: 1209, implementationIssue: SOURCE_IMPLEMENTATION, taskTerminationAuthorization: true },
+    ]);
     const kept = await captureCli(["change", "show", "1208", "--json"], environment, dependencies);
     assert.equal(kept.exitCode, 0, kept.stdout);
     assert.deepEqual(issuedRoots, [1208, 1209]);

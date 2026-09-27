@@ -397,11 +397,21 @@ test("Admission maps active Session, derives bounded branch authorization, and n
         runtimeAuthority: authority,
       };
       if (request.issue === undefined) return base;
-      return {
+      const evidence = {
         ...base,
         change: changeProjection(),
         implementation: implementationEvidence(),
       };
+      return request.taskTerminationAuthorization === undefined
+        ? evidence
+        : {
+            ...evidence,
+            taskTermination: {
+              status: "absent",
+              provenance: { source: "github-git-data", commit: "a".repeat(40) },
+              recordProvenance: [],
+            },
+          };
     },
   };
   const executor = createLocalExecutorHttpServer(executorOptions);

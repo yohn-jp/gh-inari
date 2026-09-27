@@ -8,12 +8,15 @@ import { createDelegatorRecord } from "../agent-authority/delegator-operations.j
 import { delegatorPublicKeyFingerprint, generateDelegatorKeyPair } from "../agent-authority/delegator-key.js";
 import { DelegatorTrustError } from "../agent-authority/delegator-trust.js";
 import { LocalExecutorError } from "../executor/errors.js";
+import { projectChangeFromGitHubEvidence } from "../change.js";
+import { renderImplementationIssueBody } from "../implementation-contract.js";
 import { createLocalAdmissionClient, LocalAdmissionClientError } from "../cli/runtime/admission-client.js";
 import { createLocalExecutorHttpServer } from "./executor-server.js";
 import { LocalExecutorClient } from "./executor-client.js";
 import { createLocalAdmissionHttpServer } from "./admission-server.js";
 import { createLocalSessionBinding, type LocalSessionBinding } from "./session-binding.js";
 import type { LocalAdmissionConfig, LocalExecutorConfig } from "./config.js";
+import type { LocalExecutorEvidenceRequest } from "./executor-http.js";
 
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 const REPOSITORY = { id: "123456789", name: "acme/inari" };
@@ -64,14 +67,88 @@ async function harness(mode: { current: Mode }, clock = { now: NOW }) {
       if (mode.current.repository !== undefined) throw mode.current.repository();
       return { repositoryHost: "github.com", repositoryId: REPOSITORY.id, nameWithOwner: REPOSITORY.name };
     },
-    readEvidence: async () => {
+    readEvidence: async (request: LocalExecutorEvidenceRequest) => {
       calls.evidence += 1;
       if (mode.current.evidence !== undefined) {
         const value = mode.current.evidence();
         if (value instanceof Error || (typeof value === "object" && value !== null && "code" in value)) throw value;
         return value;
       }
-      return trustEvidence();
+      if (request.issue === undefined || request.implementationIssue === undefined) return trustEvidence();
+      const repository = {
+        repositoryHost: "github.com" as const,
+        repositoryId: REPOSITORY.id,
+        repository: REPOSITORY.name,
+      };
+      const reference = { ...repository, number: request.implementationIssue };
+      const branch = `feat/${request.implementationIssue}-runtime-diagnostics`;
+      const baseHead = "a".repeat(40);
+      const body = renderImplementationIssueBody({
+        version: 1,
+        kind: "implementation",
+        repository,
+        sources: [reference],
+        objective: "Exercise current Admission evidence.",
+        nonGoals: ["Persisting derived scope."],
+        architecture: {
+          decision: "Admission rereads task evidence.",
+          affectedComponents: ["Admission"],
+          invariants: ["Executor identity is pinned."],
+          compatibilityConstraints: [],
+        },
+        scope: { readOnly: ["src/**"], write: ["src/**"], create: ["src/**"], delete: [], deny: [] },
+        constraints: { prohibitedOperations: [], immutableAreas: [], prerequisites: [] },
+        verification: {
+          acceptanceCriteria: ["Admission denies terminated task evidence."],
+          targetedTests: [],
+          requiredChecks: [],
+          postconditions: [],
+        },
+        execution: {
+          baseBranch: "main",
+          baseRevision: baseHead,
+          baseFreshness: baseHead,
+          branch,
+          dependencies: [],
+        },
+      });
+      const projection = projectChangeFromGitHubEvidence({
+        change: {
+          repositoryHost: "github.com",
+          repositoryId: REPOSITORY.id,
+          rootIssue: request.issue,
+        },
+        branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+        naming: { type: "feat", slug: "runtime-diagnostics" },
+        baseBranch: "main",
+        evidence: {
+          issue: { status: "available", value: { number: request.issue, state: "open" } },
+          branches: { status: "available", value: [] },
+          pullRequests: { status: "available", value: [] },
+        },
+      });
+      const evidence = {
+        ...trustEvidence(),
+        change: projection,
+        implementation: {
+          implementation: reference,
+          issue: { reference, body },
+          repository,
+          base: { branch: "main", revision: baseHead, freshness: baseHead },
+          readiness: { evidence: [] },
+          change: projection,
+        },
+      };
+      return request.taskTerminationAuthorization === undefined
+        ? evidence
+        : {
+            ...evidence,
+            taskTermination: {
+              status: "absent",
+              provenance: { source: "github-git-data", commit: baseHead },
+              recordProvenance: [],
+            },
+          };
     },
     execute: async (execution) => {
       calls.execute += 1;
@@ -269,7 +346,7 @@ test("execution separates Session state, trust, and evidence failures without di
     assert.equal(trust.details.reason, "RUNTIME_AUTHORITY_NOT_FOUND");
     assert.equal(runtime.calls.execute, 0);
 
-    mode.current = {};
+    mode.current = { evidence: () => runtime.trustEvidence() };
     const malformed = await failure(runtime.client.executeIntent(intent("change.ready") as never, ready.sessionId));
     assert.equal(malformed.code, "ADMISSION_INTERNAL_FAILURE");
     assert.equal(malformed.details.reason, "ADMISSION_EVIDENCE_MALFORMED");
