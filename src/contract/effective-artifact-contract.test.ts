@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compileEffectiveArtifactContract } from "./effective-artifact-contract.js";
-import { parseArtifactContract, serializeArtifactContract } from "./artifact-contract.js";
+import {
+  compileEffectiveArtifactContract,
+  EffectiveArtifactContractCompilationError,
+} from "./effective-artifact-contract.js";
+import {
+  parseArtifactContract,
+  SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+  serializeArtifactContract,
+} from "./artifact-contract.js";
 import type { ArtifactContractProvenance } from "./ir.js";
 import type { JsonSchema } from "./schema.js";
 
@@ -178,6 +185,26 @@ function schemaAccepts(schema: JsonSchema, value: unknown): boolean {
     return schemaAccepts(rule, value);
   });
 }
+
+test("effective compilation rejects schema-native contracts until schema filtering is supported", () => {
+  const contract = parseArtifactContract({
+    version: SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+    kind: "issue",
+    id: "schema-native",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { summary: { type: "string" } },
+      additionalProperties: false,
+    },
+    bindings: { "/summary": { authority: { kind: "supplied" } } },
+  });
+
+  assert.throws(
+    () => compileEffectiveArtifactContract(contract, { provenance }),
+    EffectiveArtifactContractCompilationError,
+  );
+});
 
 test("required and optional supplied values compile into a closed exact input schema", () => {
   const effective = compile(authorityContract);
