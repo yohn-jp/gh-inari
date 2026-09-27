@@ -269,8 +269,11 @@ The Source integration acceptance is a versioned record finalized by an
 authorized independent reviewer. It binds immutable repository and Source
 identities, the governed Source integration PR and exact head SHA, the current
 Source criteria version/digest, reviewer identity and current authority, and
-an explicit result for each criterion. Current repository policy determines
-reviewer independence. Change `ACCEPTED` checks, reviews, governance, and
+an explicit result for each criterion. The protected-ref
+[Source Acceptance Policy](./SOURCE_ACCEPTANCE_POLICY.md) alone authorizes the
+reviewer; independence is checked against the Source requester, integration
+PR author, and complete exact-head candidate contributors at every use.
+Change `ACCEPTED` checks, reviews, governance, and
 merge-policy evidence remains necessary but does not itself prove these
 criteria. Source and Epic composition consume the current Source acceptance
 result separately from task conformance and Change policy acceptance.
@@ -345,7 +348,9 @@ checks. A Source being closed elsewhere does not magically certify a task.
 Source completion fails closed if the acceptance record is missing,
 unavailable, invalid, stale, mismatched, dismissed, or revoked, including a
 changed integration head or criteria version/digest or lost reviewer authority
-or independence. Historical Source data remains readable with bounded
+or independence. The current protected-ref policy and exact candidate
+contributor evidence must be rechecked when the record is consumed. Historical
+Source data remains readable with bounded
 classification, but without a current versioned record it cannot be reported
 as accepted. The record grants no merge or provider mutation authority;
 neither Runtime nor Relay receives a GitHub user token to obtain it.

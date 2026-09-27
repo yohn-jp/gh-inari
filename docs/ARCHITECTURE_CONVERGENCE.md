@@ -59,6 +59,12 @@ ready/merge admission, provenance, branch enforcement, and verification cases.
 It replaces new Implementation-root Change assumptions with distinct Source
 and task publication identities.
 
+SOURCE_ACCEPTANCE_POLICY fixes the approved protected-ref reviewer allowlist,
+independence against the complete exact-head candidate, and current-evidence
+rules. It is the domain contract for bounded policy loading, reviewer
+evaluation, and Source acceptance carrier consumption; this documentation
+decision does not claim those consumers are implemented.
+
 XSTATE_CHANGE_MACHINE preserves transition parity, operation graphs, bounded
 context, actor responsibilities, ready/abort/issuance Saga, error mapping,
 non-authoritative snapshots, production graph coverage, and public API

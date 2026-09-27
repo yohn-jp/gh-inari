@@ -82,9 +82,11 @@ For the governed Source integration candidate, an authorized independent
 reviewer finalizes a repository-owned, versioned Source acceptance record. It
 binds the immutable repository and Source identities, governed integration PR,
 exact head SHA, current Source criteria version/digest, reviewer identity and
-authority, and an explicit result for every criterion. Current repository
-policy determines reviewer authorization and independence. The App and Hosted
-cannot approve their own PR or mint this reviewer acceptance.
+authority, and an explicit result for every criterion. The protected-ref
+[Source Acceptance Policy](./SOURCE_ACCEPTANCE_POLICY.md) is the sole reviewer
+authorization source and defines independence against the Source requester,
+integration PR author, and complete exact-head candidate contributors. The
+App, bot, and Hosted cannot be Source acceptance reviewers.
 
 ### 4.3 Change
 
@@ -255,7 +257,8 @@ record whose results satisfy every Source criterion. A missing, unavailable,
 invalid, mismatched, stale, dismissed, or revoked record fails closed. A changed
 integration PR head or Source criteria version/digest, or lost reviewer
 authorization or independence, invalidates its use for completion. Recheck
-these bindings and current repository policy when the record is used; neither
+these bindings, current protected-ref Source Acceptance Policy, and complete
+candidate contributor evidence whenever the record is used; neither
 an earlier review nor a branch name alone certifies the current candidate.
 The record grants no merge or provider mutation authority.
 
