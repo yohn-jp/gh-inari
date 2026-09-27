@@ -204,3 +204,10 @@ check is never reported as passed.
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+## Project policies
+
+- [Code of Conduct](./CODE_OF_CONDUCT.md)
+- [Contributing](./CONTRIBUTING.md)
+- [MIT License](./LICENSE)
+- [Security Policy](./SECURITY.md)
+
