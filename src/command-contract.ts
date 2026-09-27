@@ -915,6 +915,90 @@ const BRANCH_COMMAND_COMPATIBILITY_PROJECTIONS: readonly CommandDefinition[] = (
   };
 });
 
+const ARTIFACT_VIEW_NUMBER = z
+  .string()
+  .regex(/^[1-9]\d*$/u, "expected a positive integer")
+  .transform(Number)
+  .refine(Number.isSafeInteger, "expected a safe positive integer");
+
+function artifactViewCommand(route: readonly ["issue" | "pr", "view"], summary: string) {
+  return {
+    route,
+    summary,
+    examples: [`${AGENT_INVOCATION_CONTRACT.canonical} ${route.join(" ")} <number>`],
+    input: {
+      number: canonPositional(ARTIFACT_VIEW_NUMBER, { metavar: "number" }),
+      repository: canonOption("--repository", z.string(), {
+        aliases: ["-R"],
+        metavar: "repository",
+        description: COMMAND_OPTIONS_BY_ID.repository.description,
+        placement: "after-route",
+      }),
+    },
+    result: z.number().int().nonnegative(),
+  };
+}
+
+/** Canon is the sole Issue/PR View route and argument grammar owner. */
+export const ARTIFACT_VIEW_COMMANDS = defineCommands({
+  "issue.view": artifactViewCommand(
+    ["issue", "view"],
+    "View bounded provider content with semantic interpretation beside it.",
+  ),
+  "pr.view": artifactViewCommand(
+    ["pr", "view"],
+    "View bounded provider content with semantic interpretation beside it.",
+  ),
+});
+
+type ArtifactViewCommandId = keyof typeof ARTIFACT_VIEW_COMMANDS;
+
+function artifactViewOptionId(key: string): OptionId {
+  if (key === "repository") return "repository";
+  throw new Error(`Unsupported Canon artifact View option field: ${key}`);
+}
+
+/**
+ * `projectCommandContract`, Skill references, and legacy Core Help still consume
+ * CommandDefinition. Keep this projection derived from Canon until those
+ * consumers use Canon-native projections; it is not a route or grammar owner.
+ */
+const ARTIFACT_VIEW_COMMAND_COMPATIBILITY_PROJECTIONS: readonly CommandDefinition[] = (
+  Object.keys(ARTIFACT_VIEW_COMMANDS) as ArtifactViewCommandId[]
+).map((id) => {
+  const canonical = ARTIFACT_VIEW_COMMANDS[id];
+  const optionFields = Object.entries(canonical.input).flatMap(([key, field]) =>
+    field.kind === "option" ? [{ key, field }] : [],
+  );
+  const positionalField = Object.entries(canonical.input).find(([, field]) => field.kind === "positional");
+  const optionIds: OptionId[] = ["help", "json"];
+  for (const { key } of optionFields) {
+    const optionId = artifactViewOptionId(key);
+    if (!optionIds.includes(optionId)) optionIds.push(optionId);
+  }
+  const positionalSyntax =
+    positionalField === undefined
+      ? undefined
+      : `${positionalField[1].required ? "<" : "["}${positionalField[1].metavar ?? positionalField[0]}${positionalField[1].required ? ">" : "]"}`;
+
+  return {
+    id,
+    domain: canonical.route[0],
+    operation: canonical.route.slice(1).join("-"),
+    path: canonical.route,
+    ...(positionalSyntax === undefined ? {} : { positionalSyntax }),
+    summary: canonical.summary,
+    optionIds,
+  };
+});
+
+const ISSUE_VIEW_COMMAND_COMPATIBILITY_PROJECTION = ARTIFACT_VIEW_COMMAND_COMPATIBILITY_PROJECTIONS.filter(
+  (entry) => entry.id === "issue.view",
+);
+const PR_VIEW_COMMAND_COMPATIBILITY_PROJECTION = ARTIFACT_VIEW_COMMAND_COMPATIBILITY_PROJECTIONS.filter(
+  (entry) => entry.id === "pr.view",
+);
+
 const command = (
   id: CommandId,
   domain: CommandDomain,
@@ -1184,15 +1268,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     [...EXISTING_OPTIONS],
     "<number>",
   ),
-  command(
-    "issue.view",
-    "issue",
-    "view",
-    ["issue", "view"],
-    "View bounded provider content with semantic interpretation beside it.",
-    OBSERVATION_OPTIONS,
-    "<number>",
-  ),
+  ...ISSUE_VIEW_COMMAND_COMPATIBILITY_PROJECTION,
   command(
     "issue.observe",
     "issue",
@@ -1391,15 +1467,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     [...EXISTING_OPTIONS],
     "<number>",
   ),
-  command(
-    "pr.view",
-    "pr",
-    "view",
-    ["pr", "view"],
-    "View bounded provider content with semantic interpretation beside it.",
-    OBSERVATION_OPTIONS,
-    "<number>",
-  ),
+  ...PR_VIEW_COMMAND_COMPATIBILITY_PROJECTION,
   command(
     "pr.observe",
     "pr",

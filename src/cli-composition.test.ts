@@ -162,3 +162,35 @@ test("derived delegated route owners resolve a product route and a prefix route"
     },
   ]);
 });
+
+test("Issue and PR View routes use Canon grammar and leave the legacy delegated source", async () => {
+  let delegatedCalls = 0;
+  const delegated = createLegacyDelegatedCommandSource(async () => {
+    delegatedCalls += 1;
+    return { exitCode: 0, stdout: "delegated\n", stderr: "" };
+  });
+  const compiled = product();
+
+  for (const [domain, route] of [
+    ["issue", ["issue", "view"]],
+    ["pr", ["pr", "view"]],
+  ] as const) {
+    assert.equal(
+      delegated.commands.some((command) => command.route.join(" ") === route.join(" ")),
+      false,
+      route.join(" "),
+    );
+
+    const help = await runNodeCli(compiled, [...route, "--help"], { delegatedSources: [delegated] });
+    assert.equal(help.exitCode, 0);
+    assert.match(help.stdout, new RegExp(`Usage: inari ${domain} view <number>`));
+    assert.match(help.stdout, /--repository/);
+
+    const invalid = await executeNodeCli(compiled, [...route, "not-a-number"], {
+      delegatedSources: [delegated],
+    });
+    assert.notEqual(invalid.status, "success", route.join(" "));
+  }
+
+  assert.equal(delegatedCalls, 0);
+});

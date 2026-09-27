@@ -444,7 +444,12 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     delegatedSources: [delegated],
     resultPresenter: {
       success: (execution) => {
-        if (execution.commandId === "branch.check" || execution.commandId === "branch.semantic.check") {
+        if (
+          execution.commandId === "branch.check" ||
+          execution.commandId === "branch.semantic.check" ||
+          execution.commandId === "issue.view" ||
+          execution.commandId === "pr.view"
+        ) {
           return execution.result === 0 ? textOutput("") : cliFailure("domain", "", execution.result, "stdout");
         }
         return projectArtifactReconciliationResult(execution.result as ArtifactReconciliationResult);

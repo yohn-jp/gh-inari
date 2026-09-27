@@ -5,6 +5,7 @@ import {
   RUNTIME_CAPABILITIES,
   COMMAND_CONTRACT_ID,
   COMMAND_CONTRACT_VERSION,
+  ARTIFACT_VIEW_COMMANDS,
   BRANCH_OBSERVATION_COMMANDS,
   INARI_COMMANDS,
   commandExample,
@@ -187,6 +188,33 @@ test("branch observation contract keeps ordinary input optional and semantic inp
     projected.options.find((option) => option.id === "repository")?.aliases,
     getOption("repository").aliases,
   );
+});
+
+test("View discovery, Skill, and Core Help projection derive from Canon route declarations", () => {
+  for (const [id, route] of [
+    ["issue.view", ["issue", "view"]],
+    ["pr.view", ["pr", "view"]],
+  ] as const) {
+    const canonical = ARTIFACT_VIEW_COMMANDS[id];
+    const compatibility = INARI_COMMANDS.find((entry) => entry.id === id);
+    assert.ok(compatibility);
+    assert.deepEqual(canonical.route, route);
+    assert.deepEqual(compatibility.path, canonical.route);
+    assert.equal(compatibility.summary, canonical.summary);
+    assert.equal(compatibility.positionalSyntax, "<number>");
+    assert.deepEqual(compatibility.optionIds, ["help", "json", "repository"]);
+    assert.equal(canonical.input.number.kind, "positional");
+    assert.equal(canonical.input.number.required, true);
+    assert.equal(canonical.input.number.metavar, "number");
+    assert.equal(canonical.input.repository.kind, "option");
+    assert.equal(canonical.input.repository.placement, "after-route");
+    assert.deepEqual(
+      projectCommandHelp(route).commands.map((entry) => entry.id),
+      [id],
+    );
+    assert.equal(commandUsage(compatibility), `${route.join(" ")} <number> [--repository <repository>]`);
+    assert.equal(commandExample(id), `inari ${route.join(" ")} <number>`);
+  }
 });
 
 test("pr publish exposes the explicit idempotent publication request", () => {

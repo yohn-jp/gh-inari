@@ -1331,6 +1331,20 @@ function certifyInstalledCli(consumer, installed, packageName) {
     throw new Error(`installed CLI Canon help shell failed: ${help.stdout}${help.stderr}`);
   }
 
+  for (const domain of ["issue", "pr"]) {
+    const viewHelp = invoke([domain, "view", "--help"]);
+    if (
+      viewHelp.status !== 0 ||
+      viewHelp.stderr !== "" ||
+      !viewHelp.stdout.includes(`Usage: inari ${domain} view <number>`) ||
+      !viewHelp.stdout.includes("--repository")
+    ) {
+      throw new Error(
+        `installed ${domain} View route did not resolve through CLI Canon: ${viewHelp.stdout}${viewHelp.stderr}`,
+      );
+    }
+  }
+
   const noCommand = invoke(["--json"]);
   if (noCommand.status === 0) throw new Error("installed CLI Canon accepted a no-command invocation");
   let usage;
