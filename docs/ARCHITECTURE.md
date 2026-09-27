@@ -161,12 +161,28 @@ Source Change publication and Implementation leaf publication are different
 objects. An Epic is a composed tracking/integration boundary, not an
 Implementation Session.
 
+Task termination is a separate Implementation lifecycle event. Only an
+explicitly authorized Runtime operator may finalize a versioned termination
+record owned by the repository, bound to the immutable repository, the
+Implementation, its current authorization digest, and accepted base evidence.
+Aborting a Source Change or closing a Session does not terminate the task.
+Closing an Issue or a Session's own abort assertion is not task-termination
+authority.
+
 ### ARC-03: current evidence limits every grant
 
 A delegated Source operation requires the Source in both the signed
 Implementation Source set and the freshly read current Source set. An added
 Source does not widen an existing Session; a removed Source is no longer
 admissible.
+
+Admission resolves current task-termination evidence for every task-bound
+operation, including operations from an already issued Session. A successful
+authoritative read showing no termination event means the task is not
+terminated; it does not replace other Admission checks. A terminated task
+causes its existing Sessions to fail closed. An unavailable, failed, invalid,
+or mismatched read denies. Hosted eligibility does not grant the Runtime
+operator permission to finalize the record.
 
 The #1213 task-bound `change.implement` compatibility claim remains restricted
 to Implementation publication/branch-side composition. It is not an

@@ -69,8 +69,26 @@ Issue or newer timestamp is not enough.
 
 `aborted` requires the task's applicable termination evidence. Source Change
 abort and Implementation task termination must not be equated merely because
-a task contributes to that Source. The full identity/lifecycle migration must
-prove the join rather than reusing an old Implementation-root assumption.
+a task contributes to that Source. The termination record binds directly to
+the task authorization identity in §6.1; Source lifecycle is not a proxy.
+
+The canonical task evidence is a versioned termination record owned by the
+repository and finalized by an explicitly authorized Runtime operator. It is
+bound to the immutable repository, Implementation Issue, current canonical
+body authorization digest, and accepted base evidence. Issue closure and a
+Session's self-asserted abort do not finalize it. A Source Change abort and a
+Session close remain their own lifecycle events.
+
+Admission resolves the authoritative current termination state for every
+task-bound operation. A successful read proving that no termination event is
+recorded means only that the task is not terminated; other Admission checks
+still apply. Once the task is terminated, every existing Session for that
+task fails closed. A failed or unavailable read, or invalid or mismatched
+current evidence, denies the operation. The termination producer uses the
+Runtime's authorized operation and Executor-owned repository effect; the
+Admission evidence reader and Implementation lifecycle projection consume the
+resulting current evidence. This contract does not prescribe a record path or
+wire encoding.
 
 ### 2.3 Immutable authorization event
 
@@ -296,9 +314,24 @@ Supersession records a new identity and explicit relationship; it does not
 widen the old grant. Abort preserves inspectable provenance while removing
 current execution authority according to the task's actual lifecycle.
 
-The Source/task termination join must be explicit in the implementation.
-The wider Source may have other active Implementations, so one task's state
-cannot be inferred solely from another child's or the Source's flag.
+Task termination is finalized only by an explicitly authorized Runtime
+operator recording the repository-owned versioned task event against the
+current authorization digest and accepted base. Source Change abort terminates
+that Change only; Session close closes that Session only. Neither Issue closure
+nor a Session's self-asserted abort finalizes task termination. Admission
+rereads current task-termination evidence for each task-bound operation. A
+successful read proving no termination event is recorded establishes only that
+the task is not terminated; all other current checks still apply. Every
+Session for a terminated task fails closed. A failed or unavailable read, or
+invalid or mismatched current evidence, denies. A Source may have other active
+Implementations, so one task's state cannot be inferred from another task or
+the Source's flag.
+
+The producer seam is the operator-authorized Runtime lifecycle operation and
+its Executor-verified repository effect. The consumer seams are Admission's
+per-operation current-evidence read and the Implementation lifecycle
+projection. They must compose the same repository, Implementation, current
+authorization digest, and accepted base binding.
 
 ## 10. Authoring and review
 
@@ -320,6 +353,12 @@ or acceptance requirements return to the owner/design review.
 Historical identity is preserved during observation. No record is re-rooted,
 reparented, widened, or deleted merely because the target architecture changed.
 Bounded readers adapt only proven semantics into the canonical model.
+
+The current `implementation-lifecycle.ts` projection accepts a bound
+ABORTED Change identity as Implementation `aborted` evidence. Preserve that
+behavior only as a bounded reader for historical data during migration. New
+task termination and Admission must use the repository-owned versioned task
+record; the old Change identity is not new task-termination authority.
 
 The old Implementation-root execution model is not retained as a parallel new
 execution architecture. Migrate Source/task/publication joins across all
