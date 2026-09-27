@@ -58,6 +58,18 @@ semantic task/capability/operation authorization. It consumes Executor's
 bounded evidence and execution ports. It holds no GitHub user/provider token,
 App key, or Authority private signing key.
 
+For privileged local operator calls, the Runtime owner authentication seam
+verifies the fresh challenge signature and replay status against the
+versioned operator-key registry. It passes Admission bounded authenticated
+subject evidence for the verified immutable key ID and challenge context.
+Admission rereads current enrollment and revocation state for each privileged
+operation. The public-key registry remains Runtime-owner configuration; the
+operator-held private key and reusable credentials do not enter Admission,
+Console, or Executor. Console may present the challenge and relay its signed
+response without becoming an authentication or credential owner. Expired,
+replayed, audience-mismatched, context-mismatched, unavailable, or revoked
+proof denies.
+
 A remote Repository Access Assertion is another bounded caller-evidence
 input, not permission to bypass local policy or auto-issue full capabilities.
 Admission consumes current Runtime operator grants for exact immutable GitHub
@@ -83,8 +95,10 @@ rereads its grant and current repository, branch, head, base, and policy
 evidence for each operation and intersects them before effect; unavailable,
 stale, revoked, or mismatched evidence denies. Local operator authentication
 alone does not authorize either mutation. Executor performs admitted effects
-with Inari Access; operator credentials do not enter Admission or provider
-execution.
+with Inari Access; operator credentials do not enter provider execution.
+Local operator subject proof follows [Caller Authentication and
+Capability Authorization](./AGENT_CAPABILITY_AUTHORIZATION.md); it creates no
+Source/Epic delegation claim and does not require Local GitHub OAuth.
 
 ### Executor
 
