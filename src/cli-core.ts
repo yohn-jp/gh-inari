@@ -546,9 +546,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     throw new CliError("UNKNOWN_COMMAND", `Unknown command "${parsed.positionals.join(" ")}".`);
   } catch (error: unknown) {
+    if (json || isMachineCommand(parsed.positionals)) return reportMachineFailure(error);
     const shape = toErrorShape(error);
-    if (json || isMachineCommand(parsed.positionals)) console.log(JSON.stringify({ ok: false, error: shape }));
-    else console.error(`${shape.code}: ${shape.message}`);
+    console.error(`${shape.code}: ${shape.message}`);
     return classifyExitCode(error);
   }
 }
@@ -4091,6 +4091,28 @@ async function runOperationalObservationCommand(
   return 0;
 }
 
+/** Invoke the existing Core View semantics from a typed CLI Canon route. */
+export async function executeCliArtifactView(
+  domain: "issue" | "pr",
+  number: number,
+  repository: string | undefined,
+  dependencies: CliDependencies = {},
+): Promise<number> {
+  const parsed: ParsedArgs = {
+    positionals: [domain, "view", String(number)],
+    options: repository === undefined ? {} : { repository },
+    fields: [],
+    capabilities: [],
+    repeated: {},
+  };
+  const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
+  try {
+    return await runOperationalObservationCommand(domain, number, parsed, root, dependencies, "view");
+  } catch (error: unknown) {
+    return reportMachineFailure(error);
+  }
+}
+
 async function runOperationalDiscoveryCommand(
   domain: "issue" | "pr",
   parsed: ParsedArgs,
@@ -5926,6 +5948,11 @@ function toErrorShape(error: unknown): CliErrorShape {
     };
   }
   return { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Operation failed." };
+}
+
+function reportMachineFailure(error: unknown): number {
+  console.log(JSON.stringify({ ok: false, error: toErrorShape(error) }));
+  return classifyExitCode(error);
 }
 
 function classifyExitCode(error: unknown): number {

@@ -12,10 +12,12 @@ import type { ProductPackageIdentity } from "@yohn-jp/cli-canon";
 import { z } from "zod";
 import {
   executeCliArtifactReconciliation,
+  executeCliArtifactView,
   runSemanticBranchObservationCommand,
   type CliDependencies,
 } from "./cli-core.js";
 import {
+  ARTIFACT_VIEW_COMMANDS,
   BRANCH_OBSERVATION_COMMANDS,
   getOption,
   INARI_COMMANDS,
@@ -28,7 +30,7 @@ import {
 const PRODUCT_NAME = "inari";
 const DELEGATED_SOURCE_ID = "inari-legacy-command-core";
 const RESERVED_SHELL_FLAGS = new Set(["--help", "-h", "--version", "--json"]);
-const CANON_BRANCH_COMMAND_IDS = new Set(["branch.check", "branch.semantic.check"]);
+const CANON_OWNED_COMMAND_IDS = new Set(["branch.check", "branch.semantic.check", "issue.view", "pr.view"]);
 const ARTIFACT_NUMBER = z
   .string()
   .regex(/^[1-9]\d*$/u, "expected a positive integer")
@@ -93,12 +95,23 @@ function branchObservationHandlers(dependencies: CliDependencies) {
   });
 }
 
+function artifactViewHandlers(dependencies: CliDependencies) {
+  return bindHandlers(ARTIFACT_VIEW_COMMANDS)({
+    "issue.view": ({ number, repository }) => executeCliArtifactView("issue", number, repository, dependencies),
+    "pr.view": ({ number, repository }) => executeCliArtifactView("pr", number, repository, dependencies),
+  });
+}
+
 export function compileInariCliProduct(
   packageMetadata: ProductPackageIdentity,
   description: string,
   dependencies: CliDependencies = {},
 ) {
-  const commands = { ...ARTIFACT_RECONCILIATION_COMMANDS, ...BRANCH_OBSERVATION_COMMANDS };
+  const commands = {
+    ...ARTIFACT_RECONCILIATION_COMMANDS,
+    ...ARTIFACT_VIEW_COMMANDS,
+    ...BRANCH_OBSERVATION_COMMANDS,
+  };
   return compileProduct({
     name: PRODUCT_NAME,
     description,
@@ -106,6 +119,7 @@ export function compileInariCliProduct(
     commands,
     handlers: {
       ...artifactReconciliationHandlers(dependencies),
+      ...artifactViewHandlers(dependencies),
       ...branchObservationHandlers(dependencies),
     },
   });
@@ -223,7 +237,7 @@ function routeCommands(): readonly {
 }[] {
   const byRoute = new Map<string, CommandDefinition[]>();
   for (const entry of INARI_COMMANDS) {
-    if (entry.path.length === 0 || CANON_BRANCH_COMMAND_IDS.has(entry.id)) continue;
+    if (entry.path.length === 0 || CANON_OWNED_COMMAND_IDS.has(entry.id)) continue;
     const key = routeKey(entry.path);
     const existing = byRoute.get(key);
     if (existing === undefined) byRoute.set(key, [entry]);
