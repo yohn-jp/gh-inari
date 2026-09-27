@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runNodeCli } from "@yohn-jp/cli-canon/node";
-import { compileInariCliProduct, createLegacyDelegatedCommandSource } from "./cli-composition.js";
+import { bindHandlers, compileProduct } from "@yohn-jp/cli-canon";
+import { executeNodeCli, runNodeCli } from "@yohn-jp/cli-canon/node";
+import {
+  ARTIFACT_RECONCILIATION_COMMANDS,
+  compileInariCliProduct,
+  createLegacyDelegatedCommandSource,
+} from "./cli-composition.js";
 
 const packageMetadata = {
   name: "gh-inari",
@@ -39,6 +44,45 @@ test("CLI Canon owns the shared root shell for the composed product", async () =
   const invalid = await runNodeCli(compiled, ["missing", "--json"], { delegatedSources: [delegated] });
   assert.equal(invalid.failureKind, "usage");
   assert.equal(JSON.parse(invalid.stderr).error.code, "unknown-command");
+  assert.equal(delegatedCalls, 0);
+});
+
+test("typed reconcile routes own their Canon grammar, help, and dispatch", async () => {
+  const compiled = compileProduct({
+    name: "inari",
+    packageMetadata,
+    commands: ARTIFACT_RECONCILIATION_COMMANDS,
+    handlers: bindHandlers(ARTIFACT_RECONCILIATION_COMMANDS)({
+      "issue.reconcile": ({ number }) => ({ route: "issue", number }),
+      "pr.reconcile": ({ number }) => ({ route: "pr", number }),
+    }),
+  });
+  let delegatedCalls = 0;
+  const delegated = createLegacyDelegatedCommandSource(async () => {
+    delegatedCalls += 1;
+    return { exitCode: 0, stdout: "delegated\n", stderr: "" };
+  });
+
+  for (const [domain, commandId] of [
+    ["issue", "issue.reconcile"],
+    ["pr", "pr.reconcile"],
+  ] as const) {
+    const execution = await executeNodeCli(compiled, [domain, "reconcile", "42"], {
+      delegatedSources: [delegated],
+    });
+    assert.equal(execution.status, "success");
+    if (execution.status === "success") {
+      assert.equal(execution.commandId, commandId);
+      assert.deepEqual(execution.result, { route: domain, number: 42 });
+    }
+
+    const help = await runNodeCli(compiled, [domain, "reconcile", "--help"], {
+      delegatedSources: [delegated],
+    });
+    assert.equal(help.exitCode, 0);
+    assert.match(help.stdout, new RegExp(`Usage: inari ${domain} reconcile <number>`));
+    assert.match(help.stdout, /--repository/);
+  }
   assert.equal(delegatedCalls, 0);
 });
 
