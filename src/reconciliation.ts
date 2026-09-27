@@ -1,4 +1,5 @@
 import {
+  extractIssueDependencyMarker,
   extractTemplateIdentityMarker,
   loadCanonicalArtifact,
   prepareIssueArtifact,
@@ -674,7 +675,8 @@ async function readGovernedExistingArtifactCore(
   const observationIdentity = createArtifactObservationIdentity(domain, remote);
 
   if (selector === undefined) {
-    const marker = extractTemplateIdentityMarker(remote.body ?? "");
+    const markerBody = domain === "issue" ? extractIssueDependencyMarker(remote.body ?? "").body : (remote.body ?? "");
+    const marker = extractTemplateIdentityMarker(markerBody);
     if (marker.status !== "absent") {
       return resolveExistingArtifactByMarker(domain, remote, contracts, failedTemplates, marker.status, marker.marker);
     }
