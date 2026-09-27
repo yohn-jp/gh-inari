@@ -488,8 +488,9 @@ export function compileSemanticTemplateArtifactContract(
   const bindings: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   const required: string[] = [];
 
-  for (const section of source.sections) {
+  for (const [sectionIndex, section] of source.sections.entries()) {
     if (section.kind !== "input") continue;
+    const presentationControl = semanticPresentationControl(section, `$.sections[${sectionIndex}].element`);
     properties[section.id] = {
       title: section.label ?? section.id,
       ...(section.description === undefined ? {} : { description: section.description }),
@@ -501,7 +502,7 @@ export function compileSemanticTemplateArtifactContract(
     bindings[rootPropertyPointer(section.id)] = {
       authority: { kind: "supplied" },
       presentation: {
-        control: semanticPresentationControl(section),
+        control: presentationControl,
         ...(options === undefined ? {} : { options }),
       },
     };
@@ -592,8 +593,30 @@ function semanticFieldDefault(section: SemanticSection): string | readonly strin
   return semanticDefaultValue(section, options, true);
 }
 
-function semanticPresentationControl(section: SemanticSection): string {
-  return section.element ?? issueElementType(section);
+function semanticPresentationControl(
+  section: SemanticSection,
+  path: string,
+): "text" | "multiline" | "choice" | "checklist" {
+  const type = semanticTypeOf(section);
+  const element = section.element;
+  const compatible =
+    type === "string"
+      ? element === undefined || element === "input" || element === "textarea"
+      : type === "enum" || type === "array"
+        ? element === undefined || element === "dropdown"
+        : element === undefined || element === "checkboxes";
+  if (!compatible) {
+    throw new SemanticTemplateError([
+      {
+        code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+        path,
+        message: `Element "${element}" is incompatible with semantic type "${type}".`,
+      },
+    ]);
+  }
+  if (type === "string") return element === "input" ? "text" : "multiline";
+  if (type === "enum" || type === "array") return "choice";
+  return "checklist";
 }
 
 function semanticPresentationOptions(section: SemanticSection): Record<string, string> | undefined {

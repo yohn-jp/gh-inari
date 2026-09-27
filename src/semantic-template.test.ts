@@ -96,6 +96,8 @@ test("semantic-template v1 compiles to schema-native Artifact Contract v2 for th
         maxLength: 80,
         pattern: "^[A-Z]",
       },
+      { id: "notes", type: "string", label: "Notes" },
+      { id: "shortTitle", type: "string", label: "Short title", element: "input", maxLength: 40 },
       {
         id: "status",
         type: "enum",
@@ -154,6 +156,8 @@ test("semantic-template v1 compiles to schema-native Artifact Contract v2 for th
         pattern: "^[A-Z]",
         allOf: [{ pattern: "\\S" }],
       },
+      notes: { title: "Notes", type: "string" },
+      shortTitle: { title: "Short title", type: "string", maxLength: 40 },
       status: {
         title: "Status",
         type: "string",
@@ -182,19 +186,21 @@ test("semantic-template v1 compiles to schema-native Artifact Contract v2 for th
     additionalProperties: false,
   });
   assert.deepEqual(JSON.parse(JSON.stringify(contract.bindings)) as unknown, {
-    "/summary": { authority: { kind: "supplied" }, presentation: { control: "textarea" } },
+    "/summary": { authority: { kind: "supplied" }, presentation: { control: "multiline" } },
+    "/notes": { authority: { kind: "supplied" }, presentation: { control: "multiline" } },
+    "/shortTitle": { authority: { kind: "supplied" }, presentation: { control: "text" } },
     "/status": {
       authority: { kind: "supplied" },
-      presentation: { control: "dropdown", options: { draft: "Draft", published: "Published" } },
+      presentation: { control: "choice", options: { draft: "Draft", published: "Published" } },
     },
     "/areas": {
       authority: { kind: "supplied" },
-      presentation: { control: "dropdown", options: { docs: "Documentation", runtime: "Runtime" } },
+      presentation: { control: "choice", options: { docs: "Documentation", runtime: "Runtime" } },
     },
     "/checks": {
       authority: { kind: "supplied" },
       presentation: {
-        control: "checkboxes",
+        control: "checklist",
         options: { tests: "Tests pass", docs: "Documentation updated" },
       },
     },
@@ -216,12 +222,62 @@ test("semantic-template v1 compiles to schema-native Artifact Contract v2 for th
     },
   });
   assert.equal(effective.artifactContractVersion, "2");
-  assert.deepEqual(Object.keys(effective.inputSchema.properties), ["areas", "checks", "status", "summary"]);
+  assert.deepEqual(Object.keys(effective.inputSchema.properties), [
+    "areas",
+    "checks",
+    "notes",
+    "shortTitle",
+    "status",
+    "summary",
+  ]);
   assert.deepEqual(effective.inputSchema.required, ["areas", "checks", "summary"]);
   assert.deepEqual(effective.inputSchema.properties.checks, contract.schema.properties.checks);
 
   assert.deepEqual(compileSemanticTemplateSource(source, generatedPath), legacyContractBefore);
   assert.equal(renderSemanticNative(source, generatedPath), nativeBefore);
+});
+
+test("schema-native semantic compilation rejects explicit type and element mismatches", () => {
+  const mismatches = [
+    ["string", "dropdown"],
+    ["enum", "textarea"],
+    ["array", "checkboxes"],
+    ["checklist", "dropdown"],
+  ] as const;
+  for (const [type, element] of mismatches) {
+    const source = normalizeSemanticTemplate({
+      version: 1,
+      kind: "issue",
+      id: "mismatch",
+      name: "Mismatch",
+      description: "Inconsistent type and element",
+      sections: [{ id: "field", type, element, label: "Field", options: ["one", "two"] }],
+    });
+    assert.throws(
+      () => compileSemanticTemplateArtifactContract(source),
+      (error: unknown) => {
+        assert.ok(error instanceof SemanticTemplateError);
+        assert.equal(error.code, "SEMANTIC_TEMPLATE_INVALID_VALUE");
+        assert.equal(error.path, "$.sections[0].element");
+        assert.match(error.message, /is incompatible with semantic type/u);
+        return true;
+      },
+    );
+  }
+
+  const legacySource = normalizeSemanticTemplate({
+    version: 1,
+    kind: "issue",
+    id: "legacy-widget",
+    name: "Legacy widget",
+    description: "Preserved legacy widget rendering",
+    sections: [{ id: "field", type: "string", element: "dropdown", label: "Field", options: ["one"] }],
+  });
+  const generatedPath = ".github/ISSUE_TEMPLATE/legacy-widget.yml";
+  const nativeBefore = renderSemanticNative(legacySource, generatedPath);
+  assert.match(nativeBefore, /type: dropdown/u);
+  assert.throws(() => compileSemanticTemplateArtifactContract(legacySource), SemanticTemplateError);
+  assert.equal(renderSemanticNative(legacySource, generatedPath), nativeBefore);
 });
 
 test("semantic multi-select options reject comma-containing labels", () => {
