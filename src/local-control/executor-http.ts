@@ -5,6 +5,10 @@ import {
   type AuthorizedExecutionResult,
 } from "../authorized-execution.js";
 import { DELEGATOR_ID_PATTERN } from "../agent-authority/delegator.js";
+import {
+  validateImplementationAuthorizationRecord,
+  type ImplementationAuthorizationRecord,
+} from "../implementation-authorization.js";
 import type { SessionCertificateRepository } from "../agent-authority/session-certificate.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
 import {
@@ -37,6 +41,8 @@ export interface LocalExecutorEvidenceRequest {
   readonly authorityId: string;
   readonly issue?: number;
   readonly implementationIssue?: number;
+  /** Untrusted exact authorization to bind an optional task-termination read. */
+  readonly taskTerminationAuthorization?: ImplementationAuthorizationRecord;
 }
 
 export interface LocalExecutorHttpHandlerOptions {
@@ -180,7 +186,15 @@ function evidenceRequest(value: unknown): LocalExecutorEvidenceRequest | undefin
   if (
     !isRecord(value) ||
     Object.keys(value).some(
-      (key) => !["version", "repository", "authorityId", "issue", "implementationIssue"].includes(key),
+      (key) =>
+        ![
+          "version",
+          "repository",
+          "authorityId",
+          "issue",
+          "implementationIssue",
+          "taskTerminationAuthorization",
+        ].includes(key),
     )
   )
     return undefined;
@@ -208,11 +222,28 @@ function evidenceRequest(value: unknown): LocalExecutorEvidenceRequest | undefin
     (!Number.isSafeInteger(implementationIssue) || (implementationIssue as number) < 1)
   )
     return undefined;
+  const authorization = value.taskTerminationAuthorization;
+  let taskTerminationAuthorization: ImplementationAuthorizationRecord | undefined;
+  if (authorization !== undefined) {
+    if (implementationIssue === undefined) return undefined;
+    const checked = validateImplementationAuthorizationRecord(authorization);
+    if (!checked.valid || checked.record === undefined) return undefined;
+    if (
+      checked.record.implementation.number !== implementationIssue ||
+      checked.record.repository.repositoryHost !== "github.com" ||
+      checked.record.repository.repositoryId !== value.repository.id ||
+      (checked.record.repository.repository !== undefined &&
+        checked.record.repository.repository.toLowerCase() !== value.repository.name.toLowerCase())
+    )
+      return undefined;
+    taskTerminationAuthorization = checked.record;
+  }
   return Object.freeze({
     version: LOCAL_EXECUTOR_PROTOCOL_VERSION,
     repository: Object.freeze({ id: value.repository.id, name: value.repository.name }),
     authorityId: value.authorityId,
     ...(issue === undefined ? {} : { issue: issue as number, implementationIssue: implementationIssue as number }),
+    ...(taskTerminationAuthorization === undefined ? {} : { taskTerminationAuthorization }),
   });
 }
 
