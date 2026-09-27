@@ -14,10 +14,12 @@ import {
 } from "./effective-artifact-contract.js";
 import {
   parseArtifactContract,
+  SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
   serializeArtifactContract,
   type ArtifactContract,
   type ArtifactContractDerivation,
   type ArtifactContractKind,
+  type SchemaNativeArtifactContract,
   type DerivationFormatPart,
   type DerivationReference,
   type FieldContentConstraints,
@@ -28,6 +30,7 @@ import {
 } from "./artifact-contract.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./issue-reference.js";
 import type { ArtifactContractProvenance } from "./ir.js";
+import { compileJsonSchema, type JsonSchemaDiagnostic } from "./json-schema-runtime.js";
 
 export const SEMANTIC_ARTIFACT_VERSION = "1" as const;
 export type SemanticArtifactVersion = typeof SEMANTIC_ARTIFACT_VERSION;
@@ -207,6 +210,40 @@ function declarationEntries(effective: EffectiveArtifactContract): readonly [str
   return entries;
 }
 
+interface SchemaNativeEntry {
+  readonly name: string;
+  readonly binding: SchemaNativeArtifactContract["bindings"][string];
+  readonly required: boolean;
+}
+
+const MAX_SCHEMA_NATIVE_DIAGNOSTICS = 16;
+const MAX_SCHEMA_NATIVE_PATH_LENGTH = 256;
+
+function addSchemaNativeViolation(
+  violations: SemanticArtifactMaterializationViolation[],
+  code: SemanticArtifactMaterializationViolationCode,
+  path: string,
+  message: string,
+): void {
+  if (violations.length >= MAX_SCHEMA_NATIVE_DIAGNOSTICS) return;
+  addViolation(violations, code, path.length <= MAX_SCHEMA_NATIVE_PATH_LENGTH ? path : "$", message);
+}
+
+function schemaNativeEntries(contract: SchemaNativeArtifactContract): readonly SchemaNativeEntry[] {
+  const properties = isRecord(contract.schema.properties) ? contract.schema.properties : {};
+  const required = new Set(Array.isArray(contract.schema.required) ? contract.schema.required : []);
+  return Object.keys(properties)
+    .sort(compareStrings)
+    .flatMap((name) => {
+      const binding = contract.bindings[`/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`];
+      return binding === undefined ? [] : [{ name, binding, required: required.has(name) }];
+    });
+}
+
+function isSchemaNativeContract(contract: ArtifactContract): contract is SchemaNativeArtifactContract {
+  return contract.version === SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION;
+}
+
 /**
  * Validate the compiler product itself before consuming it.  The expected
  * value is rebuilt by the #282 compiler for consistency checking only; the
@@ -264,21 +301,36 @@ function validateEffectiveContract(input: unknown): EffectiveContractValidationR
     }
 
     const entries = declarationEntries(effective);
+    const nativeEntries = isSchemaNativeContract(effective.contract)
+      ? schemaNativeEntries(effective.contract)
+      : undefined;
     const names = new Set<string>();
-    for (const [name, declaration] of entries) {
-      if (names.has(name)) return invalidEffectiveContract(`Duplicate semantic declaration "${name}".`, `$.${name}`);
-      names.add(name);
-      if (!isRecord(declaration)) return invalidEffectiveContract(`Declaration "${name}" is invalid.`, `$.${name}`);
-      if (declaration.presence === "unused") {
-        if (declaration.cardinality.min !== 0 || declaration.cardinality.max !== 0) {
-          return invalidEffectiveContract(`Unused declaration "${name}" has non-zero cardinality.`, `$.${name}`);
+    if (nativeEntries !== undefined) {
+      for (const entry of nativeEntries) {
+        if (names.has(entry.name)) {
+          return invalidEffectiveContract(`Duplicate semantic declaration "${entry.name}".`, `$.${entry.name}`);
         }
-      } else if (
-        declaration.authority === undefined ||
-        !isRecord(declaration.authority) ||
-        !["supplied", "derived", "fixed", "platform"].includes(String(declaration.authority.kind))
-      ) {
-        return invalidEffectiveContract(`Declaration "${name}" has invalid authority.`, `$.${name}`);
+        names.add(entry.name);
+        if (!isRecord(entry.binding) || !isRecord(entry.binding.authority)) {
+          return invalidEffectiveContract(`Declaration "${entry.name}" has invalid authority.`, `$.${entry.name}`);
+        }
+      }
+    } else {
+      for (const [name, declaration] of entries) {
+        if (names.has(name)) return invalidEffectiveContract(`Duplicate semantic declaration "${name}".`, `$.${name}`);
+        names.add(name);
+        if (!isRecord(declaration)) return invalidEffectiveContract(`Declaration "${name}" is invalid.`, `$.${name}`);
+        if (declaration.presence === "unused") {
+          if (declaration.cardinality.min !== 0 || declaration.cardinality.max !== 0) {
+            return invalidEffectiveContract(`Unused declaration "${name}" has non-zero cardinality.`, `$.${name}`);
+          }
+        } else if (
+          declaration.authority === undefined ||
+          !isRecord(declaration.authority) ||
+          !["supplied", "derived", "fixed", "platform"].includes(String(declaration.authority.kind))
+        ) {
+          return invalidEffectiveContract(`Declaration "${name}" has invalid authority.`, `$.${name}`);
+        }
       }
     }
 
@@ -291,14 +343,18 @@ function validateEffectiveContract(input: unknown): EffectiveContractValidationR
         );
       }
       derivations.set(derivation.target, derivation);
+      const nativeBinding = nativeEntries?.find((entry) => entry.name === derivation.target)?.binding;
       const declaration = entries.find(([name]) => name === derivation.target)?.[1];
-      if (declaration === undefined || declaration.presence === "unused" || declaration.authority.kind !== "derived") {
+      const authority =
+        nativeBinding?.authority ??
+        (declaration === undefined || declaration.presence === "unused" ? undefined : declaration.authority);
+      if (authority?.kind !== "derived") {
         return invalidEffectiveContract(
           `Derivation target "${derivation.target}" is not a derived declaration.`,
           "$.derivations",
         );
       }
-      if (stableSerialize(derivation.operation) !== stableSerialize(declaration.authority.derive)) {
+      if (stableSerialize(derivation.operation) !== stableSerialize(authority.derive)) {
         return invalidEffectiveContract(
           `Derivation "${derivation.target}" does not match its declaration.`,
           "$.derivations",
@@ -333,10 +389,18 @@ function validateEffectiveContract(input: unknown): EffectiveContractValidationR
         );
       }
     }
-    for (const [name, declaration] of entries) {
-      const isDerived = declaration.presence !== "unused" && declaration.authority.kind === "derived";
-      if (isDerived !== derivations.has(name)) {
-        return invalidEffectiveContract(`Derivation coverage for "${name}" is incomplete.`, "$.derivations");
+    if (nativeEntries !== undefined) {
+      for (const entry of nativeEntries) {
+        if ((entry.binding.authority.kind === "derived") !== derivations.has(entry.name)) {
+          return invalidEffectiveContract(`Derivation coverage for "${entry.name}" is incomplete.`, "$.derivations");
+        }
+      }
+    } else {
+      for (const [name, declaration] of entries) {
+        const isDerived = declaration.presence !== "unused" && declaration.authority.kind === "derived";
+        if (isDerived !== derivations.has(name)) {
+          return invalidEffectiveContract(`Derivation coverage for "${name}" is incomplete.`, "$.derivations");
+        }
       }
     }
     if (
@@ -763,6 +827,302 @@ function buildArtifact(
   return Object.freeze(artifact);
 }
 
+function schemaNativeRelationMultiplicity(kind: ArtifactContractKind, name: string): "single" | "many" | undefined {
+  if (kind === "issue" && name === "parent") return "single";
+  if (kind === "issue" && name === "dependsOn") return "many";
+  if (kind === "pull_request" && name === "implements") return "many";
+  return undefined;
+}
+
+function appendSchemaNativeRelationDuplicates(
+  violations: SemanticArtifactMaterializationViolation[],
+  kind: ArtifactContractKind,
+  entries: readonly SchemaNativeEntry[],
+  input: Readonly<Record<string, unknown>>,
+): void {
+  for (const entry of entries) {
+    if (
+      entry.binding.authority.kind !== "supplied" ||
+      schemaNativeRelationMultiplicity(kind, entry.name) !== "many" ||
+      !hasOwn(input as RecordValue, entry.name) ||
+      !Array.isArray(input[entry.name])
+    ) {
+      continue;
+    }
+    const seen = new Set<string>();
+    (input[entry.name] as unknown[]).forEach((value, index) => {
+      const result = normalizeIssueReference(value);
+      if (!result.valid || result.reference === undefined) return;
+      const identity = issueReferenceKey(result.reference);
+      if (seen.has(identity)) {
+        addSchemaNativeViolation(
+          violations,
+          "INPUT_DUPLICATE",
+          `$.${entry.name}[${index}]`,
+          "Issue references must be unique.",
+        );
+      }
+      seen.add(identity);
+    });
+    if (violations.length >= MAX_SCHEMA_NATIVE_DIAGNOSTICS) return;
+  }
+}
+
+function schemaForMaterializedValues(
+  contract: SchemaNativeArtifactContract,
+  entries: readonly SchemaNativeEntry[],
+): unknown {
+  const unavailablePlatformValues = new Set(
+    entries.filter((entry) => entry.binding.authority.kind === "platform").map((entry) => entry.name),
+  );
+  const required = contract.schema.required;
+  if (!Array.isArray(required) || unavailablePlatformValues.size === 0) return contract.schema;
+
+  // Platform-owned values are supplied by a separate trusted owner. Core
+  // preserves the existing unresolved-platform behavior and validates the
+  // materialized document's remaining required values against the source schema.
+  return {
+    ...contract.schema,
+    required: required.filter((name) => !unavailablePlatformValues.has(name)),
+  };
+}
+
+function normalizeSchemaNativeValue(
+  kind: ArtifactContractKind,
+  name: string,
+  rawValue: unknown,
+  path: string,
+  violations: SemanticArtifactMaterializationViolation[],
+  output: boolean,
+): ValueValidationResult {
+  const local: SemanticArtifactMaterializationViolation[] = [];
+  const relation = schemaNativeRelationMultiplicity(kind, name);
+  const invalidCode = output ? "OUTPUT_INVALID" : "INPUT_TYPE";
+  const normalizeReference = (value: unknown, referencePath: string): IssueReference | undefined => {
+    const result = normalizeIssueReference(value, referencePath);
+    if (!result.valid || result.reference === undefined) {
+      addSchemaNativeViolation(local, invalidCode, referencePath, "Relation value must be a valid IssueReference.");
+      return undefined;
+    }
+    return result.reference;
+  };
+
+  let value: unknown;
+  if (relation === "single") {
+    value = normalizeReference(rawValue, path);
+  } else if (relation === "many") {
+    if (!Array.isArray(rawValue)) {
+      addSchemaNativeViolation(local, invalidCode, path, "Relation value must be an array of IssueReferences.");
+    } else {
+      const seen = new Set<string>();
+      const references: IssueReference[] = [];
+      rawValue.forEach((entry, index) => {
+        const itemPath = `${path}[${index}]`;
+        const reference = normalizeReference(entry, itemPath);
+        if (reference === undefined) return;
+        const identity = issueReferenceKey(reference);
+        if (seen.has(identity)) {
+          addSchemaNativeViolation(
+            local,
+            output ? "OUTPUT_INVALID" : "INPUT_DUPLICATE",
+            itemPath,
+            "Issue references must be unique.",
+          );
+          return;
+        }
+        seen.add(identity);
+        references.push(reference);
+      });
+      value = references;
+    }
+  } else {
+    value = cloneInputValue(rawValue, path, local);
+  }
+
+  if (local.length > 0) {
+    for (const violation of local) {
+      addSchemaNativeViolation(
+        violations,
+        output && violation.code !== "OUTPUT_INVALID" ? "OUTPUT_INVALID" : violation.code,
+        violation.path,
+        violation.message,
+      );
+    }
+    return { valid: false };
+  }
+  return { valid: true, value };
+}
+
+function appendSchemaDiagnostics(
+  violations: SemanticArtifactMaterializationViolation[],
+  diagnostics: readonly JsonSchemaDiagnostic[],
+  output: boolean,
+  entries: readonly SchemaNativeEntry[],
+  input: Readonly<Record<string, unknown>>,
+): void {
+  for (const diagnostic of diagnostics) {
+    const requiredEntry = output
+      ? undefined
+      : entries.find((entry) => {
+          const pointer = `/${entry.name.replaceAll("~", "~0").replaceAll("/", "~1")}`;
+          return (
+            entry.required &&
+            entry.binding.authority.kind === "supplied" &&
+            !hasOwn(input as RecordValue, entry.name) &&
+            diagnostic.path === pointer
+          );
+        });
+    addSchemaNativeViolation(
+      violations,
+      output ? "OUTPUT_INVALID" : requiredEntry === undefined ? "INPUT_TYPE" : "INPUT_REQUIRED",
+      requiredEntry === undefined ? (diagnostic.path ?? "$") : `$.${requiredEntry.name}`,
+      requiredEntry === undefined
+        ? output
+          ? "Materialized value does not satisfy the authoritative schema."
+          : "Value does not satisfy the effective caller schema."
+        : "Required supplied value is missing.",
+    );
+  }
+}
+
+function materializeSchemaNativeResult(
+  effective: EffectiveArtifactContract,
+  input: RecordValue,
+): SemanticArtifactMaterializationResult {
+  if (!isSchemaNativeContract(effective.contract)) {
+    return {
+      valid: false,
+      violations: [
+        {
+          code: "EFFECTIVE_CONTRACT_INVALID",
+          path: "$.contract.version",
+          message: "Schema-native Artifact Contract is missing.",
+        },
+      ],
+    };
+  }
+  const contract = effective.contract;
+  const entries = schemaNativeEntries(contract);
+  const entriesByName = new Map(entries.map((entry) => [entry.name, entry]));
+  const violations: SemanticArtifactMaterializationViolation[] = [];
+
+  for (const key of Object.keys(input).sort(compareStrings)) {
+    const entry = entriesByName.get(key);
+    if (entry === undefined) {
+      addSchemaNativeViolation(
+        violations,
+        "INPUT_UNKNOWN_FIELD",
+        `$.${key}`,
+        "Value is not declared by the Effective Contract.",
+      );
+    } else if (entry.binding.authority.kind !== "supplied") {
+      addSchemaNativeViolation(violations, "INPUT_AUTHORITY", `$.${key}`, "Caller cannot supply this value.");
+    }
+  }
+  if (violations.length > 0) return { valid: false, violations };
+
+  appendSchemaNativeRelationDuplicates(violations, contract.kind, entries, input);
+  if (violations.length > 0) return { valid: false, violations };
+
+  let callerSchema;
+  let authoritativeSchema;
+  try {
+    callerSchema = compileJsonSchema(effective.inputSchema);
+  } catch {
+    return {
+      valid: false,
+      violations: [
+        {
+          code: "EFFECTIVE_CONTRACT_INVALID",
+          path: "$.inputSchema",
+          message: "Effective Artifact Contract schema could not be compiled.",
+        },
+      ],
+    };
+  }
+
+  const callerValidation = callerSchema.validate(input);
+  if (!callerValidation.valid) {
+    appendSchemaDiagnostics(violations, callerValidation.diagnostics, false, entries, input);
+    return { valid: false, violations };
+  }
+
+  const values: Record<string, unknown> = {};
+  const materialized: Record<string, unknown> = {};
+  const assign = (name: string, value: unknown): void => {
+    values[name] = value;
+    materialized[name] = value;
+  };
+  for (const entry of entries) {
+    const authority = entry.binding.authority;
+    if (authority.kind === "platform" || authority.kind === "derived") continue;
+    if (authority.kind === "supplied" && !hasOwn(input, entry.name)) continue;
+
+    const rawValue = authority.kind === "fixed" ? authority.value : input[entry.name];
+    const path = `$.${entry.name}`;
+    const result = normalizeSchemaNativeValue(
+      contract.kind,
+      entry.name,
+      rawValue,
+      path,
+      violations,
+      authority.kind === "fixed",
+    );
+    if (result.valid) assign(entry.name, result.value);
+  }
+
+  const derivations = new Map(effective.derivations.map((derivation) => [derivation.target, derivation]));
+  for (const name of effective.evaluationOrder) {
+    const derivation = derivations.get(name);
+    const entry = entriesByName.get(name);
+    if (derivation === undefined || entry === undefined || entry.binding.authority.kind !== "derived") {
+      addSchemaNativeViolation(
+        violations,
+        "DERIVATION_INVALID",
+        `$.${name}`,
+        "Evaluation order references an invalid derivation.",
+      );
+      continue;
+    }
+    const evaluated = evaluateDerivation(derivation, materialized, violations);
+    if (!evaluated.resolved) {
+      if (entry.required) {
+        addSchemaNativeViolation(
+          violations,
+          "DERIVATION_UNRESOLVED",
+          `$.${name}`,
+          "Required derivation cannot be resolved.",
+        );
+      }
+      continue;
+    }
+    const result = normalizeSchemaNativeValue(contract.kind, name, evaluated.value, `$.${name}`, violations, true);
+    if (result.valid) assign(name, result.value);
+  }
+
+  if (violations.length > 0) return { valid: false, violations };
+  try {
+    authoritativeSchema = compileJsonSchema(schemaForMaterializedValues(contract, entries));
+  } catch {
+    return {
+      valid: false,
+      violations: [
+        {
+          code: "EFFECTIVE_CONTRACT_INVALID",
+          path: "$.contract.schema",
+          message: "Materialized Artifact Contract schema could not be compiled.",
+        },
+      ],
+    };
+  }
+  const outputValidation = authoritativeSchema.validate(materialized);
+  if (!outputValidation.valid) {
+    appendSchemaDiagnostics(violations, outputValidation.diagnostics, true, entries, input);
+    return { valid: false, violations };
+  }
+  return { valid: true, artifact: buildArtifact(effective, values, {}), violations: [] };
+}
+
 function materializeResult(effectiveInput: unknown, input: unknown): SemanticArtifactMaterializationResult {
   const effectiveResult = validateEffectiveContract(effectiveInput);
   if (effectiveResult.effective === undefined) return { valid: false, violations: effectiveResult.violations };
@@ -774,6 +1134,8 @@ function materializeResult(effectiveInput: unknown, input: unknown): SemanticArt
       violations: [{ code: "INPUT_NOT_OBJECT", path: "$", message: "Caller input must be a JSON object." }],
     };
   }
+
+  if (isSchemaNativeContract(effective.contract)) return materializeSchemaNativeResult(effective, input);
 
   const entries = declarationEntries(effective);
   const declarations = new Map(entries);

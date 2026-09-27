@@ -18,14 +18,20 @@ import {
   authorizeExecutionIntent,
   closeSession,
   currentBranchPolicyInput,
+  currentSessionChange,
   type AdmissionAuthorizationOptions,
 } from "./authorization.js";
+import { tryAuthorizeImplementation } from "../implementation-authorization.js";
 
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 const REPOSITORY_ID = "123456789";
 const REPOSITORY_NAME = "acme/inari";
 const ISSUE = 375;
 const BRANCH = "feat/375-local-admission";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 test("policy-bound Session admission requires matching current generation and branch", async () => {
   await withEnvironment(async (environment) => {
@@ -70,7 +76,9 @@ test("policy-bound Session admission requires matching current generation and br
       now: NOW,
       branchObservation,
     });
-    const base = options(environment, fixture.authority, () => trustEvidence(fixture.authority));
+    const base = options(environment, fixture.authority, (request) =>
+      currentEvidenceForRequest(fixture.authority, request),
+    );
     // #1179: Admission reads the current policy from the owner; a caller-supplied observation is never accepted.
     const reader = (input: Omit<typeof branchInput, "observedBranch">) => ({
       readBranchPolicy: async () => ({ version: 1, kind: "local-branch-policy-input", ...input }),
@@ -183,9 +191,24 @@ function options(
     now: () => NOW,
     readEvidence: async (request) => {
       requests.push(request);
-      return evidence(request);
+      const value = evidence(request);
+      if (request.taskTerminationAuthorization === undefined || !isRecord(value) || value.taskTermination !== undefined)
+        return value;
+      return {
+        ...value,
+        taskTermination: {
+          status: "absent",
+          provenance: { source: "repository", revision: "snapshot-1" },
+          recordProvenance: [],
+        },
+      };
     },
   };
+}
+
+function currentEvidenceForRequest(authority: unknown, request: LocalExecutorEvidenceRequest): unknown {
+  if (request.issue === undefined || request.implementationIssue === undefined) return trustEvidence(authority);
+  return implementationEvidence(authority, request.implementationIssue, request.issue, [sourceReference(1208)]);
 }
 
 test("Sessions are admitted and closed only against matching current Executor trust evidence", async () => {
@@ -222,16 +245,26 @@ test("Sessions are admitted and closed only against matching current Executor tr
 
     const admitted = await admitSession(
       session,
-      options(environment, fixture.authority, () => trustEvidence(fixture.authority), requests),
+      options(
+        environment,
+        fixture.authority,
+        (request) => currentEvidenceForRequest(fixture.authority, request),
+        requests,
+      ),
     );
     assert.deepEqual(admitted, { id: "session-admitted", status: "active", exp: session.exp });
-    assert.deepEqual(requests, [
-      {
-        version: 1,
-        repository: { id: REPOSITORY_ID, name: REPOSITORY_NAME },
-        authorityId: fixture.authority.id,
-      },
-    ]);
+    assert.deepEqual(
+      requests.map((request) => [
+        request.issue,
+        request.implementationIssue,
+        request.taskTerminationAuthorization !== undefined,
+      ]),
+      [
+        [undefined, undefined, false],
+        [ISSUE, ISSUE, false],
+        [ISSUE, ISSUE, true],
+      ],
+    );
 
     const closed = await closeSession(
       session,
@@ -245,7 +278,9 @@ test("expired Sessions are never admitted", async () => {
   await withEnvironment(async (environment) => {
     const fixture = authorityFixture();
     const session = binding(fixture, "session-expired", 60);
-    const later = { ...options(environment, fixture.authority, () => trustEvidence(fixture.authority)) };
+    const later = {
+      ...options(environment, fixture.authority, (request) => currentEvidenceForRequest(fixture.authority, request)),
+    };
     await assert.rejects(admitSession(session, { ...later, now: () => new Date(NOW.getTime() + 3_600_000) }));
   });
 });
@@ -254,7 +289,13 @@ test("execution authorization denies unavailable Sessions, repository and task m
   await withEnvironment(async (environment) => {
     const fixture = authorityFixture();
     const requests: LocalExecutorEvidenceRequest[] = [];
-    const authorization = options(environment, fixture.authority, () => trustEvidence(fixture.authority), requests);
+    let evidenceAvailable = true;
+    const authorization = options(
+      environment,
+      fixture.authority,
+      (request) => (evidenceAvailable ? currentEvidenceForRequest(fixture.authority, request) : {}),
+      requests,
+    );
 
     await assert.rejects(authorizeExecutionIntent(intent("request-unknown"), "session-unknown", authorization));
 
@@ -271,11 +312,13 @@ test("execution authorization denies unavailable Sessions, repository and task m
     assert.deepEqual(requests, []);
 
     // Current evidence is required: malformed evidence denies instead of authorizing.
+    evidenceAvailable = false;
     await assert.rejects(authorizeExecutionIntent(intent("request-evidence"), "session-active", authorization));
     const evidenceRequests: readonly LocalExecutorEvidenceRequest[] = requests;
     assert.equal(evidenceRequests.length, 1);
     assert.equal(evidenceRequests[0]?.issue, ISSUE);
 
+    evidenceAvailable = true;
     await closeSession(session, authorization);
     requests.length = 0;
     await assert.rejects(authorizeExecutionIntent(intent("request-closed"), "session-active", authorization));
@@ -338,8 +381,13 @@ function sourceChange(issue: number) {
   return projection;
 }
 
-function sourceEvidence(authority: unknown, sources: readonly Record<string, unknown>[], issue: number) {
-  const reference = { ...SOURCE_REPOSITORY, number: IMPLEMENTATION };
+function implementationEvidence(
+  authority: unknown,
+  implementation: number,
+  issue: number,
+  sources: readonly Record<string, unknown>[],
+) {
+  const reference = { ...SOURCE_REPOSITORY, number: implementation };
   const baseHead = "b".repeat(40);
   const body = renderImplementationIssueBody({
     version: 1,
@@ -379,10 +427,161 @@ function sourceEvidence(authority: unknown, sources: readonly Record<string, unk
       repository: SOURCE_REPOSITORY,
       base: { branch: "main", revision: baseHead, freshness: baseHead },
       readiness: { evidence: [] },
-      change: sourceChange(IMPLEMENTATION),
+      change: sourceChange(implementation),
     },
   };
 }
+
+function sourceEvidence(authority: unknown, sources: readonly Record<string, unknown>[], issue: number) {
+  return implementationEvidence(authority, IMPLEMENTATION, issue, sources);
+}
+
+function currentAuthorizationRecord(authority: unknown, implementation: number) {
+  const value = implementationEvidence(authority, implementation, implementation, [sourceReference(1208)]) as {
+    implementation: Record<string, unknown>;
+  };
+  const evidence = value.implementation;
+  const result = tryAuthorizeImplementation({
+    implementation: evidence.implementation,
+    issue: evidence.issue,
+    repository: evidence.repository,
+    base: evidence.base,
+    readiness: evidence.readiness,
+  });
+  assert.equal(result.valid, true);
+  assert.ok(result.authorization !== undefined);
+  return result.authorization;
+}
+
+test("task termination is checked at issuance and again for existing Session reads and actions", async () => {
+  await withEnvironment(async (environment) => {
+    const fixture = authorityFixture();
+    const authorizationRecord = currentAuthorizationRecord(fixture.authority, ISSUE);
+    const absent = {
+      status: "absent",
+      provenance: { source: "repository", revision: "snapshot-1" },
+      recordProvenance: [],
+    };
+    const wrongTask = {
+      ...authorizationRecord,
+      implementation: { ...authorizationRecord.implementation, number: ISSUE + 1 },
+    };
+    const nonAbsence = [
+      {
+        status: "present",
+        provenance: { source: "repository", revision: "snapshot-2" },
+        recordProvenance: [{ path: "state/task-termination.json" }],
+        record: wrongTask,
+      },
+      {
+        status: "unavailable",
+        provenance: { source: "repository", result: "read-failed" },
+        recordProvenance: [],
+      },
+      {
+        status: "invalid",
+        provenance: { source: "repository", revision: "snapshot-3" },
+        recordProvenance: [],
+        violations: [{ code: "INVALID", path: "$.records", message: "Invalid termination evidence." }],
+      },
+      { ...absent, recordProvenance: [{ valid: false }] },
+      { status: "absent", recordProvenance: [] },
+    ];
+
+    for (const [index, observation] of nonAbsence.entries()) {
+      await assert.rejects(
+        admitSession(
+          binding(fixture, `session-terminated-${index}`),
+          options(environment, fixture.authority, (request) => {
+            const evidence = currentEvidenceForRequest(fixture.authority, request);
+            if (request.taskTerminationAuthorization === undefined || !isRecord(evidence)) return evidence;
+            return { ...evidence, taskTermination: observation };
+          }),
+        ),
+      );
+    }
+
+    await assert.rejects(
+      admitSession(
+        binding(fixture, "session-authorization-drift"),
+        options(environment, fixture.authority, (request) => {
+          const value = currentEvidenceForRequest(fixture.authority, request);
+          if (request.taskTerminationAuthorization === undefined || !isRecord(value) || !isRecord(value.implementation))
+            return value;
+          const implementation = value.implementation;
+          const issue = isRecord(implementation.issue) ? implementation.issue : {};
+          return {
+            ...value,
+            implementation: {
+              ...implementation,
+              issue: {
+                ...issue,
+                body:
+                  typeof issue.body === "string"
+                    ? issue.body.replace("Current evidence is reread.", "Current evidence changed.")
+                    : issue.body,
+              },
+            },
+          };
+        }),
+      ),
+      /changed during task termination observation/u,
+    );
+
+    for (const policySources of [undefined, [sourceReference(1208)]]) {
+      await assert.rejects(
+        currentBranchPolicyInput(
+          { id: REPOSITORY_ID, name: REPOSITORY_NAME },
+          IMPLEMENTATION,
+          {
+            ...options(environment, fixture.authority, (request) => {
+              const evidence = sourceEvidence(
+                fixture.authority,
+                [sourceReference(1208)],
+                request.issue ?? IMPLEMENTATION,
+              );
+              if (request.taskTerminationAuthorization === undefined) return evidence;
+              return {
+                ...evidence,
+                taskTermination: nonAbsence[1],
+              };
+            }),
+            readBranchPolicy: async () => sourcePolicyInput(policySources),
+          },
+          "session-registration",
+        ),
+        /termination evidence/u,
+      );
+    }
+
+    let observation: unknown = absent;
+    const requests: LocalExecutorEvidenceRequest[] = [];
+    const authorization = options(
+      environment,
+      fixture.authority,
+      (request) => {
+        const evidence = currentEvidenceForRequest(fixture.authority, request);
+        if (request.taskTerminationAuthorization === undefined || !isRecord(evidence)) return evidence;
+        return { ...evidence, taskTermination: observation };
+      },
+      requests,
+    );
+    const session = binding(fixture, "session-current-task-termination");
+    assert.equal((await admitSession(session, authorization)).status, "active");
+    assert.deepEqual(
+      requests.map((request) => request.taskTerminationAuthorization !== undefined),
+      [false, false, true],
+    );
+    assert.equal(requests[2]?.taskTerminationAuthorization?.governedBodyDigest, authorizationRecord.governedBodyDigest);
+
+    observation = nonAbsence[0];
+    await assert.rejects(currentSessionChange(session, authorization), /termination evidence/u);
+    await assert.rejects(
+      authorizeExecutionIntent(intent("request-terminated-task"), session.sessionId, authorization),
+      /termination evidence/u,
+    );
+  });
+});
 
 test("#1213 session registration attaches the current authorized Implementation Source set", async () => {
   await withEnvironment(async (environment) => {
@@ -400,7 +599,7 @@ test("#1213 session registration attaches the current authorized Implementation 
     );
     const repository = { id: REPOSITORY_ID, name: REPOSITORY_NAME };
 
-    // Without owner Source evidence the input is unchanged and no Implementation evidence is read.
+    // Legacy branch policy still checks the current task termination state.
     const legacy = await currentBranchPolicyInput(
       repository,
       IMPLEMENTATION,
@@ -411,8 +610,12 @@ test("#1213 session registration attaches the current authorized Implementation 
       "session-registration",
     );
     assert.equal(legacy.implementationBinding, undefined);
-    assert.equal(requests.length, 0);
+    assert.deepEqual(
+      requests.map((request) => request.taskTerminationAuthorization !== undefined),
+      [false, true],
+    );
 
+    requests.length = 0;
     const bound = await currentBranchPolicyInput(
       repository,
       IMPLEMENTATION,
@@ -426,7 +629,10 @@ test("#1213 session registration attaches the current authorized Implementation 
     assert.deepEqual(bound.implementationBinding?.sources, bound.sources);
     assert.deepEqual(
       requests.map((request) => [request.issue, request.implementationIssue]),
-      [[IMPLEMENTATION, IMPLEMENTATION]],
+      [
+        [IMPLEMENTATION, IMPLEMENTATION],
+        [IMPLEMENTATION, IMPLEMENTATION],
+      ],
     );
 
     // Owner Sources that disagree with the current authorized contract, or an owner-supplied binding, fail closed.
@@ -531,7 +737,10 @@ test("#1213 execution admits Change roots only from the signed and current Sourc
         requests
           .filter((request) => request.issue !== undefined)
           .map((request) => [request.issue, request.implementationIssue]),
-        [[issue, IMPLEMENTATION]],
+        [
+          [issue, IMPLEMENTATION],
+          [issue, IMPLEMENTATION],
+        ],
       );
     }
     // Unrelated Issue and the Implementation itself: denied before Change evidence is read.
@@ -681,7 +890,10 @@ test("#1213 a Session with more than three Sources holds the full Source-bound l
         requests
           .filter((request) => request.issue !== undefined)
           .map((request) => [request.issue, request.implementationIssue]),
-        [[issue, IMPLEMENTATION]],
+        [
+          [issue, IMPLEMENTATION],
+          [issue, IMPLEMENTATION],
+        ],
       );
     }
     // Unrelated Issues, the cross-repository Source number and the Implementation itself stay denied.

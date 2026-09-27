@@ -46,6 +46,11 @@ limits, replay, ambiguous effects, provenance, and the detailed threat model.
 It distinguishes LocalSessionBinding, the new remote assertion profile, and
 bounded historical certificate readers. It removes the requirement for cloud
 clients to receive new Session keys and reach an independent Direct App engine.
+Privileged local operator identity uses the Runtime owner-enrolled public-key
+registry and fresh signed challenge contract. The Runtime owner authentication
+seam verifies proof and supplies bounded subject evidence to Admission, which
+rechecks current enrollment; authentication remains separate from local
+publication grants and repository policy.
 
 REPOSITORY_ACCESS_ASSERTION owns issuer trust, exact request/Relay/repository/
 App binding, ephemeral OAuth handling, replay, remote subject authority,
@@ -58,6 +63,12 @@ idempotent issuance, conditional generation-safe compensation, abort recovery,
 ready/merge admission, provenance, branch enforcement, and verification cases.
 It replaces new Implementation-root Change assumptions with distinct Source
 and task publication identities.
+
+SOURCE_ACCEPTANCE_POLICY fixes the approved protected-ref reviewer allowlist,
+independence against the complete exact-head candidate, and current-evidence
+rules. It is the domain contract for bounded policy loading, reviewer
+evaluation, and Source acceptance carrier consumption; this documentation
+decision does not claim those consumers are implemented.
 
 XSTATE_CHANGE_MACHINE preserves transition parity, operation graphs, bounded
 context, actor responsibilities, ready/abort/issuance Saga, error mapping,
@@ -176,7 +187,9 @@ particular candidate contains them.
 
 Audit all producers/consumers of Change root, task authorization, Source set,
 leaf publication, Source integration, standalone routing, termination, and
-conformance. #1213 is an important Local correction, not proof that all
+conformance. Local integration publication authenticates the Runtime
+owner-enrolled operator key subject before evaluating its separate exact
+operation grant. #1213 is an important Local correction, not proof that all
 historical Implementation-root joins have been removed.
 
 ### Remote authentication and admission

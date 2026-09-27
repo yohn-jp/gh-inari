@@ -5,6 +5,7 @@
 // installed tarball.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -27,12 +28,21 @@ const EXPECTED_PACKED_FILES = [
   "dist/artifact.d.ts",
   "dist/artifact.js",
   "dist/artifact.js.map",
+  "dist/artifact-observation-identity.d.ts",
+  "dist/artifact-observation-identity.js",
+  "dist/artifact-observation-identity.js.map",
+  "dist/artifact-reconciliation-executor.d.ts",
+  "dist/artifact-reconciliation-executor.js",
+  "dist/artifact-reconciliation-executor.js.map",
   "dist/artifact-contract-governance.d.ts",
   "dist/artifact-contract-governance.js",
   "dist/artifact-contract-governance.js.map",
   "dist/cli-core.d.ts",
   "dist/cli-core.js",
   "dist/cli-core.js.map",
+  "dist/cli-composition.d.ts",
+  "dist/cli-composition.js",
+  "dist/cli-composition.js.map",
   "dist/cli.d.ts",
   "dist/cli.js",
   "dist/cli.js.map",
@@ -45,6 +55,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/integration-routing.d.ts",
   "dist/integration-routing.js",
   "dist/integration-routing.js.map",
+  "dist/integration-publication-plan.d.ts",
+  "dist/integration-publication-plan.js",
+  "dist/integration-publication-plan.js.map",
   "dist/integration-routing-adapters.d.ts",
   "dist/integration-routing-adapters.js",
   "dist/integration-routing-adapters.js.map",
@@ -192,6 +205,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/contract/schema.d.ts",
   "dist/contract/schema.js",
   "dist/contract/schema.js.map",
+  "dist/contract/json-schema-runtime.d.ts",
+  "dist/contract/json-schema-runtime.js",
+  "dist/contract/json-schema-runtime.js.map",
   "dist/contract/validation.d.ts",
   "dist/contract/validation.js",
   "dist/contract/validation.js.map",
@@ -204,6 +220,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/implementation-authorization.d.ts",
   "dist/implementation-authorization.js",
   "dist/implementation-authorization.js.map",
+  "dist/implementation-task-termination.d.ts",
+  "dist/implementation-task-termination.js",
+  "dist/implementation-task-termination.js.map",
   "dist/implementation-readiness.d.ts",
   "dist/implementation-readiness.js",
   "dist/implementation-readiness.js.map",
@@ -249,6 +268,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/github/adapter-core.d.ts",
   "dist/github/adapter-core.js",
   "dist/github/adapter-core.js.map",
+  "dist/github/source-acceptance-review.d.ts",
+  "dist/github/source-acceptance-review.js",
+  "dist/github/source-acceptance-review.js.map",
   "dist/github/pr-publication-adapter.d.ts",
   "dist/github/pr-publication-adapter.js",
   "dist/github/pr-publication-adapter.js.map",
@@ -336,6 +358,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/github/standalone-adapter.d.ts",
   "dist/github/standalone-adapter.js",
   "dist/github/standalone-adapter.js.map",
+  "dist/github/task-termination-record.d.ts",
+  "dist/github/task-termination-record.js",
+  "dist/github/task-termination-record.js.map",
   "dist/github/runtime-authority-publication-capability.d.ts",
   "dist/github/runtime-authority-publication-capability.js",
   "dist/github/runtime-authority-publication-capability.js.map",
@@ -591,6 +616,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/relay/local-runtime.d.ts",
   "dist/relay/local-runtime.js",
   "dist/relay/local-runtime.js.map",
+  "dist/remote/repository-access-assertion.d.ts",
+  "dist/remote/repository-access-assertion.js",
+  "dist/remote/repository-access-assertion.js.map",
   "dist/local-application-state.d.ts",
   "dist/local-application-state.js",
   "dist/local-application-state.js.map",
@@ -642,6 +670,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/executor/execution.d.ts",
   "dist/executor/execution.js",
   "dist/executor/execution.js.map",
+  "dist/executor/task-termination.d.ts",
+  "dist/executor/task-termination.js",
+  "dist/executor/task-termination.js.map",
   "dist/executor/issuer-input.d.ts",
   "dist/executor/issuer-input.js",
   "dist/executor/issuer-input.js.map",
@@ -666,6 +697,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/local-control/runtime-discovery.d.ts",
   "dist/local-control/runtime-discovery.js",
   "dist/local-control/runtime-discovery.js.map",
+  "dist/local-control/operator-key-registry.d.ts",
+  "dist/local-control/operator-key-registry.js",
+  "dist/local-control/operator-key-registry.js.map",
   "dist/local-control/runtime-log.d.ts",
   "dist/local-control/runtime-log.js",
   "dist/local-control/runtime-log.js.map",
@@ -816,6 +850,15 @@ const EXPECTED_PACKED_FILES = [
   "dist/skill.d.ts",
   "dist/skill.js",
   "dist/skill.js.map",
+  "dist/source-acceptance.d.ts",
+  "dist/source-acceptance.js",
+  "dist/source-acceptance.js.map",
+  "dist/source-acceptance-policy.d.ts",
+  "dist/source-acceptance-policy.js",
+  "dist/source-acceptance-policy.js.map",
+  "dist/source-acceptance-reviewer.d.ts",
+  "dist/source-acceptance-reviewer.js",
+  "dist/source-acceptance-reviewer.js.map",
   "dist/template-discovery.d.ts",
   "dist/template-discovery.js",
   "dist/template-discovery.js.map",
@@ -834,6 +877,326 @@ function run(command, args, options = {}) {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} exited with ${result.status}`);
   return result;
+}
+
+function certifyInstalledContractPackage(consumer, packageName) {
+  const smokePath = path.join(consumer, "contract-runtime.mjs");
+  const source = [
+    'import assert from "node:assert/strict";',
+    `import { compileJsonSchema } from ${JSON.stringify(`${packageName}/contract`)};`,
+    'const schema = compileJsonSchema({ $schema: "https://json-schema.org/draft/2020-12/schema", type: "string" });',
+    'assert.deepEqual(schema.validate("value"), { valid: true, diagnostics: [] });',
+    'assert.equal(schema.validate(3).diagnostics[0]?.code, "value_invalid");',
+  ].join("\n");
+  fs.writeFileSync(smokePath, `${source}\n`);
+  run(process.execPath, [smokePath], { cwd: consumer });
+  console.log("installed contract runtime verified: public package subpath resolves and validates Draft 2020-12");
+}
+
+function certifyInstalledSchemaNativeContractPackage(consumer, packageName) {
+  const smokePath = path.join(consumer, "schema-native-contract-runtime.mjs");
+  const source = String.raw`
+import assert from "node:assert/strict";
+import {
+  compileEffectiveArtifactContract,
+  materializeSemanticArtifact,
+  parseArtifactContract,
+  projectArtifactContractToIssueForm,
+} from "__PACKAGE_NAME__/contract";
+import { parseExistingPullRequestArtifact, renderPullRequestArtifact } from "__PACKAGE_NAME__/artifact";
+
+const provenance = {
+  authority: "repository-default-branch",
+  repository: {
+    host: "github.com",
+    owner: "example",
+    name: "inari",
+    nameWithOwner: "example/inari",
+    repositoryId: "1",
+  },
+  ref: "main",
+  treeSha: "tree-sha",
+  source: {
+    path: ".github/inari/pull-requests/structured-verification.json",
+    ref: "main",
+    sha: "blob-sha",
+    digest: "source-digest",
+  },
+};
+const schema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  properties: {
+    summary: { type: "string", minLength: 1 },
+    context: {
+      type: "object",
+      properties: { component: { type: "string" }, rationale: { type: "string" } },
+      required: ["component", "rationale"],
+      additionalProperties: false,
+    },
+    verification: {
+      type: "array",
+      minItems: 1,
+      maxItems: 4,
+      items: {
+        type: "object",
+        properties: {
+          scope: { type: "string", minLength: 1 },
+          command: { type: "string", minLength: 1 },
+          outcome: { type: "string", enum: ["passed", "failed", "blocked"] },
+          summary: { type: "string", minLength: 1 },
+        },
+        required: ["scope", "command", "outcome", "summary"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["summary", "context", "verification"],
+  additionalProperties: false,
+};
+const sourceContract = {
+  version: "2",
+  kind: "pull_request",
+  id: "structured-verification",
+  schema,
+  bindings: {
+    "/summary": { authority: { kind: "supplied" } },
+    "/context": { authority: { kind: "supplied" } },
+    "/verification": { authority: { kind: "supplied" }, presentation: { control: "checklist" } },
+  },
+};
+const supplied = {
+  summary: "Keep the verification record structured",
+  context: {
+    component: "schema-native artifact pipeline",
+    rationale: "Preserve the verification facts as typed values.",
+  },
+  verification: [
+    {
+      scope: "nested contract materialization",
+      command: "node --test --import tsx test/schema-native-contract.test.mjs",
+      outcome: "passed",
+      summary: "Nested verification data survives PR Markdown projection and observation.",
+    },
+  ],
+};
+const contract = parseArtifactContract(sourceContract);
+const effective = compileEffectiveArtifactContract(contract, { provenance });
+assert.deepEqual(effective.inputSchema.properties.context, schema.properties.context);
+assert.deepEqual(effective.inputSchema.properties.verification, schema.properties.verification);
+const semantic = materializeSemanticArtifact(effective, supplied);
+assert.deepEqual(semantic.values, supplied);
+const body = renderPullRequestArtifact(contract, semantic.values);
+assert.deepEqual(parseExistingPullRequestArtifact(contract, body).values, supplied);
+assert.throws(
+  () => projectArtifactContractToIssueForm({ ...sourceContract, kind: "issue", id: "structured-issue" }),
+  (error) => error.violations?.some(
+    (violation) => violation.code === "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY",
+  ) === true,
+);
+`;
+  fs.writeFileSync(smokePath, source.replaceAll("__PACKAGE_NAME__", packageName));
+  run(process.execPath, [smokePath], { cwd: consumer });
+  console.log(
+    "installed schema-native contract verified: public materialization preserves structured PR Markdown round trip and Issue Form rejects unsupported values",
+  );
+}
+
+function certifyInstalledImplementationTaskTerminationPackage(consumer, packageName) {
+  const smokePath = path.join(consumer, "implementation-task-termination-runtime.mjs");
+  const source = String.raw`
+import assert from "node:assert/strict";
+import {
+  IMPLEMENTATION_TASK_TERMINATION_KIND,
+  IMPLEMENTATION_TASK_TERMINATION_VERSION,
+  observeImplementationTaskTermination,
+  validateImplementationTaskTerminationRecord,
+} from "__PACKAGE_NAME__";
+
+const repository = {
+  repositoryHost: "github.com",
+  repositoryId: "1",
+  repository: "example/task-termination",
+};
+const implementation = { ...repository, number: 1 };
+const base = { branch: "main", revision: "a".repeat(40), freshness: "fresh-1" };
+const authorization = {
+  version: 1,
+  kind: "implementation-authorization",
+  implementation,
+  contractVersion: 1,
+  repository,
+  base,
+  governedBodyDigest: "b".repeat(64),
+};
+const record = {
+  version: IMPLEMENTATION_TASK_TERMINATION_VERSION,
+  kind: IMPLEMENTATION_TASK_TERMINATION_KIND,
+  repository,
+  implementation,
+  authorizationDigest: authorization.governedBodyDigest,
+  base,
+};
+
+assert.equal(IMPLEMENTATION_TASK_TERMINATION_KIND, "implementation-task-termination");
+assert.equal(validateImplementationTaskTerminationRecord(record, authorization).valid, true);
+assert.equal(
+  observeImplementationTaskTermination(
+    { status: "authoritative", provenance: { source: "repository" }, records: [{ record, provenance: { path: "termination.json" } }] },
+    authorization,
+  ).status,
+  "present",
+);
+`;
+  fs.writeFileSync(smokePath, `${source.replaceAll("__PACKAGE_NAME__", packageName)}\n`);
+  run(process.execPath, [smokePath], { cwd: consumer });
+  console.log("installed task termination runtime verified: public root API validates and observes a record");
+}
+
+function certifyInstalledArtifactReconciliationPackage(consumer, packageName) {
+  const smokePath = path.join(consumer, "artifact-reconciliation-runtime.mjs");
+  const source = String.raw`
+import assert from "node:assert/strict";
+import {
+  assertArtifactObservationIdentityCurrent,
+  compileIssueFormYaml,
+  executeArtifactReconciliation,
+  GitHubTransportError,
+  renderIssueArtifact,
+} from "__PACKAGE_NAME__";
+
+const LF = String.fromCharCode(10);
+const templatePath = ".github/ISSUE_TEMPLATE/feature.yml";
+const templateSource = [
+  "name: Feature",
+  "description: Feature",
+  "body:",
+  "  - type: textarea",
+  "    id: summary",
+  "    attributes:",
+  "      label: Summary",
+  "    validations:",
+  "      required: true",
+  "  - type: textarea",
+  "    id: context",
+  "    attributes:",
+  "      label: Context",
+  "    validations:",
+  "      required: true",
+  "",
+].join(LF);
+const localContract = compileIssueFormYaml(templateSource, {
+  id: "feature",
+  name: "Feature",
+  path: templatePath,
+  type: "issue-form",
+  kind: "issue",
+});
+const canonicalBody = renderIssueArtifact(localContract, {
+  fields: { summary: "A summary", context: "More context" },
+});
+function reorderedBody(body) {
+  const marker = body.split(LF).find((line) => line.startsWith("<!-- inari:template"));
+  assert.ok(marker);
+  const markerFree = body.replace(marker, "");
+  const summaryStart = markerFree.indexOf("### Summary");
+  const contextStart = markerFree.indexOf("### Context");
+  assert.ok(summaryStart >= 0 && contextStart > summaryStart);
+  const prefix = markerFree.slice(0, summaryStart);
+  const summary = markerFree.slice(summaryStart, contextStart).trim();
+  const context = markerFree.slice(contextStart).trim();
+  return prefix + context + LF + LF + summary + LF + LF + marker + LF;
+}
+function fixture(body, options = {}) {
+  const templates = options.ambiguous
+    ? [
+        { path: templatePath, source: templateSource },
+        { path: ".github/ISSUE_TEMPLATE/feature-copy.yml", source: templateSource },
+      ]
+    : [{ path: templatePath, source: templateSource }];
+  const blobs = new Map(templates.map((template, index) => ["blob-" + index, template.source]));
+  const entries = templates.map((template, index) => ({ path: template.path, type: "blob", sha: "blob-" + index }));
+  let issue = {
+    number: 80,
+    title: "feat: reconcile",
+    body,
+    state: "open",
+    url: "https://github.com/acme/inari/issues/80",
+    labels: [],
+    assignees: [],
+    repositoryId: "123",
+    repositoryHost: "github.com",
+  };
+  const counts = { updates: 0 };
+  return {
+    counts,
+    snapshot: () => ({ ...issue }),
+    adapter: {
+      async resolveRepositoryContext() {
+        return {
+          hostname: "github.com",
+          host: "github.com",
+          owner: "acme",
+          name: "inari",
+          nameWithOwner: "acme/inari",
+          url: "https://github.com/acme/inari",
+          repositoryId: "123",
+        };
+      },
+      async getRepositoryDefaultBranch() { return "main"; },
+      async getRepositoryTree() { return { sha: "tree-1", entries }; },
+      async getRepositoryBlob(sha) { return blobs.get(sha); },
+      async getIssue() {
+        if (options.observationFailure) throw new GitHubTransportError("issue.read", "read unavailable");
+        return { ...issue };
+      },
+      async updateIssue(number, artifact, _deadline, observationIdentity) {
+        counts.updates += 1;
+        if (options.stale) issue = { ...issue, title: "feat: concurrent edit" };
+        assertArtifactObservationIdentityCurrent("issue", observationIdentity, issue, number);
+        issue = { ...issue, title: artifact.title, body: artifact.body };
+        if (options.ambiguousEffect) throw new Error("update response lost");
+        return { ...issue };
+      },
+    },
+  };
+}
+const request = { version: 1, domain: "issue", number: 80 };
+const unchanged = fixture(canonicalBody);
+assert.equal((await executeArtifactReconciliation(unchanged.adapter, request)).outcome, "unchanged");
+assert.equal(unchanged.counts.updates, 0);
+
+const reconciled = fixture(reorderedBody(canonicalBody));
+const recovered = await executeArtifactReconciliation(reconciled.adapter, request);
+assert.equal(recovered.outcome, "reconciled");
+assert.equal(reconciled.snapshot().body, canonicalBody);
+
+const unmarked = canonicalBody
+  .split(LF)
+  .filter((line) => !line.startsWith("<!-- inari:template"))
+  .join(LF);
+const blocked = fixture(unmarked, { ambiguous: true });
+const blockedResult = await executeArtifactReconciliation(blocked.adapter, request);
+assert.equal(blockedResult.outcome, "blocked");
+assert.equal(blockedResult.routing.kind, "template-selection-required");
+assert.equal(blocked.counts.updates, 0);
+
+const stale = fixture(reorderedBody(canonicalBody), { stale: true });
+const staleResult = await executeArtifactReconciliation(stale.adapter, request);
+assert.equal(staleResult.outcome, "safe-pre-effect-retry");
+assert.equal(staleResult.effect, "not-started");
+
+const ambiguous = fixture(reorderedBody(canonicalBody), { ambiguousEffect: true });
+const ambiguousResult = await executeArtifactReconciliation(ambiguous.adapter, request);
+assert.equal(ambiguousResult.outcome, "possible-effect-ambiguity");
+assert.equal(ambiguousResult.effect, "possible");
+assert.equal(ambiguousResult.retry, "fresh-observation-required");
+`;
+  fs.writeFileSync(smokePath, source.replace("__PACKAGE_NAME__", packageName));
+  run(process.execPath, [smokePath], { cwd: consumer });
+  console.log(
+    "installed Core reconciliation verified: unchanged, recovered, blocked, stale, and possible-effect outcomes resolve from the packed public API",
+  );
 }
 
 // Walks every shape the "exports" map can take: a direct string target, an
@@ -951,6 +1314,326 @@ export async function validateCodexPlugin(packageJson, packedFiles) {
   // Scenario routing is certified by the installed artifact harness below.
 }
 
+function certifyInstalledCli(consumer, installed, packageName) {
+  const environment = { ...process.env, INARI_CONFIG_HOME: path.join(consumer, ".inari-config") };
+  for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) delete environment[name];
+  const invoke = (args) => {
+    const result = spawnSync(process.execPath, [path.join(installed, "dist", "index.js"), ...args], {
+      cwd: consumer,
+      env: environment,
+      encoding: "utf8",
+    });
+    if (result.error) throw result.error;
+    return result;
+  };
+
+  const version = invoke(["--version", "--json"]);
+  if (version.status !== 0 || version.stderr !== "") {
+    throw new Error(`installed CLI Canon version shell failed: ${version.stdout}${version.stderr}`);
+  }
+  if (
+    JSON.stringify(JSON.parse(version.stdout)) !==
+    JSON.stringify({ name: packageName, version: packageJsonVersion(installed) })
+  ) {
+    throw new Error("installed CLI Canon version shell did not report the installed package identity");
+  }
+
+  const help = invoke(["--help"]);
+  if (help.status !== 0 || !help.stdout.includes("Usage: inari <command>")) {
+    throw new Error(`installed CLI Canon help shell failed: ${help.stdout}${help.stderr}`);
+  }
+
+  for (const domain of ["issue", "pr"]) {
+    const viewHelp = invoke([domain, "view", "--help"]);
+    if (
+      viewHelp.status !== 0 ||
+      viewHelp.stderr !== "" ||
+      !viewHelp.stdout.includes(`Usage: inari ${domain} view <number>`) ||
+      !viewHelp.stdout.includes("--repository")
+    ) {
+      throw new Error(
+        `installed ${domain} View route did not resolve through CLI Canon: ${viewHelp.stdout}${viewHelp.stderr}`,
+      );
+    }
+  }
+
+  const noCommand = invoke(["--json"]);
+  if (noCommand.status === 0) throw new Error("installed CLI Canon accepted a no-command invocation");
+  let usage;
+  try {
+    usage = JSON.parse(noCommand.stderr);
+  } catch {
+    throw new Error(`installed CLI Canon no-command shell did not emit machine usage: ${noCommand.stderr}`);
+  }
+  if (usage?.failureKind !== "usage" && usage?.error?.kind !== "usage") {
+    throw new Error("installed CLI Canon no-command shell did not classify the failure as usage");
+  }
+
+  const delegated = invoke(["skill", "--json"]);
+  if (delegated.status !== 0 || delegated.stderr !== "") {
+    throw new Error(`installed delegated CLI route failed: ${delegated.stdout}${delegated.stderr}`);
+  }
+  const skill = JSON.parse(delegated.stdout);
+  if (typeof skill.version !== "string" || !Array.isArray(skill.scenarios) || skill.scenarios.length === 0) {
+    throw new Error("installed delegated CLI route did not return the skill index");
+  }
+  console.log("installed CLI verified: Canon root shell and delegated skill route from the exact packed artifact");
+}
+
+async function certifyArtifactReconciliationCli(entrypoint, consumer, label) {
+  const issueTemplatePath = ".github/ISSUE_TEMPLATE/feature.yml";
+  const issueTemplate = [
+    "name: Feature",
+    "description: Feature",
+    'title: "feat: "',
+    "body:",
+    "  - type: textarea",
+    "    id: summary",
+    "    attributes:",
+    "      label: Summary",
+    "    validations:",
+    "      required: true",
+    "  - type: textarea",
+    "    id: context",
+    "    attributes:",
+    "      label: Context",
+    "    validations:",
+    "      required: true",
+    "",
+  ].join("\n");
+  const pullRequestTemplatePath = ".github/PULL_REQUEST_TEMPLATE.md";
+  const pullRequestTemplate = "## Summary\n\nDescribe the change.\n";
+  const issueMarker = `<!-- inari:template ${JSON.stringify({ version: "1", kind: "issue", path: issueTemplatePath })} -->`;
+  const pullRequestMarker = `<!-- inari:template ${JSON.stringify({ version: "1", kind: "pull_request", path: pullRequestTemplatePath })} -->`;
+  const canonicalIssueBody = `### Summary\n\nA deterministic summary\n\n### Context\n\nAdditional context\n\n${issueMarker}\n`;
+  const reorderedIssueBody = `### Context\n\nAdditional context\n\n### Summary\n\nA deterministic summary\n\n${issueMarker}\n`;
+  const canonicalPullRequestBody = `## Summary\n\nA deterministic pull request summary\n\n${pullRequestMarker}\n`;
+  const scenarios = [
+    {
+      name: "Issue unchanged",
+      domain: "issue",
+      number: 80,
+      body: canonicalIssueBody,
+      expectedOutcome: "unchanged",
+      expectedStatus: 0,
+      expectedPatches: 0,
+    },
+    {
+      name: "PR unchanged",
+      domain: "pr",
+      number: 81,
+      body: canonicalPullRequestBody,
+      expectedOutcome: "unchanged",
+      expectedStatus: 0,
+      expectedPatches: 0,
+    },
+    {
+      name: "Issue reconciled",
+      domain: "issue",
+      number: 80,
+      body: reorderedIssueBody,
+      expectedOutcome: "reconciled",
+      expectedStatus: 0,
+      expectedPatches: 1,
+    },
+    {
+      name: "Issue blocked by template ambiguity",
+      domain: "issue",
+      number: 80,
+      body: canonicalIssueBody.replace(`${issueMarker}\n`, ""),
+      duplicateIssueTemplate: true,
+      expectedOutcome: "blocked",
+      expectedStatus: 2,
+      expectedPatches: 0,
+    },
+    {
+      name: "Issue stale observation",
+      domain: "issue",
+      number: 80,
+      body: reorderedIssueBody,
+      stale: true,
+      expectedOutcome: "safe-pre-effect-retry",
+      expectedStatus: 3,
+      expectedRetry: "safe",
+      expectedPatches: 0,
+    },
+    {
+      name: "Issue possible-effect ambiguity",
+      domain: "issue",
+      number: 80,
+      body: reorderedIssueBody,
+      possibleEffect: true,
+      expectedOutcome: "possible-effect-ambiguity",
+      expectedStatus: 3,
+      expectedRetry: "fresh-observation-required",
+      expectedPatches: 1,
+    },
+  ];
+  let activeScenario;
+  let activeArtifact;
+  let artifactReads = 0;
+  let patches = 0;
+  const blobSources = new Map();
+  const sendJson = (response, status, body) => {
+    const encoded = JSON.stringify(body);
+    response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) });
+    response.end(encoded);
+  };
+  const server = http.createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      const pathname = decodeURIComponent(url.pathname);
+      if (request.method === "GET" && pathname === "/repos/acme/inari") {
+        sendJson(response, 200, { id: 100000157, full_name: "acme/inari", default_branch: "main" });
+        return;
+      }
+      if (request.method === "GET" && pathname === "/repos/acme/inari/git/trees/main") {
+        const entries = activeScenario.duplicateIssueTemplate
+          ? [
+              { path: issueTemplatePath, type: "blob", sha: "issue-template" },
+              { path: ".github/ISSUE_TEMPLATE/feature-copy.yml", type: "blob", sha: "issue-template-copy" },
+            ]
+          : activeScenario.domain === "issue"
+            ? [{ path: issueTemplatePath, type: "blob", sha: "issue-template" }]
+            : [{ path: pullRequestTemplatePath, type: "blob", sha: "pull-request-template" }];
+        sendJson(response, 200, { sha: "reconcile-tree-sha", truncated: false, tree: entries });
+        return;
+      }
+      if (request.method === "GET" && pathname.startsWith("/repos/acme/inari/git/blobs/")) {
+        const sha = pathname.slice("/repos/acme/inari/git/blobs/".length);
+        const source = blobSources.get(sha);
+        if (source === undefined) sendJson(response, 404, { message: "not found" });
+        else
+          sendJson(response, 200, { sha, encoding: "base64", content: Buffer.from(source, "utf8").toString("base64") });
+        return;
+      }
+      const resource = activeScenario.domain === "issue" ? "issues" : "pulls";
+      const artifactPath = `/repos/acme/inari/${resource}/${activeScenario.number}`;
+      if (request.method === "GET" && pathname === artifactPath) {
+        artifactReads += 1;
+        const observed =
+          activeScenario.stale && artifactReads === 2
+            ? { ...activeArtifact, title: "feat: concurrent edit" }
+            : activeArtifact;
+        sendJson(response, 200, observed);
+        return;
+      }
+      if (request.method === "PATCH" && pathname === artifactPath) {
+        patches += 1;
+        const chunks = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        activeArtifact = { ...activeArtifact, ...JSON.parse(Buffer.concat(chunks).toString("utf8")) };
+        if (activeScenario.possibleEffect)
+          sendJson(response, 500, { message: "provider response lost after possible effect" });
+        else sendJson(response, 200, activeArtifact);
+        return;
+      }
+      sendJson(response, 404, { message: "not found" });
+    } catch (error) {
+      sendJson(response, 500, { message: error instanceof Error ? error.message : "controlled provider failed" });
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("artifact reconciliation provider did not bind");
+  const environment = {
+    ...process.env,
+    GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
+    GH_TOKEN: "reconcile-fixture-token",
+  };
+  delete environment.GITHUB_TOKEN;
+  delete environment.GITHUB_ENTERPRISE_TOKEN;
+  try {
+    for (const scenario of scenarios) {
+      activeScenario = scenario;
+      activeArtifact =
+        scenario.domain === "issue"
+          ? {
+              number: scenario.number,
+              title: "feat: reconcile",
+              body: scenario.body,
+              state: "open",
+              html_url: "https://github.com/acme/inari/issues/80",
+              labels: [],
+              assignees: [],
+            }
+          : {
+              number: scenario.number,
+              title: "feat: reconcile",
+              body: scenario.body,
+              state: "open",
+              html_url: "https://github.com/acme/inari/pull/81",
+              draft: false,
+              head: { ref: "feature" },
+              base: { ref: "main" },
+            };
+      artifactReads = 0;
+      patches = 0;
+      blobSources.clear();
+      if (scenario.duplicateIssueTemplate) {
+        blobSources.set("issue-template", issueTemplate);
+        blobSources.set("issue-template-copy", issueTemplate);
+      } else if (scenario.domain === "issue") blobSources.set("issue-template", issueTemplate);
+      else blobSources.set("pull-request-template", pullRequestTemplate);
+
+      const result = await new Promise((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [entrypoint, scenario.domain, "reconcile", String(scenario.number), "--repository", "acme/inari", "--json"],
+          {
+            cwd: consumer,
+            env: environment,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        let stdout = "";
+        let stderr = "";
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error(`${label} ${scenario.name} timed out: ${stdout}${stderr}`));
+        }, 20_000);
+        child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+        child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+        child.once("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+        child.once("close", (status) => {
+          clearTimeout(timer);
+          resolve({ status, stdout, stderr });
+        });
+      });
+      if (result.status !== scenario.expectedStatus || result.stderr !== "")
+        throw new Error(`${label} ${scenario.name} exited ${String(result.status)}: ${result.stdout}${result.stderr}`);
+      let projection;
+      try {
+        projection = JSON.parse(result.stdout.trim());
+      } catch {
+        throw new Error(`${label} ${scenario.name} did not emit one JSON result: ${result.stdout}`);
+      }
+      if (projection.operation !== `${scenario.domain}.reconcile` || projection.outcome !== scenario.expectedOutcome)
+        throw new Error(`${label} ${scenario.name} returned an unexpected projection: ${result.stdout}`);
+      if (scenario.expectedRetry !== undefined && projection.retry !== scenario.expectedRetry)
+        throw new Error(`${label} ${scenario.name} changed Core retry evidence: ${result.stdout}`);
+      if (patches !== scenario.expectedPatches)
+        throw new Error(
+          `${label} ${scenario.name} made ${patches} provider mutation(s), expected ${scenario.expectedPatches}`,
+        );
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+  console.log(`${label} CLI reconciler verified: unchanged, reconciled, blocked, stale, and ambiguous outcomes`);
+}
+
+function packageJsonVersion(installed) {
+  const packagePath = path.join(installed, "package.json");
+  return JSON.parse(fs.readFileSync(packagePath, "utf8")).version;
+}
+
 // Installs the packed artifact outside the checkout and starts the installed
 // `inari setup console`: the host must serve exactly the packaged console
 // assets from beside its own installed module and deliver a same-origin
@@ -979,6 +1662,12 @@ async function certifyInstalledSetupConsole(tarballPath, packageName) {
     const installed = fs.realpathSync(path.join(consumer, "node_modules", ...packageName.split("/")));
     if (!path.relative(repoRoot, installed).startsWith(".."))
       throw new Error("installed package resolved inside the checkout");
+    certifyInstalledCli(consumer, installed, packageName);
+    await certifyArtifactReconciliationCli(path.join(installed, "dist", "index.js"), consumer, "packed installed");
+    certifyInstalledContractPackage(consumer, packageName);
+    certifyInstalledSchemaNativeContractPackage(consumer, packageName);
+    certifyInstalledImplementationTaskTerminationPackage(consumer, packageName);
+    certifyInstalledArtifactReconciliationPackage(consumer, packageName);
     const environment = { ...process.env, INARI_CONFIG_HOME: path.join(root, "config") };
     for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) delete environment[name];
     child = spawn(
@@ -1063,6 +1752,13 @@ async function main() {
     }
   }
 
+  const builtConsumer = fs.mkdtempSync(path.join(os.tmpdir(), "gh-inari-built-cli-reconcile-"));
+  try {
+    await certifyArtifactReconciliationCli(path.join(repoRoot, "dist", "index.js"), builtConsumer, "built");
+  } finally {
+    fs.rmSync(builtConsumer, { recursive: true, force: true });
+  }
+
   const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 
   const packResult = run("npm", ["pack", "--json", "--ignore-scripts"]);
@@ -1127,7 +1823,6 @@ async function main() {
       stdio: "inherit",
     });
     await certifyInstalledSetupConsole(tarballPath, packageJson.name);
-    run(process.execPath, ["scripts/release-preparation-certification.mjs"], { stdio: "inherit" });
     run(process.execPath, ["scripts/endpoint-dashboard-certification.mjs"], { stdio: "inherit" });
   } finally {
     fs.rmSync(tarballPath, { force: true });

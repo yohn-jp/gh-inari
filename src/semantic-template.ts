@@ -7,11 +7,16 @@ import { stringify as stringifyYaml } from "yaml";
 import {
   assertCanonicalContract,
   MULTI_SELECT_OPTION_SEPARATOR,
+  JSON_SCHEMA_DIALECT,
   type CanonicalContract,
   type CanonicalField,
   type CanonicalSection,
 } from "./contract/ir.js";
-import { parseArtifactContract } from "./contract/artifact-contract.js";
+import {
+  parseArtifactContract,
+  SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+  type SchemaNativeArtifactContract,
+} from "./contract/artifact-contract.js";
 import {
   ARTIFACT_CONTRACT_TEMPLATE_NOTICE,
   renderArtifactContractNativeTemplate,
@@ -465,6 +470,171 @@ export function compileSemanticTemplateSource(
   } satisfies SemanticTemplateDocument;
   const contract = compileNativeProjection(native, identity);
   return applySemanticIdentityAndConstraints(contract, source);
+}
+
+/**
+ * Compile normalized semantic-template v1 authoring to schema-native Artifact
+ * Contract v2. The output is accepted by `compileEffectiveArtifactContract`;
+ * governed production callers still use `compileSemanticTemplateSource` and
+ * its legacy CanonicalContract result until a later consumer migration.
+ * Retire this adapter only after governed v1 sources and their resolver path
+ * have migrated to schema-native Canon.
+ */
+export function compileSemanticTemplateArtifactContract(
+  sourceInput: SemanticTemplateSource,
+): SchemaNativeArtifactContract {
+  const source = normalizeSemanticTemplate(sourceInput);
+  const properties: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  const bindings: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  const required: string[] = [];
+
+  for (const [sectionIndex, section] of source.sections.entries()) {
+    if (section.kind !== "input") continue;
+    const presentationControl = semanticPresentationControl(section, `$.sections[${sectionIndex}].element`);
+    properties[section.id] = {
+      title: section.label ?? section.id,
+      ...(section.description === undefined ? {} : { description: section.description }),
+      ...semanticFieldSchema(section),
+    };
+    if (section.required === true && section.defaultValue === undefined) required.push(section.id);
+
+    const options = semanticPresentationOptions(section);
+    bindings[rootPropertyPointer(section.id)] = {
+      authority: { kind: "supplied" },
+      presentation: {
+        control: presentationControl,
+        ...(options === undefined ? {} : { options }),
+      },
+    };
+  }
+
+  const schema = {
+    $schema: JSON_SCHEMA_DIALECT,
+    title: source.title ?? source.name,
+    ...(source.description === undefined ? {} : { description: source.description }),
+    type: "object",
+    properties,
+    ...(required.length === 0 ? {} : { required }),
+    additionalProperties: false,
+  };
+  const contract = parseArtifactContract({
+    version: SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+    kind: source.kind,
+    id: source.id,
+    schema,
+    bindings,
+  });
+  if (contract.version !== SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION) {
+    throw new Error("Semantic-template compatibility compilation must produce schema-native Artifact Contract v2.");
+  }
+  return contract;
+}
+
+function semanticFieldSchema(section: SemanticSection): Record<string, unknown> {
+  const type = semanticTypeOf(section);
+  if (type === "string" || type === "enum") {
+    const schema: Record<string, unknown> = {
+      type: "string",
+      ...(section.minLength === undefined ? {} : { minLength: section.minLength }),
+      ...(section.maxLength === undefined ? {} : { maxLength: section.maxLength }),
+    };
+    if (type === "enum") schema.enum = (section.options ?? []).map(semanticOptionValue);
+    if (section.pattern !== undefined) schema.pattern = section.pattern;
+    if (section.required === true) {
+      if (section.pattern === undefined) schema.pattern = "\\S";
+      else schema.allOf = [{ pattern: "\\S" }];
+    }
+    const defaultValue = semanticFieldDefault(section);
+    if (defaultValue !== undefined) schema.default = defaultValue;
+    return schema;
+  }
+
+  const options = section.options ?? [];
+  const itemSchema: Record<string, unknown> = { type: "string" };
+  if (type === "checklist" || section.options !== undefined) itemSchema.enum = options.map(semanticOptionValue);
+  const minimum = Math.max(section.minItems ?? 0, section.required === true ? 1 : 0);
+  const schema: Record<string, unknown> = {
+    type: "array",
+    items: itemSchema,
+    uniqueItems: true,
+    ...(minimum === 0 ? {} : { minItems: minimum }),
+    ...(section.maxItems === undefined ? {} : { maxItems: section.maxItems }),
+  };
+  if (type === "checklist") {
+    const requiredItems = options
+      .filter((option) => option.required === true)
+      .map((option) => semanticOptionValue(option));
+    if (requiredItems.length > 0) {
+      schema.allOf = requiredItems.map((id) => ({ contains: { const: id }, minContains: 1 }));
+    }
+  }
+  const defaultValue = semanticFieldDefault(section);
+  if (defaultValue !== undefined) schema.default = defaultValue;
+  return schema;
+}
+
+function semanticFieldDefault(section: SemanticSection): string | readonly string[] | undefined {
+  if (section.defaultValue === undefined) return undefined;
+  const options = section.options ?? [];
+  const type = semanticTypeOf(section);
+  if (type === "string") {
+    if (typeof section.defaultValue !== "string") {
+      throw new SemanticTemplateError([
+        {
+          code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+          path: `$.sections.${section.id}.defaultValue`,
+          message: "String fields require a string default value.",
+        },
+      ]);
+    }
+    return section.defaultValue;
+  }
+  if (type === "enum") return semanticDefaultValue(section, options, false);
+  return semanticDefaultValue(section, options, true);
+}
+
+function semanticPresentationControl(
+  section: SemanticSection,
+  path: string,
+): "text" | "multiline" | "choice" | "checklist" {
+  const type = semanticTypeOf(section);
+  const element = section.element;
+  const compatible =
+    type === "string"
+      ? element === undefined || element === "input" || element === "textarea"
+      : type === "enum" || type === "array"
+        ? element === undefined || element === "dropdown"
+        : element === undefined || element === "checkboxes";
+  if (!compatible) {
+    throw new SemanticTemplateError([
+      {
+        code: "SEMANTIC_TEMPLATE_INVALID_VALUE",
+        path,
+        message: `Element "${element}" is incompatible with semantic type "${type}".`,
+      },
+    ]);
+  }
+  if (type === "string") return element === "input" ? "text" : "multiline";
+  if (type === "enum" || type === "array") return "choice";
+  return "checklist";
+}
+
+function semanticPresentationOptions(section: SemanticSection): Record<string, string> | undefined {
+  if (section.options === undefined) return undefined;
+  const options: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const option of section.options) {
+    Object.defineProperty(options, semanticOptionValue(option), {
+      value: option.label,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return options;
+}
+
+function rootPropertyPointer(name: string): string {
+  return `/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`;
 }
 
 /** Render one semantic contract to the committed native GitHub projection. */

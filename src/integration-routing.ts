@@ -439,16 +439,31 @@ export function tryProjectIntegrationRouting(input: unknown): IntegrationRouting
   );
   if ((input.mode !== undefined || input.topology !== undefined) && requestedMode === undefined)
     diagnostic(diagnostics, "INTEGRATION_ROUTING_MODE_INVALID", "$.mode", "Unsupported integration routing mode.");
+  const requestedRole = normalizeRole(input.role ?? input.prRole);
+  if ((input.role !== undefined || input.prRole !== undefined) && requestedRole === undefined)
+    diagnostic(diagnostics, "INTEGRATION_ROUTING_ROLE_INVALID", "$.role", "Unsupported pull-request routing role.");
   const mode: IntegrationRoutingMode =
     requestedMode ??
     (epic !== undefined && sourceIssue !== undefined
       ? "issue-integration"
-      : epic !== undefined
-        ? "legacy"
-        : "standalone");
-  const requestedRole = normalizeRole(input.role ?? input.prRole);
-  if ((input.role !== undefined || input.prRole !== undefined) && requestedRole === undefined)
-    diagnostic(diagnostics, "INTEGRATION_ROUTING_ROLE_INVALID", "$.role", "Unsupported pull-request routing role.");
+      : epic !== undefined && requestedRole === "epic-integration"
+        ? "issue-integration"
+        : epic !== undefined
+          ? "legacy"
+          : "standalone");
+  let role: IntegrationRoutingRole;
+  if (requestedRole !== undefined) role = requestedRole;
+  else if (mode !== "issue-integration") role = "implementation";
+  else {
+    const candidateHead = head ?? implementationBranch;
+    const headParts = candidateHead === undefined ? undefined : recognizeBranchName(candidateHead);
+    role =
+      headParts?.type === "issue"
+        ? "issue-integration"
+        : headParts?.type === "epic"
+          ? "epic-integration"
+          : "implementation";
+  }
 
   if (implementation !== undefined && sourceIssue !== undefined && sameReference(implementation, sourceIssue))
     diagnostic(
@@ -552,48 +567,48 @@ export function tryProjectIntegrationRouting(input: unknown): IntegrationRouting
         "$.relationships.implementationParent",
         "Legacy routing cannot skip the declared Epic parent.",
       );
-  } else {
+  } else if (role === "implementation") {
     if (implementation === undefined)
       diagnostic(
         diagnostics,
         "INTEGRATION_ROUTING_REFERENCE_INVALID",
         "$.implementation",
-        "Issue integration routing requires an Implementation reference.",
+        "Implementation PR routing requires an Implementation reference.",
       );
     if (sourceIssue === undefined)
       diagnostic(
         diagnostics,
         "INTEGRATION_ROUTING_REFERENCE_INVALID",
         "$.sourceIssue",
-        "Issue integration routing requires a source Issue reference.",
+        "Implementation PR routing requires a source Issue reference.",
       );
     if (epic === undefined)
       diagnostic(
         diagnostics,
         "INTEGRATION_ROUTING_REFERENCE_INVALID",
         "$.epic",
-        "Issue integration routing requires a parent Epic reference.",
+        "Implementation PR routing requires a parent Epic reference.",
       );
     if (issueBranch === undefined)
       diagnostic(
         diagnostics,
         "INTEGRATION_ROUTING_METADATA_REQUIRED",
         "$.issueBranch",
-        "Issue integration routing requires the canonical Issue branch metadata.",
+        "Implementation PR routing requires the canonical Issue branch metadata.",
       );
     if (epicBranch === undefined)
       diagnostic(
         diagnostics,
         "INTEGRATION_ROUTING_METADATA_REQUIRED",
         "$.epicBranch",
-        "Issue integration routing requires the canonical Epic branch metadata.",
+        "Implementation PR routing requires the canonical Epic branch metadata.",
       );
     if (implementationParent === undefined)
       diagnostic(
         diagnostics,
         "INTEGRATION_ROUTING_RELATIONSHIP_REQUIRED",
         "$.relationships.implementationParent",
-        "Issue integration routing requires the Implementation parent relationship.",
+        "Implementation PR routing requires the Implementation parent relationship.",
       );
     else if (sourceIssue !== undefined && !sameReference(implementationParent, sourceIssue))
       diagnostic(
@@ -607,7 +622,7 @@ export function tryProjectIntegrationRouting(input: unknown): IntegrationRouting
         diagnostics,
         "INTEGRATION_ROUTING_RELATIONSHIP_REQUIRED",
         "$.relationships.sourceIssueParent",
-        "Issue integration routing requires the source Issue parent relationship.",
+        "Implementation PR routing requires the source Issue parent relationship.",
       );
     else if (epic !== undefined && !sameReference(sourceIssueParent, epic))
       diagnostic(
@@ -615,6 +630,121 @@ export function tryProjectIntegrationRouting(input: unknown): IntegrationRouting
         "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH",
         "$.relationships.sourceIssueParent",
         "Source Issue parent must be the Epic.",
+      );
+  } else if (role === "issue-integration") {
+    if (sourceIssue === undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_REFERENCE_INVALID",
+        "$.sourceIssue",
+        "Source integration routing requires a Source Issue reference.",
+      );
+    if (epic === undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_REFERENCE_INVALID",
+        "$.epic",
+        "Source integration routing requires its canonical parent Epic reference.",
+      );
+    if (issueBranch === undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_METADATA_REQUIRED",
+        "$.issueBranch",
+        "Source integration routing requires the canonical Source branch metadata.",
+      );
+    if (epicBranch === undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_METADATA_REQUIRED",
+        "$.epicBranch",
+        "Source integration routing requires the canonical Epic branch metadata.",
+      );
+    if (sourceIssueParent === undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_REQUIRED",
+        "$.relationships.sourceIssueParent",
+        "Source integration routing requires the Source parent relationship.",
+      );
+    else if (epic !== undefined && !sameReference(sourceIssueParent, epic))
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH",
+        "$.relationships.sourceIssueParent",
+        "Source parent must be the Epic.",
+      );
+    if (implementationParent !== undefined && (implementation === undefined || sourceIssue === undefined))
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH",
+        "$.relationships.implementationParent",
+        "An Implementation parent relationship requires its Implementation and Source identities.",
+      );
+    else if (
+      implementationParent !== undefined &&
+      sourceIssue !== undefined &&
+      !sameReference(implementationParent, sourceIssue)
+    )
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH",
+        "$.relationships.implementationParent",
+        "Implementation parent must be the Source Issue.",
+      );
+  } else {
+    if (epic === undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_REFERENCE_INVALID",
+        "$.epic",
+        "Epic integration routing requires an Epic reference.",
+      );
+    if (epicBranch === undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_METADATA_REQUIRED",
+        "$.epicBranch",
+        "Epic integration routing requires the canonical Epic branch metadata.",
+      );
+    if (sourceIssue !== undefined && sourceIssueParent === undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_REQUIRED",
+        "$.relationships.sourceIssueParent",
+        "A supplied Source identity requires its canonical parent relationship.",
+      );
+    else if (sourceIssue !== undefined && epic !== undefined && !sameReference(sourceIssueParent, epic))
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH",
+        "$.relationships.sourceIssueParent",
+        "Supplied Source parent must be the Epic.",
+      );
+    if (sourceIssue === undefined && sourceIssueParent !== undefined)
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH",
+        "$.relationships.sourceIssueParent",
+        "A Source parent relationship requires a Source identity.",
+      );
+    if (implementationParent !== undefined && (implementation === undefined || sourceIssue === undefined))
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH",
+        "$.relationships.implementationParent",
+        "An Implementation parent relationship requires its Implementation and Source identities.",
+      );
+    else if (
+      implementationParent !== undefined &&
+      sourceIssue !== undefined &&
+      !sameReference(implementationParent, sourceIssue)
+    )
+      diagnostic(
+        diagnostics,
+        "INTEGRATION_ROUTING_RELATIONSHIP_MISMATCH",
+        "$.relationships.implementationParent",
+        "Implementation parent must be the Source Issue.",
       );
   }
 
@@ -649,20 +779,6 @@ export function tryProjectIntegrationRouting(input: unknown): IntegrationRouting
     );
 
   if (diagnostics.length > 0 || defaultBranch === undefined) return invalidResult(diagnostics);
-
-  let role: IntegrationRoutingRole;
-  if (requestedRole !== undefined) role = requestedRole;
-  else if (mode !== "issue-integration") role = "implementation";
-  else {
-    const candidateHead = head ?? implementationBranch;
-    const headParts = candidateHead === undefined ? undefined : recognizeBranchName(candidateHead);
-    role =
-      headParts?.type === "issue"
-        ? "issue-integration"
-        : headParts?.type === "epic"
-          ? "epic-integration"
-          : "implementation";
-  }
 
   if (mode !== "issue-integration" && role !== "implementation")
     diagnostic(

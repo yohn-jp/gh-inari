@@ -302,9 +302,9 @@ function createLocalAdmissionHttpHandler(
       try {
         const authorization = authorizationOptions(options);
         const binding = requireActiveSessionRepository(sessionId, contractRequest.repository, authorization);
+        const change = await currentSessionChange(binding, authorization);
         if (options.executor.readGovernedContract === undefined) throw new LocalExecutorUnavailable();
         const contract = await options.executor.readGovernedContract(contractRequest);
-        const change = await currentSessionChange(binding, authorization);
         return json(200, { ok: true, contract, change });
       } catch (error: unknown) {
         return deniedFrom(

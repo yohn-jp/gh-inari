@@ -32,9 +32,29 @@ import {
 } from "./contract/issue-reference.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 import {
+  parseMarkdownStructure,
+  type MarkdownHeading,
+  type MarkdownSourceRange,
+  type MarkdownStructure,
+} from "./markdown-ast.js";
+import {
   createValidatedRenderedIssueArtifact,
   createValidatedRenderedPullRequestArtifact,
 } from "./github/capability.js";
+import {
+  assertSchemaNativeIssueFormCapability,
+  assertSchemaNativePullRequestMarkdownCapability,
+  NativeTemplateProjectionError,
+  schemaNativeMarkdownFieldHeading,
+} from "./contract/native-template-projection.js";
+import {
+  parseArtifactContract,
+  serializeArtifactContract,
+  SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+  type SchemaNativeArtifactContract,
+} from "./contract/artifact-contract.js";
+import { buildSchemaNativeInputSchema } from "./contract/effective-artifact-contract.js";
+import { compileJsonSchema } from "./contract/json-schema-runtime.js";
 
 // v1 artifact APIs remain available during migration. Their explicit
 // convergence adapter is re-exported here so callers do not need a second
@@ -209,6 +229,18 @@ export interface RecoverableArtifactValues {
   readonly values: Readonly<Record<string, unknown>>;
   readonly dependencies?: IssueDependencies;
   readonly diagnostics: readonly ExistingArtifactDiagnostic[];
+  /** Bounded evidence that every material source range was semantically accounted for. */
+  readonly coverage: ArtifactRecoveryCoverage;
+}
+
+export interface ArtifactRecoveryCoverage {
+  readonly complete: boolean;
+  readonly sourceLineCount: number;
+  readonly coveredLineCount: number;
+  readonly unmatchedLineCount: number;
+  /** At most sixteen ranges are included; ranges contain no source text. */
+  readonly unmatchedRanges: readonly MarkdownSourceRange[];
+  readonly truncated: boolean;
 }
 
 export interface ExistingArtifactValidationResult {
@@ -728,7 +760,607 @@ export function repairPartialArtifactInput(
 /** Terminology alias for callers that describe targeted repair as a merge. */
 export const mergePartialArtifactInput = repairPartialArtifactInput;
 
+const MAX_SCHEMA_NATIVE_MARKDOWN_BYTES = 256 * 1024;
+const MAX_SCHEMA_NATIVE_VALUE_BYTES = 16 * 1024;
+const MAX_SCHEMA_NATIVE_RENDERED_NODES = 4096;
+
+type SchemaNativeRecord = Record<string, unknown>;
+
+function isSchemaNativeInput(input: unknown): boolean {
+  return isRecord(input) && input.version === SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION;
+}
+
+function parseSchemaNativeContract(input: unknown): SchemaNativeArtifactContract {
+  const source =
+    isRecord(input) && Array.isArray(input.derivations)
+      ? (JSON.parse(serializeArtifactContract(input as unknown as SchemaNativeArtifactContract)) as unknown)
+      : input;
+  return parseArtifactContract(source) as SchemaNativeArtifactContract;
+}
+
+function schemaNativeProjectionError(path: string, message: string): never {
+  throw new NativeTemplateProjectionError([
+    { code: "NATIVE_TEMPLATE_PROJECTION_UNSUPPORTED_CAPABILITY", path, message },
+  ]);
+}
+
+function schemaNativeBinding(contract: SchemaNativeArtifactContract, name: string) {
+  return contract.bindings[`/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`];
+}
+
+function schemaNativeSuppliedNames(contract: SchemaNativeArtifactContract): readonly string[] {
+  return Object.keys(contract.schema.properties as Record<string, unknown>)
+    .filter((name) => schemaNativeBinding(contract, name)?.authority.kind === "supplied")
+    .sort(compareStrings);
+}
+
+function schemaNativeTemplateMarker(contract: SchemaNativeArtifactContract): string {
+  if (contract.kind === "branch")
+    schemaNativeProjectionError("$.kind", "Branches have no body template identity marker.");
+  const directory = contract.kind === "issue" ? "issues" : "pull-requests";
+  const marker: TemplateIdentityMarker = {
+    version: TEMPLATE_IDENTITY_MARKER_VERSION,
+    kind: contract.kind,
+    path: `.github/inari/${directory}/${contract.id}.json`,
+  };
+  return `${TEMPLATE_IDENTITY_MARKER_PREFIX}${JSON.stringify(marker)}${TEMPLATE_IDENTITY_MARKER_SUFFIX}`;
+}
+
+function stripSchemaNativeTemplateMarker(
+  contract: SchemaNativeArtifactContract,
+  body: string,
+): {
+  readonly source: string;
+  readonly exactSource: string;
+  readonly hasMarker: boolean;
+  readonly diagnostic?: ExistingArtifactDiagnostic;
+} {
+  const marker = extractTemplateIdentityMarker(body);
+  if (marker.status === "malformed" || marker.status === "unsupported-version") {
+    return {
+      source: marker.body,
+      exactSource: marker.body,
+      hasMarker: false,
+      diagnostic: {
+        code: "EXISTING_TEMPLATE_MARKER_INVALID",
+        path: "$.template",
+        message:
+          marker.status === "unsupported-version"
+            ? "Template identity marker uses an unsupported version."
+            : "Template identity marker is malformed.",
+      },
+    };
+  }
+  if (
+    marker.status === "valid" &&
+    (marker.marker?.kind !== contract.kind ||
+      marker.marker.path !==
+        `.github/inari/${contract.kind === "issue" ? "issues" : "pull-requests"}/${contract.id}.json`)
+  ) {
+    return {
+      source: marker.body,
+      exactSource: marker.body,
+      hasMarker: false,
+      diagnostic: {
+        code: "EXISTING_WRONG_TEMPLATE",
+        path: "$.template",
+        message: "Template identity marker does not match the schema-native contract.",
+      },
+    };
+  }
+  return {
+    source: marker.body,
+    exactSource: marker.status === "valid" ? schemaNativeBodyBeforeIdentityMarker(body) : marker.body,
+    hasMarker: marker.status === "valid",
+  };
+}
+
+function schemaNativeBodyBeforeIdentityMarker(body: string): string {
+  const lines = normalizeSource(body).split("\n");
+  while (lines.at(-1)?.trim() === "") lines.pop();
+  lines.pop();
+  return lines.join("\n");
+}
+
+function schemaNativeValues(contract: SchemaNativeArtifactContract, input: unknown): SchemaNativeRecord {
+  if (!isRecord(input))
+    throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "Schema-native values must be an object.");
+  const properties = contract.schema.properties as Record<string, unknown>;
+  const supplied = new Set(schemaNativeSuppliedNames(contract));
+  for (const name of Object.keys(input)) {
+    if (!Object.hasOwn(properties, name) || !supplied.has(name)) {
+      throw new ArtifactInputError(
+        "INPUT_DOCUMENT_INVALID",
+        `Caller cannot supply schema-native value "${name}".`,
+        `$.${name}`,
+      );
+    }
+  }
+  let validation;
+  try {
+    validation = compileJsonSchema(buildSchemaNativeInputSchema(contract)).validate(input);
+  } catch {
+    schemaNativeProjectionError("$.schema", "Canonical schema-native caller input could not be compiled.");
+  }
+  if (!validation.valid) {
+    throw new ArtifactInputError(
+      "INPUT_DOCUMENT_INVALID",
+      "Schema-native caller values do not satisfy the projected authoritative JSON Schema.",
+    );
+  }
+  return input;
+}
+
+function schemaNativeObservationDiagnostic(
+  contract: SchemaNativeArtifactContract,
+  values: SchemaNativeRecord,
+): ExistingArtifactDiagnostic | undefined {
+  try {
+    schemaNativeValues(contract, values);
+    return undefined;
+  } catch (error: unknown) {
+    return {
+      code: "EXISTING_UNPARSEABLE",
+      path: "$",
+      message: error instanceof Error ? error.message : "Observed values do not satisfy the schema-native contract.",
+    };
+  }
+}
+
+function encodeSchemaNativeMarkdownToken(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/gu,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+function decodeSchemaNativeMarkdownToken(value: string): string | undefined {
+  try {
+    const decoded = decodeURIComponent(value);
+    return encodeSchemaNativeMarkdownToken(decoded) === value ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function schemaNativeMarkdownTask(label: string, depth: number): string {
+  return `${"  ".repeat(depth)}- [ ] ${label}`;
+}
+
+function renderSchemaNativeMarkdownNode(
+  schema: Record<string, unknown>,
+  value: unknown,
+  depth: number,
+  budget: { nodes: number },
+  path: string,
+): readonly string[] {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_SCHEMA_NATIVE_RENDERED_NODES)
+    schemaNativeProjectionError(path, "Structured Markdown value exceeds its bounded node count.");
+  const type = schema.type;
+  if (type === "object") {
+    if (!isRecord(value)) throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected an object at ${path}.`);
+    const lines = [schemaNativeMarkdownTask("object", depth)];
+    const properties = schema.properties as Record<string, unknown>;
+    for (const name of Object.keys(properties)
+      .filter((key) => Object.hasOwn(value, key))
+      .sort(compareStrings)) {
+      lines.push(schemaNativeMarkdownTask(`property:${encodeSchemaNativeMarkdownToken(name)}`, depth + 1));
+      lines.push(
+        ...renderSchemaNativeMarkdownNode(
+          properties[name] as Record<string, unknown>,
+          value[name],
+          depth + 2,
+          budget,
+          `${path}.${name}`,
+        ),
+      );
+    }
+    return lines;
+  }
+  if (type === "array") {
+    if (!Array.isArray(value)) throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected an array at ${path}.`);
+    const lines = [schemaNativeMarkdownTask("array", depth)];
+    value.forEach((entry, index) => {
+      lines.push(schemaNativeMarkdownTask("item", depth + 1));
+      lines.push(
+        ...renderSchemaNativeMarkdownNode(
+          schema.items as Record<string, unknown>,
+          entry,
+          depth + 2,
+          budget,
+          `${path}[${index}]`,
+        ),
+      );
+    });
+    return lines;
+  }
+  if (type === "string") {
+    if (typeof value !== "string") throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected text at ${path}.`);
+    if (new TextEncoder().encode(value).length > MAX_SCHEMA_NATIVE_VALUE_BYTES)
+      schemaNativeProjectionError(path, "Structured Markdown scalar exceeds its bounded byte length.");
+    return [schemaNativeMarkdownTask(`string:${encodeSchemaNativeMarkdownToken(value)}`, depth)];
+  }
+  if (type === "number" || type === "integer") {
+    if (typeof value !== "number" || !Number.isFinite(value))
+      throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected a finite number at ${path}.`);
+    const token = Object.is(value, -0) ? "-0" : String(value);
+    return [schemaNativeMarkdownTask(`${type}:${token}`, depth)];
+  }
+  if (type === "boolean") {
+    if (typeof value !== "boolean")
+      throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected a boolean at ${path}.`);
+    return [schemaNativeMarkdownTask(`boolean:${value ? "true" : "false"}`, depth)];
+  }
+  if (type === "null") {
+    if (value !== null) throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Expected null at ${path}.`);
+    return [schemaNativeMarkdownTask("null", depth)];
+  }
+  return schemaNativeProjectionError(path, "Structured Markdown encountered an unsupported JSON Schema node.");
+}
+
+function renderSchemaNativeIssueBody(contract: SchemaNativeArtifactContract, rawValues: unknown): string {
+  const formContract = assertSchemaNativeIssueFormCapability(contract);
+  const values = schemaNativeValues(formContract, rawValues);
+  const properties = formContract.schema.properties as Record<string, Record<string, unknown>>;
+  const required = new Set(
+    Array.isArray(formContract.schema.required) ? (formContract.schema.required as string[]) : [],
+  );
+  const blocks = schemaNativeSuppliedNames(formContract).map((name) => {
+    const binding = schemaNativeBinding(formContract, name);
+    const propertySchema = properties[name] as Record<string, unknown>;
+    const enumValues = Array.isArray(propertySchema.enum) ? (propertySchema.enum as string[]) : undefined;
+    const raw = values[name];
+    let answer = raw === undefined ? GITHUB_NO_RESPONSE : String(raw);
+    if (raw !== undefined && enumValues !== undefined) {
+      const labels = binding?.presentation?.options;
+      answer = labels?.[raw as string] ?? (raw as string);
+    }
+    if (raw === undefined && required.has(name))
+      throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", `Required schema-native value "${name}" is missing.`);
+    const renderedAnswer = raw === undefined ? answer : encodeSchemaNativeIssueSentinel(answer);
+    return [`### ${escapeHeading(name)}`, escapeMarkdownValue(renderedAnswer)].join("\n\n");
+  });
+  return `${blocks.join("\n\n")}\n${schemaNativeTemplateMarker(formContract)}\n`;
+}
+
+function parseSchemaNativeIssueBody(contract: SchemaNativeArtifactContract, body: string): ExistingArtifactParseResult {
+  const values: SchemaNativeRecord = {};
+  const diagnostics: ExistingArtifactDiagnostic[] = [];
+  try {
+    assertSchemaNativeIssueFormCapability(contract);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Issue Form capability is unsupported.";
+    return { parsed: false, values: {}, diagnostics: [{ code: "EXISTING_UNPARSEABLE", path: "$.schema", message }] };
+  }
+  const marker = stripSchemaNativeTemplateMarker(contract, body);
+  if (marker.diagnostic !== undefined) return { parsed: false, values: {}, diagnostics: [marker.diagnostic] };
+  const rawSource = normalizeSource(marker.exactSource);
+  const source = stripMarkdownHtmlComments(rawSource, parseMarkdownStructure(rawSource));
+  if (source.length > MAX_SCHEMA_NATIVE_MARKDOWN_BYTES) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        {
+          code: "EXISTING_UNPARSEABLE",
+          path: "$",
+          message: "Schema-native Issue body exceeds its bounded observation size.",
+        },
+      ],
+    };
+  }
+  const structure = parseMarkdownStructure(source);
+  const properties = contract.schema.properties as Record<string, Record<string, unknown>>;
+  const names = schemaNativeSuppliedNames(contract);
+  const lines = source.split("\n");
+  if (
+    structure.headings.length !== names.length ||
+    structure.headings.some(
+      (heading, index) => heading.depth !== 3 || heading.indented || heading.title.trim() !== names[index],
+    ) ||
+    hasMaterialSourceLines(lines, 1, (structure.headings[0]?.startLine ?? 1) - 1)
+  ) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        { code: "EXISTING_UNPARSEABLE", path: "$", message: "Issue headings do not match the schema-native template." },
+      ],
+    };
+  }
+  for (const [index, name] of names.entries()) {
+    const heading = structure.headings[index];
+    if (heading === undefined) {
+      diagnostics.push({
+        code: "EXISTING_UNPARSEABLE",
+        path: `$.${name}`,
+        message: `Expected Issue Form response heading "### ${name}".`,
+      });
+      break;
+    }
+    const nextHeading = structure.headings[index + 1];
+    const endLine = (nextHeading?.startLine ?? source.split("\n").length + 1) - 1;
+    const response = schemaNativeIssueResponse(
+      sourceRangeSlice(structure, heading.endLine + 1, endLine),
+      index < names.length - 1 || !marker.hasMarker,
+    );
+    const schema = properties[name] as Record<string, unknown>;
+    const binding = schemaNativeBinding(contract, name);
+    if (response === undefined || response === GITHUB_NO_RESPONSE) {
+      if (Array.isArray(contract.schema.required) && contract.schema.required.includes(name)) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path: `$.${name}`,
+          message: "Required Issue Form response is empty.",
+        });
+        break;
+      }
+      continue;
+    }
+    let value = decodeSchemaNativeIssueSentinel(response);
+    if (value === undefined) value = unescapeMarkdownValue(response);
+    if (Array.isArray(schema.enum)) {
+      const enumValues = schema.enum.filter((entry): entry is string => typeof entry === "string");
+      const options = binding?.presentation?.options;
+      const semantic =
+        options === undefined
+          ? enumValues.find((entry) => entry === value)
+          : enumValues.find((entry) => options[entry] === value);
+      if (semantic === undefined) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path: `$.${name}`,
+          message: "Issue Form response is not one of the schema's reversible choices.",
+        });
+        break;
+      }
+      value = semantic;
+    }
+    values[name] = value;
+  }
+  if (diagnostics.length > 0) return { parsed: false, values: {}, diagnostics: diagnostics.slice(0, 16) };
+  const schemaDiagnostic = schemaNativeObservationDiagnostic(contract, values);
+  if (schemaDiagnostic !== undefined) diagnostics.push(schemaDiagnostic);
+  if (diagnostics.length > 0) return { parsed: false, values: {}, diagnostics: diagnostics.slice(0, 16) };
+  return { parsed: true, values, diagnostics: [] };
+}
+
+function schemaNativeIssueResponse(source: string, trimTrailingSeparator: boolean): string | undefined {
+  const lines = normalizeSource(source).split("\n");
+  if (lines[0]?.trim() === "") lines.shift();
+  if (trimTrailingSeparator && lines.at(-1)?.trim() === "") lines.pop();
+  const response = lines.join("\n");
+  return response.length === 0 ? undefined : response;
+}
+
+function encodeSchemaNativeIssueSentinel(value: string): string {
+  const match = /^(\\*)_No response_$/u.exec(value);
+  if (match === null) return value;
+  return `${"\\".repeat(Math.max(1, (match[1]?.length ?? 0) * 2))}_No response_`;
+}
+
+function decodeSchemaNativeIssueSentinel(value: string): string | undefined {
+  const match = /^(\\+)_No response_$/u.exec(value);
+  const slashCount = match?.[1]?.length;
+  if (slashCount === 1) return GITHUB_NO_RESPONSE;
+  if (slashCount !== undefined && slashCount % 2 === 0) return `${"\\".repeat(slashCount / 2)}_No response_`;
+  return undefined;
+}
+
+function renderSchemaNativePullRequestBody(contract: SchemaNativeArtifactContract, rawValues: unknown): string {
+  const markdownContract = assertSchemaNativePullRequestMarkdownCapability(contract);
+  const values = schemaNativeValues(markdownContract, rawValues);
+  const properties = markdownContract.schema.properties as Record<string, Record<string, unknown>>;
+  const sections = schemaNativeSuppliedNames(markdownContract).map((name) => {
+    const heading = `## ${schemaNativeMarkdownFieldHeading(name)}`;
+    if (!Object.hasOwn(values, name)) return heading;
+    const lines = renderSchemaNativeMarkdownNode(
+      properties[name] as Record<string, unknown>,
+      values[name],
+      0,
+      { nodes: 0 },
+      `$.${name}`,
+    );
+    return `${heading}\n\n${lines.join("\n")}`;
+  });
+  const body = `${sections.join("\n\n")}\n`;
+  if (new TextEncoder().encode(body).length > MAX_SCHEMA_NATIVE_MARKDOWN_BYTES)
+    schemaNativeProjectionError("$", "Structured Markdown artifact exceeds its bounded byte length.");
+  return `${body}\n${schemaNativeTemplateMarker(markdownContract)}\n`;
+}
+
+function parseSchemaNativeMarkdownNode(
+  schema: Record<string, unknown>,
+  items: readonly import("./markdown-ast.js").MarkdownListItem[],
+  cursor: { value: number },
+  depth: number,
+  budget: { nodes: number },
+): unknown {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_SCHEMA_NATIVE_RENDERED_NODES) throw new TypeError("Structured Markdown node limit exceeded.");
+  const item = items[cursor.value];
+  if (item === undefined || item.depth !== depth || item.checked !== false || item.blockquoted)
+    throw new TypeError("Expected one bounded task-list value node.");
+  cursor.value += 1;
+  const type = schema.type;
+  if (type === "object") {
+    if (item.label !== "object") throw new TypeError("Object marker is missing.");
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+    const value: SchemaNativeRecord = {};
+    while (items[cursor.value] !== undefined && (items[cursor.value]?.depth ?? 0) > depth) {
+      const property = items[cursor.value];
+      if (property?.depth !== depth + 1 || !property.label.startsWith("property:"))
+        throw new TypeError("Object property marker is invalid.");
+      const name = decodeSchemaNativeMarkdownToken(property.label.slice("property:".length));
+      if (name === undefined || !Object.hasOwn(properties, name) || Object.hasOwn(value, name))
+        throw new TypeError("Object property marker is undeclared or duplicated.");
+      cursor.value += 1;
+      value[name] = parseSchemaNativeMarkdownNode(
+        properties[name] as Record<string, unknown>,
+        items,
+        cursor,
+        depth + 2,
+        budget,
+      );
+    }
+    return value;
+  }
+  if (type === "array") {
+    if (item.label !== "array") throw new TypeError("Array marker is missing.");
+    const values: unknown[] = [];
+    const itemSchema = schema.items as Record<string, unknown>;
+    while (items[cursor.value] !== undefined && (items[cursor.value]?.depth ?? 0) > depth) {
+      const wrapper = items[cursor.value];
+      if (wrapper?.depth !== depth + 1 || wrapper.label !== "item")
+        throw new TypeError("Array item marker is invalid.");
+      cursor.value += 1;
+      values.push(parseSchemaNativeMarkdownNode(itemSchema, items, cursor, depth + 2, budget));
+    }
+    return values;
+  }
+  if (items[cursor.value] !== undefined && (items[cursor.value]?.depth ?? 0) > depth)
+    throw new TypeError("Scalar value node cannot contain children.");
+  if (type === "string" && item.label.startsWith("string:")) {
+    const value = decodeSchemaNativeMarkdownToken(item.label.slice("string:".length));
+    if (value === undefined || new TextEncoder().encode(value).length > MAX_SCHEMA_NATIVE_VALUE_BYTES)
+      throw new TypeError("String value token is invalid or over the bounded byte length.");
+    return value;
+  }
+  if ((type === "number" || type === "integer") && item.label.startsWith(`${type}:`)) {
+    const token = item.label.slice(type.length + 1);
+    const value = token === "-0" ? -0 : Number(token);
+    if (!Number.isFinite(value) || (String(value) !== token && !(Object.is(value, -0) && token === "-0")))
+      throw new TypeError("Number value token is not canonical.");
+    if (type === "integer" && !Number.isInteger(value)) throw new TypeError("Integer value token is invalid.");
+    return value;
+  }
+  if (type === "boolean" && (item.label === "boolean:true" || item.label === "boolean:false"))
+    return item.label === "boolean:true";
+  if (type === "null" && item.label === "null") return null;
+  throw new TypeError("Scalar value token does not match its schema type.");
+}
+
+function parseSchemaNativePullRequestBody(
+  contract: SchemaNativeArtifactContract,
+  rawBody: string,
+): ExistingArtifactParseResult {
+  const values: SchemaNativeRecord = {};
+  const diagnostics: ExistingArtifactDiagnostic[] = [];
+  try {
+    assertSchemaNativePullRequestMarkdownCapability(contract);
+  } catch (error: unknown) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        {
+          code: "EXISTING_UNPARSEABLE",
+          path: "$.schema",
+          message: error instanceof Error ? error.message : "Markdown capability is unsupported.",
+        },
+      ],
+    };
+  }
+  const marker = stripSchemaNativeTemplateMarker(contract, rawBody);
+  if (marker.diagnostic !== undefined) return { parsed: false, values: {}, diagnostics: [marker.diagnostic] };
+  const rawSource = normalizeSource(marker.source);
+  const source = stripMarkdownHtmlComments(rawSource, parseMarkdownStructure(rawSource));
+  if (new TextEncoder().encode(source).length > MAX_SCHEMA_NATIVE_MARKDOWN_BYTES) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        { code: "EXISTING_UNPARSEABLE", path: "$", message: "Markdown artifact exceeds its bounded size." },
+      ],
+    };
+  }
+  const structure = parseMarkdownStructure(source);
+  const properties = contract.schema.properties as Record<string, Record<string, unknown>>;
+  const names = schemaNativeSuppliedNames(contract);
+  const expectedHeadings = names.map((name) => schemaNativeMarkdownFieldHeading(name));
+  const lines = source.split("\n");
+  if (
+    structure.headings.length !== expectedHeadings.length ||
+    structure.headings.some(
+      (heading, index) => heading.depth !== 2 || heading.indented || heading.title !== expectedHeadings[index],
+    ) ||
+    hasMaterialSourceLines(lines, 1, (structure.headings[0]?.startLine ?? 1) - 1)
+  ) {
+    return {
+      parsed: false,
+      values: {},
+      diagnostics: [
+        {
+          code: "EXISTING_UNPARSEABLE",
+          path: "$",
+          message: "Markdown headings do not match the schema-native template.",
+        },
+      ],
+    };
+  }
+  for (let sectionIndex = 0; sectionIndex < names.length; sectionIndex += 1) {
+    const name = names[sectionIndex] as string;
+    const heading = structure.headings[sectionIndex] as MarkdownHeading;
+    const next = structure.headings[sectionIndex + 1];
+    const endLine = (next?.startLine ?? lines.length + 1) - 1;
+    const sectionItems = structure.listItems.filter(
+      (item) => item.startLine > heading.endLine && item.startLine < endLine,
+    );
+    const itemStartLines = new Set(sectionItems.map((item) => item.startLine));
+    for (let line = heading.endLine + 1; line <= endLine; line += 1) {
+      if ((lines[line - 1] ?? "").trim().length > 0 && !itemStartLines.has(line)) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path: `$.${name}`,
+          message: "Structured Markdown section contains text outside parsed task-list nodes.",
+        });
+        break;
+      }
+    }
+    if (diagnostics.length > 0) break;
+    if (sectionItems.some((item) => item.checked !== false || item.blockquoted)) {
+      diagnostics.push({
+        code: "EXISTING_UNPARSEABLE",
+        path: `$.${name}`,
+        message: "Structured Markdown values must use unquoted task-list nodes.",
+      });
+      break;
+    }
+    if (sectionItems.length === 0) continue;
+    const cursor = { value: 0 };
+    try {
+      const value = parseSchemaNativeMarkdownNode(
+        properties[name] as Record<string, unknown>,
+        sectionItems,
+        cursor,
+        0,
+        { nodes: 0 },
+      );
+      if (cursor.value !== sectionItems.length)
+        throw new TypeError("Structured Markdown section has unconsumed list nodes.");
+      // Validate once against the canonical effective input schema below so root-local references remain resolvable.
+      values[name] = value;
+    } catch (error: unknown) {
+      diagnostics.push({
+        code: "EXISTING_UNPARSEABLE",
+        path: `$.${name}`,
+        message: error instanceof Error ? error.message : "Structured Markdown value is invalid.",
+      });
+      break;
+    }
+  }
+  if (diagnostics.length === 0) {
+    const schemaDiagnostic = schemaNativeObservationDiagnostic(contract, values);
+    if (schemaDiagnostic !== undefined) diagnostics.push(schemaDiagnostic);
+  }
+  if (diagnostics.length > 0) return { parsed: false, values: {}, diagnostics: diagnostics.slice(0, 16) };
+  return { parsed: true, values, diagnostics: [] };
+}
+
 export function renderIssueArtifact(contractInput: unknown, input: unknown): string {
+  if (isSchemaNativeInput(contractInput))
+    return renderSchemaNativeIssueBody(parseSchemaNativeContract(contractInput), input);
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "issue")
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
@@ -738,6 +1370,8 @@ export function renderIssueArtifact(contractInput: unknown, input: unknown): str
 }
 
 export function renderPullRequestArtifact(contractInput: unknown, input: unknown): string {
+  if (isSchemaNativeInput(contractInput))
+    return renderSchemaNativePullRequestBody(parseSchemaNativeContract(contractInput), input);
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "pull_request") {
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "A pull request contract is required.");
@@ -812,6 +1446,8 @@ export function parseExistingIssueArtifact(
   contractInput: unknown,
   body: string | null | undefined,
 ): ExistingArtifactParseResult {
+  if (isSchemaNativeInput(contractInput))
+    return parseSchemaNativeIssueBody(parseSchemaNativeContract(contractInput), body ?? "");
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "issue")
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
@@ -822,6 +1458,8 @@ export function parseExistingPullRequestArtifact(
   contractInput: unknown,
   body: string | null | undefined,
 ): ExistingArtifactParseResult {
+  if (isSchemaNativeInput(contractInput))
+    return parseSchemaNativePullRequestBody(parseSchemaNativeContract(contractInput), body ?? "");
   assertCanonicalContract(contractInput);
   if (contractInput.artifactKind !== "pull_request") {
     throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "A pull request contract is required.");
@@ -846,14 +1484,22 @@ export function recoverExistingArtifactValues(
     contract.artifactKind === "issue"
       ? parseExistingIssueArtifact(contract, body)
       : parseExistingPullRequestArtifact(contract, body);
-  if (strict.parsed)
-    return { values: strict.values, dependencies: strict.dependencies, diagnostics: strict.diagnostics };
-
   const dependencyMarker = contract.artifactKind === "issue" ? extractIssueDependencyMarker(body ?? "") : undefined;
   const markerFreeBody = extractTemplateIdentityMarker(dependencyMarker?.body ?? body ?? "").body;
+  const source = normalizeSource(markerFreeBody);
+  const structure = parseMarkdownStructure(source);
+  if (strict.parsed) {
+    return {
+      values: strict.values,
+      dependencies: strict.dependencies,
+      diagnostics: strict.diagnostics,
+      coverage: completeRecoveryCoverage(source),
+    };
+  }
+
   const stripArtifactComments = contract.artifactKind === "pull_request";
-  const source = normalizeSource(stripArtifactComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
-  const blocks = headingBlocks(source);
+  const sourceLines = source.split("\n");
+  const cleanedLines = stripArtifactComments ? stripMarkdownHtmlComments(source, structure).split("\n") : sourceLines;
   const values: Record<string, unknown> = {};
   const expectedTitles = new Map<string, number>();
 
@@ -873,15 +1519,33 @@ export function recoverExistingArtifactValues(
     if (field === undefined || title === undefined) continue;
     const expectedTitle = escapeHeading(title);
     if (expectedTitles.get(expectedTitle) !== 1) continue;
-    const candidates = blocks.filter((block) => block.title === expectedTitle);
+    const level = section.render.headingLevel ?? section.nativeMetadata.headingLevel ?? 3;
+    const candidates = structure.headings.filter(
+      (heading) => heading.depth === level && heading.title.trim() === expectedTitle,
+    );
     if (candidates.length !== 1) continue;
-    const block = candidates[0] as HeadingBlock;
+    const heading = candidates[0] as MarkdownHeading;
+    const contractIndex = contract.sections.indexOf(section);
+    const nextHeading = findNextRecognizedHeading(contract, structure.headings, heading.endLine + 1);
+    const bodyStartLine = heading.endLine + 1;
+    const bodyEndLine = (nextHeading?.startLine ?? sourceLines.length + 1) - 1;
+    const documentationSplit =
+      contract.artifactKind === "pull_request"
+        ? splitTrailingDocumentation(
+            cleanedLines,
+            bodyStartLine,
+            bodyEndLine,
+            trailingDocumentation(contract, contractIndex),
+          )
+        : undefined;
+    const fieldEndLine = documentationSplit?.fieldEndLine ?? bodyEndLine;
     const parsed = parseFieldLines(
       field,
-      block.body,
+      sourceRangeSlice(structure, bodyStartLine, fieldEndLine),
       `$.${field.id}`,
       contract.artifactKind === "issue",
       pullRequestFieldPlaceholder(field, stripArtifactComments),
+      stripArtifactComments,
     );
     // parseFieldLines may retain known checklist selections alongside a
     // bounded structural diagnostic. The canonical loader below decides
@@ -890,7 +1554,8 @@ export function recoverExistingArtifactValues(
   }
 
   const dependencies = dependencyMarker?.dependencies;
-  return { values, dependencies, diagnostics: strict.diagnostics };
+  const coverage = recoveryCoverage(contract, source, structure, stripArtifactComments);
+  return { values, dependencies, diagnostics: strict.diagnostics, coverage };
 }
 
 export function validateExistingIssueArtifact(
@@ -1544,6 +2209,306 @@ function issueSemanticValue(field: CanonicalField, value: string | undefined): s
   return value;
 }
 
+const MAX_RECOVERY_COVERAGE_RANGES = 16;
+
+interface DocumentationRun {
+  readonly count: number;
+  readonly source?: string;
+}
+
+interface DocumentationSplit {
+  readonly fieldEndLine: number;
+  readonly documentationStartLine: number;
+}
+
+function completeRecoveryCoverage(source: string): ArtifactRecoveryCoverage {
+  const sourceLineCount = normalizeSource(source).split("\n").length;
+  return {
+    complete: true,
+    sourceLineCount,
+    coveredLineCount: sourceLineCount,
+    unmatchedLineCount: 0,
+    unmatchedRanges: [],
+    truncated: false,
+  };
+}
+
+function recoveryCoverage(
+  contract: CanonicalContract,
+  source: string,
+  structure: MarkdownStructure,
+  stripArtifactComments: boolean,
+): ArtifactRecoveryCoverage {
+  const lines = normalizeSource(source).split("\n");
+  const cleanedLines = (stripArtifactComments ? stripMarkdownHtmlComments(source, structure) : source).split("\n");
+  const covered = lines.map(() => false);
+  let decodingComplete = true;
+  const mark = (startLine: number, endLine: number): void => {
+    for (let line = Math.max(1, startLine); line <= Math.min(lines.length, endLine); line += 1)
+      covered[line - 1] = true;
+  };
+
+  if (stripArtifactComments) {
+    for (const block of structure.opaqueBlocks) {
+      if (block.kind === "html" && isCompleteHtmlComment(structure.sourceSlice(block)))
+        mark(block.startLine, block.endLine);
+    }
+  }
+
+  const titleCounts = new Map<string, number>();
+  for (const section of contract.sections) {
+    if (section.kind !== "input") continue;
+    const title = section.title ?? section.fields[0]?.label;
+    if (title !== undefined) titleCounts.set(escapeHeading(title), (titleCounts.get(escapeHeading(title)) ?? 0) + 1);
+  }
+
+  for (let contractIndex = 0; contractIndex < contract.sections.length; contractIndex += 1) {
+    const section = contract.sections[contractIndex] as CanonicalContract["sections"][number];
+    if (section.kind !== "input") continue;
+    const field = section.fields[0];
+    const title = section.title ?? field?.label;
+    if (field === undefined || title === undefined) {
+      decodingComplete = false;
+      continue;
+    }
+    const expectedTitle = escapeHeading(title);
+    const level = section.render.headingLevel ?? section.nativeMetadata.headingLevel ?? 3;
+    const candidates = structure.headings.filter(
+      (heading) => heading.depth === level && heading.title.trim() === expectedTitle,
+    );
+    if (titleCounts.get(expectedTitle) !== 1 || candidates.length !== 1) {
+      decodingComplete = false;
+      continue;
+    }
+    const heading = candidates[0] as MarkdownHeading;
+    const nextHeading = findNextRecognizedHeading(contract, structure.headings, heading.endLine + 1);
+    const bodyStartLine = heading.endLine + 1;
+    const bodyEndLine = (nextHeading?.startLine ?? lines.length + 1) - 1;
+    const docs = contract.artifactKind === "pull_request" ? trailingDocumentation(contract, contractIndex) : undefined;
+    const documentationSplit = splitTrailingDocumentation(cleanedLines, bodyStartLine, bodyEndLine, docs);
+    if (docs !== undefined && documentationSplit === undefined) {
+      decodingComplete = false;
+      mark(heading.startLine, heading.endLine);
+      continue;
+    }
+    const fieldEndLine = documentationSplit?.fieldEndLine ?? bodyEndLine;
+    const parsed = parseFieldLines(
+      field,
+      sourceRangeSlice(structure, bodyStartLine, fieldEndLine),
+      `$.${field.id}`,
+      contract.artifactKind === "issue",
+      pullRequestFieldPlaceholder(field, stripArtifactComments),
+      stripArtifactComments,
+    );
+    if (parsed.diagnostics.length > 0) {
+      decodingComplete = false;
+      mark(heading.startLine, heading.endLine);
+      continue;
+    }
+    mark(heading.startLine, fieldEndLine);
+    if (documentationSplit !== undefined) mark(documentationSplit.documentationStartLine, bodyEndLine);
+  }
+
+  if (contract.artifactKind === "pull_request") {
+    for (let contractIndex = 0; contractIndex < contract.sections.length; contractIndex += 1) {
+      const section = contract.sections[contractIndex] as CanonicalContract["sections"][number];
+      if (section.kind !== "documentation") continue;
+      const previous = contract.sections[contractIndex - 1];
+      if (previous?.kind === "input") continue;
+      const run = documentationRun(contract, contractIndex);
+      contractIndex += run.count - 1;
+      if (run.source === undefined) continue;
+      const nextInput = findNextInputHeading(contract, structure.headings, contractIndex, 1, undefined);
+      const endLine = (nextInput?.startLine ?? lines.length + 1) - 1;
+      const actual = cleanedMarkdownText(sourceRangeSlice(structure, 1, endLine), true);
+      if (actual === run.source) mark(1, endLine);
+      else decodingComplete = false;
+    }
+  }
+
+  const unmatchedLines: number[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!covered[index] && (lines[index] ?? "").trim().length > 0) unmatchedLines.push(index + 1);
+  }
+  const ranges: MarkdownSourceRange[] = [];
+  let truncated = false;
+  for (const line of unmatchedLines) {
+    const previous = ranges.at(-1);
+    if (previous !== undefined && previous.endLine === line - 1) {
+      ranges[ranges.length - 1] = { startLine: previous.startLine, endLine: line };
+    } else if (ranges.length < MAX_RECOVERY_COVERAGE_RANGES) {
+      ranges.push({ startLine: line, endLine: line });
+    } else {
+      truncated = true;
+    }
+  }
+  return {
+    complete: decodingComplete && unmatchedLines.length === 0,
+    sourceLineCount: lines.length,
+    coveredLineCount: lines.length - unmatchedLines.length,
+    unmatchedLineCount: unmatchedLines.length,
+    unmatchedRanges: ranges,
+    truncated,
+  };
+}
+
+function documentationRun(contract: CanonicalContract, startIndex: number): DocumentationRun {
+  const blocks: string[] = [];
+  let count = 0;
+  for (let index = startIndex; index < contract.sections.length; index += 1) {
+    const section = contract.sections[index] as CanonicalContract["sections"][number];
+    if (section.kind !== "documentation") break;
+    count += 1;
+    const content = cleanedMarkdownText(section.content ?? "", true);
+    if (content !== undefined) blocks.push(content);
+  }
+  const source = trimBlankLines(blocks.join("\n\n"));
+  return { count, ...(source === undefined ? {} : { source }) };
+}
+
+function trailingDocumentation(contract: CanonicalContract, sectionIndex: number): string | undefined {
+  return documentationRun(contract, sectionIndex + 1).source;
+}
+
+function findNextInputHeading(
+  contract: CanonicalContract,
+  headings: readonly MarkdownHeading[],
+  sectionIndex: number,
+  fromLine: number,
+  issueHeadingLevel: number | undefined,
+): MarkdownHeading | undefined {
+  for (let index = sectionIndex + 1; index < contract.sections.length; index += 1) {
+    const section = contract.sections[index] as CanonicalContract["sections"][number];
+    if (section.kind !== "input") continue;
+    const field = section.fields[0];
+    const title = section.title ?? field?.label;
+    if (title === undefined) continue;
+    const level = issueHeadingLevel ?? section.render.headingLevel ?? section.nativeMetadata.headingLevel ?? 3;
+    const match = headings.find(
+      (heading) =>
+        heading.startLine >= fromLine && heading.depth === level && heading.title.trim() === escapeHeading(title),
+    );
+    if (match !== undefined) return match;
+  }
+  return undefined;
+}
+
+function findNextRecognizedHeading(
+  contract: CanonicalContract,
+  headings: readonly MarkdownHeading[],
+  fromLine: number,
+): MarkdownHeading | undefined {
+  const expected = new Map<string, number>();
+  for (const section of contract.sections) {
+    if (section.kind !== "input") continue;
+    const field = section.fields[0];
+    const title = section.title ?? field?.label;
+    if (title === undefined) continue;
+    const escaped = escapeHeading(title);
+    expected.set(escaped, (expected.get(escaped) ?? 0) + 1);
+  }
+  return headings.find((heading) => {
+    if (heading.startLine < fromLine || expected.get(heading.title.trim()) !== 1) return false;
+    const section = contract.sections.find((candidate) => {
+      if (candidate.kind !== "input") return false;
+      const field = candidate.fields[0];
+      const title = candidate.title ?? field?.label;
+      const level = candidate.render.headingLevel ?? candidate.nativeMetadata.headingLevel ?? 3;
+      return title !== undefined && escapeHeading(title) === heading.title.trim() && level === heading.depth;
+    });
+    return section !== undefined;
+  });
+}
+
+function splitTrailingDocumentation(
+  cleanedLines: readonly string[],
+  startLine: number,
+  endLine: number,
+  expected: string | undefined,
+): DocumentationSplit | undefined {
+  if (expected === undefined || endLine < startLine) return undefined;
+  const expectedLines = trimLineRange(expected.split("\n"));
+  const candidate = Array.from({ length: Math.max(0, endLine - startLine + 1) }, (_, index) => ({
+    lineNumber: startLine + index,
+    text: cleanedLines[startLine + index - 1] ?? "",
+  }));
+  while (candidate[0] !== undefined && candidate[0].text.trim().length === 0) candidate.shift();
+  while (candidate.at(-1) !== undefined && candidate.at(-1)?.text.trim().length === 0) candidate.pop();
+  if (candidate.length < expectedLines.length) return undefined;
+  const suffixStart = candidate.length - expectedLines.length;
+  if (!expectedLines.every((line, index) => candidate[suffixStart + index]?.text === line)) return undefined;
+  const firstDocumentationLine = candidate[suffixStart]?.lineNumber;
+  if (firstDocumentationLine === undefined) return undefined;
+  return { fieldEndLine: firstDocumentationLine - 1, documentationStartLine: firstDocumentationLine };
+}
+
+function sourceRangeSlice(structure: MarkdownStructure, startLine: number, endLine: number): string {
+  return endLine < startLine ? "" : structure.sourceSlice({ startLine: Math.max(1, startLine), endLine });
+}
+
+function cleanedMarkdownText(source: string, stripComments: boolean): string | undefined {
+  const normalized = normalizeSource(source);
+  const structure = parseMarkdownStructure(normalized);
+  const semanticSource = stripComments ? stripMarkdownHtmlComments(normalized, structure) : normalized;
+  return trimBlankLines(semanticSource);
+}
+
+function hasMaterialSourceLines(lines: readonly string[], startLine: number, endLine: number): boolean {
+  for (let line = Math.max(1, startLine); line <= Math.min(lines.length, endLine); line += 1) {
+    if ((lines[line - 1] ?? "").trim().length > 0) return true;
+  }
+  return false;
+}
+
+function isCompleteHtmlComment(source: string): boolean {
+  return /^\s*<!--[\s\S]*?-->\s*$/u.test(source);
+}
+
+function stripMarkdownHtmlComments(source: string, structure: MarkdownStructure): string {
+  let result = normalizeSource(source);
+  const lines = result.split("\n");
+  const offsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+  const htmlBlocks = structure.opaqueBlocks
+    .filter((block) => block.kind === "html")
+    .slice()
+    .sort((left, right) => right.startLine - left.startLine);
+  for (const block of htmlBlocks) {
+    const start = offsets[block.startLine - 1];
+    const lastLine = lines[block.endLine - 1];
+    if (start === undefined || lastLine === undefined) continue;
+    const end = (offsets[block.endLine - 1] ?? start) + lastLine.length;
+    const raw = result.slice(start, end);
+    const cleaned = raw.replace(/<!--[\s\S]*?-->/gu, (comment) => comment.replace(/[^\n]/gu, ""));
+    result = `${result.slice(0, start)}${cleaned}${result.slice(end)}`;
+  }
+  return result;
+}
+
+function stripInlineMarkdownComments(value: string): string {
+  const normalized = normalizeSource(value);
+  return stripMarkdownHtmlComments(normalized, parseMarkdownStructure(normalized));
+}
+
+function placeholderLineNumbers(lines: readonly string[], placeholder: string | undefined): ReadonlySet<number> {
+  const result = new Set<number>();
+  if (placeholder === undefined) return result;
+  const expected = nonEmptyLines(placeholder);
+  if (expected.length === 0) return result;
+  let cursor = 0;
+  for (const expectedLine of expected) {
+    while (cursor < lines.length && (lines[cursor] ?? "").trim().length === 0) cursor += 1;
+    if (lines[cursor] !== expectedLine) return new Set<number>();
+    result.add(cursor);
+    cursor += 1;
+  }
+  return result;
+}
+
 function parseRenderedBody(
   contract: CanonicalContract,
   body: string,
@@ -1553,8 +2518,11 @@ function parseRenderedBody(
   const dependencyMarker =
     contract.artifactKind === "issue" ? extractIssueDependencyMarker(body) : { status: "absent" as const, body };
   const markerFreeBody = extractTemplateIdentityMarker(dependencyMarker.body).body;
-  const source = normalizeSource(stripArtifactComments ? removeHtmlComments(markerFreeBody) : markerFreeBody);
+  const source = normalizeSource(markerFreeBody);
+  const structure = parseMarkdownStructure(source);
   const lines = source.split("\n");
+  const semanticSource = stripArtifactComments ? stripMarkdownHtmlComments(source, structure) : source;
+  const semanticLines = semanticSource.split("\n");
   const values: Record<string, unknown> = {};
   const diagnostics: ExistingArtifactDiagnostic[] = [];
   const dependencies =
@@ -1573,97 +2541,94 @@ function parseRenderedBody(
 
   for (let sectionIndex = 0; sectionIndex < contract.sections.length; sectionIndex += 1) {
     const section = contract.sections[sectionIndex] as CanonicalContract["sections"][number];
-    while (lines[cursor] !== undefined && lines[cursor]?.trim().length === 0) cursor += 1;
     if (section.kind === "documentation") {
       if (issueHeadingLevel !== undefined) continue;
-      const expected = trimBlankLines(
-        stripArtifactComments ? removeHtmlComments(section.content ?? "") : (section.content ?? ""),
-      );
-      if (expected !== undefined) {
-        const expectedLines = expected.split("\n");
-        if (!sameLines(lines.slice(cursor, cursor + expectedLines.length), expectedLines)) {
-          diagnostics.push({
-            code: "EXISTING_UNPARSEABLE",
-            path: `$.sections.${section.id}`,
-            message: "Documentation structure does not match the native template.",
-          });
-          return { parsed: false, values: {}, diagnostics };
-        }
-        cursor += expectedLines.length;
+      const run = documentationRun(contract, sectionIndex);
+      const runEndIndex = sectionIndex + run.count - 1;
+      if (run.source === undefined) {
+        sectionIndex = runEndIndex;
+        continue;
       }
+      const nextInput = findNextInputHeading(contract, structure.headings, runEndIndex, cursor + 1, issueHeadingLevel);
+      const documentationEnd = (nextInput?.startLine ?? lines.length + 1) - 1;
+      const actual = cleanedMarkdownText(sourceRangeSlice(structure, cursor + 1, documentationEnd), true);
+      if (run.source !== actual) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path: `$.sections.${section.id}`,
+          message: "Documentation structure does not match the native template.",
+        });
+        return { parsed: false, values: {}, diagnostics };
+      }
+      cursor = (nextInput?.startLine ?? lines.length + 1) - 1;
+      sectionIndex = runEndIndex;
       continue;
     }
     const expectedTitle = section.title ?? section.fields[0]?.label;
     const field = section.fields[0];
     if (expectedTitle === undefined || field === undefined) continue;
-    const heading = lines[cursor];
     const level = issueHeadingLevel ?? section.render.headingLevel ?? section.nativeMetadata.headingLevel;
-    const expectedHeading = `${"#".repeat(level ?? 3)} ${escapeHeading(expectedTitle)}`;
-    if (heading?.trim() !== expectedHeading) {
-      const hasHeading = lines.some((line) => isHeading(line));
+    const expectedHeadingTitle = escapeHeading(expectedTitle);
+    const headingIndex = structure.headings.findIndex((candidate) => candidate.startLine > cursor);
+    const heading = headingIndex < 0 ? undefined : structure.headings[headingIndex];
+    const materialBeforeHeading =
+      heading === undefined || hasMaterialSourceLines(semanticLines, cursor + 1, heading.startLine - 1);
+    if (
+      heading === undefined ||
+      heading.title.trim() !== expectedHeadingTitle ||
+      heading.depth !== (level ?? 3) ||
+      materialBeforeHeading
+    ) {
+      const hasHeading = structure.headings.length > 0;
       diagnostics.push({
-        code: hasHeading ? "EXISTING_WRONG_TEMPLATE" : "EXISTING_UNPARSEABLE",
+        code:
+          materialBeforeHeading && heading !== undefined
+            ? "EXISTING_EXTRA_CONTENT"
+            : hasHeading
+              ? "EXISTING_WRONG_TEMPLATE"
+              : "EXISTING_UNPARSEABLE",
         path: `$.sections.${section.id}`,
-        message: `Expected native section heading "${expectedHeading}".`,
+        message: `Expected native section heading "${"#".repeat(level ?? 3)} ${expectedHeadingTitle}".`,
       });
       return { parsed: false, values: {}, diagnostics };
     }
-    cursor += 1;
-    const contentStart = cursor;
-    const nextIssueHeading = issueHeadingLevel === undefined ? undefined : findNextIssueHeading(contract, sectionIndex);
-    let openFence: string | undefined;
-    while (cursor < lines.length) {
-      const line = lines[cursor] ?? "";
-      const fenceMatch = /^(`{3,})/u.exec(line);
-      if (openFence === undefined) {
-        if (
-          nextIssueHeading === undefined
-            ? issueHeadingLevel === undefined && isHeading(line)
-            : line.trim() === nextIssueHeading
-        )
-          break;
-        if (fenceMatch !== null) openFence = fenceMatch[1];
-      } else if (fenceMatch !== null && fenceMatch[1] === openFence) {
-        openFence = undefined;
-      }
-      cursor += 1;
-    }
-    let fieldEnd = cursor;
-    const nextSection = contract.sections[sectionIndex + 1];
-    const nextDocumentation =
-      issueHeadingLevel === undefined && nextSection?.kind === "documentation"
-        ? trimBlankLines(
-            stripArtifactComments ? removeHtmlComments(nextSection.content ?? "") : (nextSection.content ?? ""),
+    const bodyStartLine = heading.endLine + 1;
+    const nextInput = findNextInputHeading(
+      contract,
+      structure.headings,
+      sectionIndex,
+      heading.endLine + 1,
+      issueHeadingLevel,
+    );
+    const bodyEndLine = (nextInput?.startLine ?? lines.length + 1) - 1;
+    const documentationSplit =
+      issueHeadingLevel === undefined
+        ? splitTrailingDocumentation(
+            semanticLines,
+            bodyStartLine,
+            bodyEndLine,
+            trailingDocumentation(contract, sectionIndex),
           )
         : undefined;
-    if (nextDocumentation !== undefined) {
-      const documentationLines = nextDocumentation.split("\n");
-      const rawCandidate = lines.slice(contentStart, fieldEnd);
-      const candidate = trimLineRange(rawCandidate);
-      if (
-        candidate.length >= documentationLines.length &&
-        sameLines(candidate.slice(-documentationLines.length), documentationLines)
-      ) {
-        const leadingBlankLines = rawCandidate.findIndex((line) => line.trim().length > 0);
-        const candidateStart = contentStart + Math.max(leadingBlankLines, 0);
-        fieldEnd = candidateStart + candidate.length - documentationLines.length;
-        cursor = fieldEnd;
-      }
-    }
-    const fieldLines = trimLineRange(lines.slice(contentStart, fieldEnd));
+    const fieldEndLine = documentationSplit?.fieldEndLine ?? bodyEndLine;
+    const fieldSource = sourceRangeSlice(structure, bodyStartLine, fieldEndLine);
     const parsed = parseFieldLines(
       field,
-      fieldLines,
+      fieldSource,
       `$.${field.id}`,
       issueHeadingLevel !== undefined,
       pullRequestFieldPlaceholder(field, stripArtifactComments),
+      stripArtifactComments,
     );
     diagnostics.push(...parsed.diagnostics);
     if (parsed.value !== undefined) values[field.id] = parsed.value;
     if (parsed.diagnostics.length > 0) return { parsed: false, values: {}, diagnostics };
+    cursor =
+      documentationSplit?.documentationStartLine !== undefined
+        ? documentationSplit.documentationStartLine - 1
+        : (nextInput?.startLine ?? lines.length + 1) - 1;
   }
-  while (lines[cursor] !== undefined && lines[cursor]?.trim().length === 0) cursor += 1;
-  if (cursor < lines.length && lines.slice(cursor).some((line) => line.trim().length > 0)) {
+  if (hasMaterialSourceLines(semanticLines, cursor + 1, lines.length)) {
     diagnostics.push({
       code: "EXISTING_EXTRA_CONTENT",
       path: "$",
@@ -1680,43 +2645,22 @@ function parseRenderedBody(
   };
 }
 
-interface HeadingBlock {
-  readonly title: string;
-  readonly body: readonly string[];
-}
-
-function headingBlocks(source: string): readonly HeadingBlock[] {
-  const lines = source.split("\n");
-  const starts: { readonly index: number; readonly title: string }[] = [];
-  let openFence: string | undefined;
-  lines.forEach((line, index) => {
-    const fenceMatch = /^(`{3,})/u.exec(line);
-    if (openFence === undefined && fenceMatch !== null) {
-      openFence = fenceMatch[1];
-      return;
-    }
-    if (openFence !== undefined) {
-      if (fenceMatch !== null && fenceMatch[1] === openFence) openFence = undefined;
-      return;
-    }
-    const match = /^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*$/u.exec(line);
-    if (match !== null) starts.push({ index, title: match[1] as string });
-  });
-  return starts.map((start, position) => {
-    const next = starts[position + 1]?.index ?? lines.length;
-    return { title: start.title, body: trimLineRange(lines.slice(start.index + 1, next)) };
-  });
-}
-
 function parseFieldLines(
   field: CanonicalField,
-  lines: readonly string[],
+  source: string,
   path: string,
   issueBody: boolean,
   pullRequestPlaceholder: string | undefined,
+  stripArtifactComments: boolean,
 ): { value: unknown; diagnostics: readonly ExistingArtifactDiagnostic[] } {
   const diagnostics: ExistingArtifactDiagnostic[] = [];
-  const canonicalLines = canonicalizeFieldLines(field, lines);
+  const normalizedSource = normalizeSource(source);
+  const structure = parseMarkdownStructure(normalizedSource);
+  const semanticSource = stripArtifactComments
+    ? stripMarkdownHtmlComments(normalizedSource, structure)
+    : normalizedSource;
+  const semanticLines = semanticSource.split("\n");
+  const canonicalLines = canonicalizeFieldLines(field, trimLineRange(semanticLines));
   if (canonicalLines.length === 1 && canonicalLines[0]?.trim() === GITHUB_NO_RESPONSE) {
     // GitHub uses the same marker for an empty optional selection. Preserve
     // the materialized empty array so prepared artifacts remain reversible.
@@ -1726,7 +2670,7 @@ function parseFieldLines(
     const parsedValue =
       field.nativeMetadata.render === undefined
         ? trimBlankLines(unescapeMarkdownValue(canonicalLines.join("\n")))
-        : parseRenderedCodeBlock(canonicalLines, field.nativeMetadata.render, path, diagnostics);
+        : parseRenderedCodeBlock(normalizedSource, structure, field.nativeMetadata.render, path, diagnostics);
     if (parsedValue === EXPLICIT_EMPTY_STRING_MARKER) return { value: "", diagnostics };
     if (
       pullRequestPlaceholder !== undefined &&
@@ -1747,30 +2691,56 @@ function parseFieldLines(
       if (values.length === 0) return { value: undefined, diagnostics };
       return { value: issueBody ? values.map((value) => issueSemanticValue(field, value)) : values, diagnostics };
     }
-    const values = canonicalLines
-      .map((line) => {
-        const value = /^[-+*][ \t]+(.+)$/u.exec(line)?.[1]?.trim();
-        return value === undefined ? undefined : unescapeMarkdownValue(value);
-      })
-      .filter((value): value is string => value !== undefined);
-    if (values.length !== canonicalLines.length) {
-      diagnostics.push({
-        code: "EXISTING_UNPARSEABLE",
-        path,
-        message: "Array values must be a canonical Markdown list.",
-      });
+    const sourceLines = semanticLines;
+    const listItems = structure.listItems.filter((item) => item.depth === 0 && !item.blockquoted);
+    const values: string[] = [];
+    const itemLines = new Set<number>();
+    const placeholderLines = placeholderLineNumbers(semanticLines, pullRequestPlaceholder);
+    for (const item of listItems) {
+      if (item.checked !== undefined || item.startLine !== item.endLine) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path,
+          message: "Array values must be a canonical Markdown list.",
+        });
+        continue;
+      }
+      const line = sourceLines[item.startLine - 1] ?? "";
+      const match = /^ {0,3}[-+*][ \t]+(.+?)\s*$/u.exec(line);
+      if (match === null) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path,
+          message: "Array values must be a canonical Markdown list.",
+        });
+        continue;
+      }
+      itemLines.add(item.startLine);
+      values.push(unescapeMarkdownValue(match[1] as string));
+    }
+    const materialLines = semanticLines.filter((line, index) => line.trim().length > 0 && !placeholderLines.has(index));
+    const hasUnrecognizedContent = semanticLines.some((line, index) => {
+      if (line.trim().length === 0 || placeholderLines.has(index)) return false;
+      return !itemLines.has(index + 1);
+    });
+    if (hasUnrecognizedContent || values.length !== materialLines.length || diagnostics.length > 0) {
+      if (diagnostics.length === 0) {
+        diagnostics.push({
+          code: "EXISTING_UNPARSEABLE",
+          path,
+          message: "Array values must be a canonical Markdown list.",
+        });
+      }
       return { value: undefined, diagnostics };
     }
-    return { value: values, diagnostics };
+    return { value: issueBody ? values.map((value) => issueSemanticValue(field, value)) : values, diagnostics };
   }
   const values: string[] = [];
-  const checklistLines =
-    pullRequestPlaceholder === undefined
-      ? canonicalLines
-      : removeRenderedPlaceholder(canonicalLines, pullRequestPlaceholder);
-  for (const line of checklistLines) {
-    const match = /^[-+*][ \t]+\[([ xX])\][ \t]+(.+)$/u.exec(line);
-    if (match === null) {
+  const placeholderLines = placeholderLineNumbers(semanticLines, pullRequestPlaceholder);
+  const taskItems = structure.listItems.filter((item) => item.depth === 0 && !item.blockquoted);
+  const itemLines = new Set<number>();
+  for (const item of taskItems) {
+    if (item.checked === undefined || item.startLine !== item.endLine) {
       diagnostics.push({
         code: "EXISTING_UNPARSEABLE",
         path,
@@ -1778,17 +2748,37 @@ function parseFieldLines(
       });
       continue;
     }
-    const label = unescapeMarkdownValue(match[2]?.trim() ?? "");
-    const item = field.items.find((candidate) => candidate.label === label);
-    if (item === undefined) {
+    itemLines.add(item.startLine);
+    const label = unescapeMarkdownValue(stripInlineMarkdownComments(item.label).trim());
+    if (label.length === 0) {
+      diagnostics.push({
+        code: "EXISTING_UNPARSEABLE",
+        path,
+        message: "Checklist values must use canonical task-list syntax.",
+      });
+      continue;
+    }
+    const selected = field.items.find((candidate) => candidate.label === label);
+    if (selected === undefined) {
       diagnostics.push({
         code: "EXISTING_UNKNOWN_CHECKLIST_ITEM",
         path,
         message: `Unknown checklist item "${label}".`,
       });
-    } else if (match[1]?.toLowerCase() === "x") {
-      values.push(item.id);
+    } else if (item.checked === true) {
+      values.push(selected.id);
     }
+  }
+  const unrecognizedContent = semanticLines.some((line, index) => {
+    if (line.trim().length === 0 || placeholderLines.has(index)) return false;
+    return !itemLines.has(index + 1);
+  });
+  if (unrecognizedContent) {
+    diagnostics.push({
+      code: "EXISTING_UNPARSEABLE",
+      path,
+      message: "Checklist values must use canonical task-list syntax.",
+    });
   }
   return { value: values, diagnostics };
 }
@@ -1803,33 +2793,36 @@ function canonicalizeFieldLines(field: CanonicalField, lines: readonly string[])
 
 function pullRequestFieldPlaceholder(field: CanonicalField, stripArtifactComments: boolean): string | undefined {
   if (!stripArtifactComments || field.nativeMetadata.placeholder === undefined) return undefined;
-  return normalizeSource(removeHtmlComments(field.nativeMetadata.placeholder));
-}
-
-function removeRenderedPlaceholder(lines: readonly string[], placeholder: string | undefined): readonly string[] {
-  if (placeholder === undefined) return lines;
-  const placeholderLines = nonEmptyLines(placeholder);
-  return placeholderLines.length > 0 && sameLines(lines.slice(0, placeholderLines.length), placeholderLines)
-    ? lines.slice(placeholderLines.length)
-    : lines;
-}
-
-function findNextIssueHeading(contract: CanonicalContract, sectionIndex: number): string | undefined {
-  for (let index = sectionIndex + 1; index < contract.sections.length; index += 1) {
-    const section = contract.sections[index] as CanonicalContract["sections"][number];
-    if (section.kind !== "input") continue;
-    const title = section.title ?? section.fields[0]?.label;
-    if (title !== undefined) return `### ${escapeHeading(title)}`;
-  }
-  return undefined;
+  const placeholder = normalizeSource(field.nativeMetadata.placeholder);
+  return stripMarkdownHtmlComments(placeholder, parseMarkdownStructure(placeholder));
 }
 
 function parseRenderedCodeBlock(
-  lines: readonly string[],
+  source: string,
+  structure: MarkdownStructure,
   language: string,
   path: string,
   diagnostics: ExistingArtifactDiagnostic[],
 ): string | undefined {
+  const codeBlocks = structure.opaqueBlocks.filter((block) => block.kind === "fenced-code");
+  const semanticSource = stripMarkdownHtmlComments(source, structure);
+  const semanticLines = semanticSource.split("\n");
+  const block = codeBlocks[0];
+  const hasContentOutsideCode = semanticLines.some((line, index) => {
+    const lineNumber = index + 1;
+    return (
+      line.trim().length > 0 && (block === undefined || lineNumber < block.startLine || lineNumber > block.endLine)
+    );
+  });
+  if (block === undefined || codeBlocks.length !== 1 || hasContentOutsideCode) {
+    diagnostics.push({
+      code: "EXISTING_UNPARSEABLE",
+      path,
+      message: `Rendered textarea values must use a fenced ${language} code block.`,
+    });
+    return undefined;
+  }
+  const lines = structure.sourceSlice(block).split("\n");
   const opening = /^(`{3,})(.*)$/u.exec(lines[0] ?? "");
   if (opening === null || opening[2] !== language || lines.length < 2) {
     diagnostics.push({
@@ -1961,11 +2954,8 @@ function escapeHeading(value: string): string {
  * Escape only Markdown constructs that can change the compiled canonical
  * structure when a field value is spliced verbatim into a rendered body:
  *
- * - a heading line would be mistaken for the next section boundary
- *   (`isHeading` / `headingBlocks` scan headings only to find where a
- *   field's content ends);
- * - a fence marker would shift the fence-tracking state those same scans use
- *   to skip over heading-look-alikes inside embedded code;
+ * - a heading line could be interpreted as a contract section heading;
+ * - a fence marker could turn following Markdown into opaque code;
  * - a line matching the reserved `<!-- inari:... -->` marker prefix could be
  *   read back as the trailing template-identity/dependency marker.
  *
@@ -2053,14 +3043,6 @@ function nonEmptyLines(value: string): readonly string[] {
   return normalizeSource(value)
     .split("\n")
     .filter((line) => line.trim().length > 0);
-}
-
-function isHeading(line: string): boolean {
-  return /^#{1,6}[ \t]+\S/u.test(line);
-}
-
-function sameLines(actual: readonly string[], expected: readonly string[]): boolean {
-  return actual.length === expected.length && actual.every((line, index) => line === expected[index]);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

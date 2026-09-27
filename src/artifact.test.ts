@@ -12,6 +12,7 @@ import {
   prepareIssueArtifact,
   preparePullRequestArtifact,
   projectExistingArtifact,
+  recoverExistingArtifactValues,
   removeHtmlComments,
   renderIssueArtifact,
   renderPullRequestArtifact,
@@ -25,6 +26,7 @@ import {
   CanonicalIrValidationError,
   CONTRACT_SCHEMA_VERSION,
   compileIssueFormYaml,
+  parseArtifactContract,
   projectToJsonSchema,
   LINKED_ISSUE_PATTERN,
   type CanonicalContract,
@@ -96,6 +98,281 @@ test("Issue validation and rendering are deterministic and reversible", () => {
     metadata: { title: "feat: preserve native labels" },
   });
   assert.deepEqual(prepared.artifact.labels, ["enhancement"]);
+});
+
+test("schema-native artifact render and observation preserve Issue scalars and structured PR values", () => {
+  const issue = parseArtifactContract({
+    version: "2",
+    kind: "issue",
+    id: "schema-issue",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        summary: { type: "string", minLength: 1 },
+        category: { type: "string", enum: ["bug", "feature", "_No response_"] },
+        note: { type: "string", minLength: 1 },
+        optional: { type: "string", minLength: 1 },
+      },
+      required: ["summary", "category"],
+      additionalProperties: false,
+    },
+    bindings: {
+      "/summary": { authority: { kind: "supplied" }, presentation: { control: "multiline" } },
+      "/category": {
+        authority: { kind: "supplied" },
+        presentation: {
+          control: "choice",
+          options: { bug: "Bug", feature: "Feature", "_No response_": "No response literal" },
+        },
+      },
+      "/note": { authority: { kind: "supplied" }, presentation: { control: "multiline" } },
+      "/optional": { authority: { kind: "supplied" }, presentation: { control: "text" } },
+    },
+  });
+  const issueValues = {
+    summary: "\nKeep this\n### category heading\n",
+    category: "_No response_",
+    note: "_No response_",
+  };
+  const issueBody = renderIssueArtifact(issue, issueValues);
+  assert.match(
+    issueBody,
+    /inari:template \{"version":"1","kind":"issue","path":"\.github\/inari\/issues\/schema-issue\.json"\}/u,
+  );
+  assert.deepEqual(parseExistingIssueArtifact(issue, issueBody).values, issueValues);
+  assert.equal(
+    parseExistingIssueArtifact(issue, issueBody.replace("### category", "### category\n\n### extra")).parsed,
+    false,
+  );
+  assert.equal(
+    parseExistingIssueArtifact(issue, issueBody.replace("### category", "### summary\n\n### category")).parsed,
+    false,
+  );
+
+  const pullRequest = parseArtifactContract({
+    version: "2",
+    kind: "pull_request",
+    id: "structured",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        verification: {
+          type: "array",
+          maxItems: 4,
+          items: {
+            type: "object",
+            properties: { command: { type: "string" }, outcome: { type: "string", enum: ["passed", "failed"] } },
+            required: ["command", "outcome"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["verification"],
+      additionalProperties: false,
+    },
+    bindings: { "/verification": { authority: { kind: "supplied" }, presentation: { control: "checklist" } } },
+  });
+  const values = { verification: [{ command: "echo ### result\n- [ ] check", outcome: "passed" }] };
+  const body = renderPullRequestArtifact(pullRequest, values);
+  assert.match(
+    body,
+    /inari:template \{"version":"1","kind":"pull_request","path":"\.github\/inari\/pull-requests\/structured\.json"\}/u,
+  );
+  assert.doesNotMatch(body, /JSON\.stringify\(values\)/u);
+  assert.deepEqual(parseExistingPullRequestArtifact(pullRequest, body).values, values);
+  const preamble = body.replace("## inari-field:verification", "Unrecognized preamble\n\n## inari-field:verification");
+  assert.equal(parseExistingPullRequestArtifact(pullRequest, preamble).parsed, false);
+
+  const unbounded = structuredClone(pullRequest);
+  const verification = (unbounded.schema as { properties: Record<string, Record<string, unknown>> }).properties
+    .verification;
+  if (verification !== undefined) delete verification.maxItems;
+  assert.throws(() => renderPullRequestArtifact(unbounded, values));
+});
+
+test("schema-native PR public adapters resolve schema references through the root context", () => {
+  const contract = parseArtifactContract({
+    version: "2",
+    kind: "pull_request",
+    id: "referenced",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $defs: { text: { type: "string" } },
+      type: "object",
+      properties: {
+        summary: {
+          $ref: "#/$defs/text",
+          type: "string",
+          minLength: 1,
+          allOf: [{ $ref: "#/$defs/text" }],
+        },
+      },
+      required: ["summary"],
+      additionalProperties: false,
+    },
+    bindings: { "/summary": { authority: { kind: "supplied" } } },
+  });
+  const values = { summary: "referenced" };
+  const body = renderPullRequestArtifact(contract, values);
+  assert.deepEqual(parseExistingPullRequestArtifact(contract, body).values, values);
+});
+
+test("schema-native artifact adapters reuse the effective caller schema projection boundary", () => {
+  const patterned = parseArtifactContract({
+    version: "2",
+    kind: "pull_request",
+    id: "patterned",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { summary: { type: "string", minLength: 1 } },
+      patternProperties: { "^x-": { type: "string" } },
+      additionalProperties: false,
+    },
+    bindings: { "/summary": { authority: { kind: "supplied" } } },
+  });
+  assert.throws(() => renderPullRequestArtifact(patterned, { summary: "value" }));
+
+  const emptyPatternWithFixedValue = parseArtifactContract({
+    version: "2",
+    kind: "pull_request",
+    id: "empty-pattern",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { summary: { type: "string", minLength: 1 }, generated: { type: "string" } },
+      required: ["summary", "generated"],
+      patternProperties: {},
+      additionalProperties: false,
+    },
+    bindings: {
+      "/summary": { authority: { kind: "supplied" } },
+      "/generated": { authority: { kind: "fixed", value: "core" } },
+    },
+  });
+  const values = { summary: "value" };
+  const body = renderPullRequestArtifact(emptyPatternWithFixedValue, values);
+  assert.deepEqual(parseExistingPullRequestArtifact(emptyPatternWithFixedValue, body).values, values);
+});
+
+test("schema-native PR Markdown refuses nested dynamic properties instead of losing caller data", () => {
+  const contract = parseArtifactContract({
+    version: "2",
+    kind: "pull_request",
+    id: "nested-pattern",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        detail: {
+          type: "object",
+          properties: { fixed: { type: "string" } },
+          patternProperties: { "^x-": { type: "string" } },
+          additionalProperties: false,
+        },
+      },
+      required: ["detail"],
+      additionalProperties: false,
+    },
+    bindings: { "/detail": { authority: { kind: "supplied" } } },
+  });
+  const values = { detail: { fixed: "one", "x-extra": "two" } };
+
+  assert.throws(() => renderPullRequestArtifact(contract, values));
+  assert.equal(
+    parseExistingPullRequestArtifact(
+      contract,
+      [
+        "## inari-field:detail",
+        "",
+        "- [ ] object",
+        "  - [ ] property:fixed",
+        "    - [ ] string:one",
+        "  - [ ] property:x-extra",
+        "    - [ ] string:two",
+        "",
+      ].join("\n"),
+    ).parsed,
+    false,
+  );
+});
+
+test("schema-native observation revalidates root JSON Schema relationships", () => {
+  const contract = parseArtifactContract({
+    version: "2",
+    kind: "pull_request",
+    id: "related",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { summary: { type: "string", minLength: 1 }, detail: { type: "string", minLength: 1 } },
+      dependentRequired: { summary: ["detail"] },
+      additionalProperties: false,
+    },
+    bindings: {
+      "/summary": { authority: { kind: "supplied" } },
+      "/detail": { authority: { kind: "supplied" } },
+    },
+  });
+  const body = renderPullRequestArtifact(contract, { summary: "why", detail: "what" });
+  const missingDetail = body.replace("- [ ] string:what", "");
+  assert.equal(parseExistingPullRequestArtifact(contract, missingDetail).parsed, false);
+});
+
+test("schema-native artifact projection rejects caller values owned by non-supplied bindings", () => {
+  const contract = parseArtifactContract({
+    version: "2",
+    kind: "pull_request",
+    id: "owned",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { summary: { type: "string", minLength: 1 }, generated: { type: "string" } },
+      required: ["summary", "generated"],
+      additionalProperties: false,
+    },
+    bindings: {
+      "/summary": { authority: { kind: "supplied" } },
+      "/generated": { authority: { kind: "fixed", value: "system" } },
+    },
+  });
+  assert.throws(() => renderPullRequestArtifact(contract, { summary: "Caller", generated: "system" }));
+});
+
+test("existing Issue sections use CommonMark headings and recovery reports unmatched source ranges", () => {
+  const fields = {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests"],
+  };
+  const canonical = renderIssueArtifact(issueContractFixture, fields);
+  const commonMarkHeading = canonical.replace("### Problem", "   ###   Problem ###");
+  const parsed = parseExistingIssueArtifact(issueContractFixture, commonMarkHeading);
+  assert.equal(parsed.parsed, true);
+  assert.deepEqual(parsed.values, fields);
+
+  const recovered = recoverExistingArtifactValues(issueContractFixture, `Unmatched preamble\n\n${canonical}`);
+  assert.deepEqual(recovered.values, fields);
+  assert.equal(recovered.coverage.complete, false);
+  assert.equal(recovered.coverage.unmatchedLineCount, 1);
+  assert.deepEqual(recovered.coverage.unmatchedRanges, [{ startLine: 1, endLine: 1 }]);
+  assert.equal(recovered.coverage.truncated, false);
+  assert.equal(
+    parseExistingIssueArtifact(issueContractFixture, `Unmatched preamble\n\n${canonical}`).diagnostics[0]?.code,
+    "EXISTING_EXTRA_CONTENT",
+  );
+
+  const orphanParagraphs = Array.from({ length: 20 }, (_, index) => `Unmatched paragraph ${index + 1}`).join("\n\n");
+  const boundedCoverage = recoverExistingArtifactValues(
+    issueContractFixture,
+    `${orphanParagraphs}\n\n${canonical}`,
+  ).coverage;
+  assert.equal(boundedCoverage.unmatchedLineCount, 20);
+  assert.equal(boundedCoverage.unmatchedRanges.length, 16);
+  assert.equal(boundedCoverage.truncated, true);
 });
 
 test("Issue rendering uses governed option labels while preserving semantic values", () => {
@@ -380,6 +657,10 @@ test("PR HTML comments and placeholders remain non-semantic during parsing", () 
   const body = [
     "<!-- Repository guidance -->",
     "",
+    "<!--",
+    "## Comment heading is opaque",
+    "-->",
+    "",
     "## Summary",
     "<!-- Explain the change. -->",
     "A useful summary",
@@ -462,6 +743,35 @@ test("unsafe multi-select labels are rejected at the canonical boundary", () => 
       return true;
     },
   );
+});
+
+test("Issue recovery coverage excludes unrendered Issue Form documentation", () => {
+  const fields = {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests"],
+  };
+  const documentation = issueContractFixture.sections.filter((section) => section.kind === "documentation");
+  const inputs = issueContractFixture.sections.filter((section) => section.kind === "input");
+  const contract: CanonicalContract = {
+    ...issueContractFixture,
+    sections: [
+      ...documentation.map((section, index) => ({ ...section, render: { ...section.render, order: index } })),
+      ...inputs.map((section, index) => ({
+        ...section,
+        render: { ...section.render, order: documentation.length + index },
+      })),
+    ],
+  };
+  const [problem, category, ...remaining] = renderIssueArtifact(contract, fields).split(/(?=^### )/mu);
+  assert.ok(problem?.startsWith("### Problem"));
+  assert.ok(category?.startsWith("### Category"));
+  const reordered = [category, problem, ...remaining].join("");
+  const recovered = recoverExistingArtifactValues(contract, reordered);
+  assert.deepEqual(recovered.values, fields);
+  assert.equal(recovered.coverage.complete, true);
+  assert.equal(recovered.coverage.unmatchedLineCount, 0);
 });
 
 test("round-trip mismatches use the shared bounded field diagnostic contract", () => {
@@ -1316,6 +1626,50 @@ test("wrong-template and unparseable existing bodies are distinguished", () => {
   assert.equal(wrong.classification, "wrong-template");
   const malformed = validateExistingIssueArtifact(issueContractFixture, "not a canonical artifact\n");
   assert.equal(malformed.classification, "unparseable");
+});
+
+test("comment-only PR template preamble does not hide wrong-template evidence", () => {
+  const contract = parsePullRequestTemplate(
+    [
+      "<!-- Pull request summary -->",
+      "",
+      "## Summary",
+      "<!-- Explain the change. -->",
+      "",
+      "## Validation",
+      "",
+      "- [ ] Tests",
+      "",
+    ].join("\n"),
+    {
+      id: "default",
+      type: "pull-request-default",
+      kind: "pull-request",
+      name: "default",
+      path: ".github/PULL_REQUEST_TEMPLATE.md",
+    },
+  );
+  const parsed = parseExistingPullRequestArtifact(contract, "## Other\n\nLegacy body\n");
+  assert.equal(parsed.parsed, false);
+  assert.equal(parsed.diagnostics[0]?.code, "EXISTING_WRONG_TEMPLATE");
+  assert.equal(
+    validateExistingPullRequestArtifact(contract, "## Other\n\nLegacy body\n").classification,
+    "wrong-template",
+  );
+});
+
+test("unknown checklist items remain unparseable under AST task-list decoding", () => {
+  const body = renderIssueArtifact(issueContractFixture, {
+    problem: "A useful problem statement",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests"],
+  }).replace("- [x] Tests cover the behavior", "- [x] Unrecognized checklist entry");
+  const parsed = parseExistingIssueArtifact(issueContractFixture, body);
+  assert.equal(parsed.parsed, false);
+  assert.equal(parsed.diagnostics[0]?.code, "EXISTING_UNKNOWN_CHECKLIST_ITEM");
+  assert.deepEqual(parsed.values, {});
+  assert.equal(validateExistingIssueArtifact(issueContractFixture, body).classification, "unparseable");
 });
 
 test("PR placeholder-only sections reconstruct as omitted semantic values", async () => {

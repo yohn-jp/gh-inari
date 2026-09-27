@@ -1,4 +1,5 @@
 import {
+  extractIssueDependencyMarker,
   extractTemplateIdentityMarker,
   loadCanonicalArtifact,
   prepareIssueArtifact,
@@ -18,6 +19,11 @@ import {
   type TemplateIdentityMarker,
 } from "./artifact.js";
 import { SemanticValidationError, type ArtifactKind, type CanonicalContract } from "./contract/index.js";
+import {
+  assertArtifactObservationIdentityCurrent,
+  createArtifactObservationIdentity,
+  type ArtifactObservationIdentity,
+} from "./artifact-observation-identity.js";
 import {
   createArtifactDiagnostic,
   createArtifactDiagnosticReport,
@@ -315,6 +321,8 @@ export function remediationFailureDetails(read: ExistingArtifactRead): Readonly<
 
 export interface ExistingArtifactRead {
   readonly remote: GitHubIssue | GitHubPullRequest;
+  /** Identity of the provider-normalized snapshot used by this read. */
+  readonly observationIdentity?: ArtifactObservationIdentity;
   readonly contract?: CanonicalContract;
   readonly result: ExistingArtifactValidationResult;
   readonly templateSelection?: "explicit" | "inferred";
@@ -664,9 +672,11 @@ async function readGovernedExistingArtifactCore(
         ? await adapter.getIssue(number)
         : await adapter.getPullRequest(number));
   if (remote === undefined) throw new Error("An artifact snapshot or number is required.");
+  const observationIdentity = createArtifactObservationIdentity(domain, remote);
 
   if (selector === undefined) {
-    const marker = extractTemplateIdentityMarker(remote.body ?? "");
+    const markerBody = domain === "issue" ? extractIssueDependencyMarker(remote.body ?? "").body : (remote.body ?? "");
+    const marker = extractTemplateIdentityMarker(markerBody);
     if (marker.status !== "absent") {
       return resolveExistingArtifactByMarker(domain, remote, contracts, failedTemplates, marker.status, marker.marker);
     }
@@ -704,6 +714,7 @@ async function readGovernedExistingArtifactCore(
     };
     return {
       remote,
+      observationIdentity,
       contract,
       result,
       templateSelection: "explicit",
@@ -719,6 +730,7 @@ async function readGovernedExistingArtifactCore(
         : undefined;
     return {
       remote,
+      observationIdentity,
       contract: selected.contract ?? explicitContract,
       result: selected.result,
       templateSelection: selector === undefined ? "inferred" : "explicit",
@@ -737,6 +749,7 @@ async function readGovernedExistingArtifactCore(
   const diagnostics = [...selected.result.parse.diagnostics, ...compileDiagnostics];
   return {
     remote,
+    observationIdentity,
     result: {
       valid: false,
       classification: selected.result.classification,
@@ -764,6 +777,7 @@ function resolveExistingArtifactByMarker(
     };
     return {
       remote,
+      observationIdentity: createArtifactObservationIdentity(domain, remote),
       result: {
         valid: false,
         classification: "wrong-template",
@@ -805,6 +819,7 @@ function resolveExistingArtifactByMarker(
       : validateExistingPullRequestArtifact(contract, remote.body);
   return {
     remote,
+    observationIdentity: createArtifactObservationIdentity(domain, remote),
     contract,
     result,
     ...(failedTemplates.length === 0 ? {} : { governanceFailures: failedTemplates }),
@@ -1282,10 +1297,20 @@ export async function updateGovernedExistingArtifact(
   adapter: GitHubAdapter,
   domain: GovernedArtifactDomain,
   number: number,
+  read: ExistingArtifactRead,
   artifact: PreparedRemediationArtifact,
 ): Promise<GovernedMutationResult<GitHubIssue> | GovernedMutationResult<GitHubPullRequest>> {
-  if (domain === "issue") return updateGovernedIssue(adapter, number, artifact as ValidatedRenderedIssueArtifact);
-  return updateGovernedPullRequest(adapter, number, artifact as ValidatedRenderedPullRequestArtifact);
+  const observationIdentity = read.observationIdentity ?? createArtifactObservationIdentity(domain, read.remote);
+  assertArtifactObservationIdentityCurrent(domain, observationIdentity, read.remote, number);
+  if (domain === "issue") {
+    return updateGovernedIssue(adapter, number, artifact as ValidatedRenderedIssueArtifact, observationIdentity);
+  }
+  return updateGovernedPullRequest(
+    adapter,
+    number,
+    artifact as ValidatedRenderedPullRequestArtifact,
+    observationIdentity,
+  );
 }
 
 function desiredFieldsFromArtifact(

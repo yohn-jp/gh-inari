@@ -262,7 +262,7 @@ async function executorEvidence(provider, request, runtimeAuthority) {
   });
   const change = projectChangeFromGitHubEvidence(await projector.read(changeReadRequest(request.issue)));
   const reference = { ...REPOSITORY, number: IMPLEMENTATION };
-  return {
+  const evidence = {
     ...trust,
     change,
     implementation: {
@@ -274,6 +274,16 @@ async function executorEvidence(provider, request, runtimeAuthority) {
       change,
     },
   };
+  return request.taskTerminationAuthorization === undefined
+    ? evidence
+    : {
+        ...evidence,
+        taskTermination: {
+          status: "absent",
+          provenance: { source: "github-git-data", commit: BASE_SHA },
+          recordProvenance: [],
+        },
+      };
 }
 
 /** The Executor's delegate composition with provider transports as the only fakes. */

@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { createPrivateKey, createSign, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
+import {
+  createPrivateKey,
+  createSign,
+  generateKeyPairSync,
+  randomBytes,
+  X509Certificate,
+  type KeyObject,
+} from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { chmod, copyFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -89,6 +96,20 @@ function privateKeyPem(key: KeyObject): string {
   return key.export({ format: "pem", type: "pkcs8" }).toString();
 }
 
+function randomPositiveSerial(): Buffer {
+  const serial = randomBytes(16);
+  serial[serial.length - 1]! |= 1;
+  return serial;
+}
+
+function encodedPositiveSerial(serial: Buffer): Buffer {
+  const firstNonzero = serial.findIndex((byte) => byte !== 0);
+  assert.notEqual(firstNonzero, -1);
+  const minimal = serial.subarray(firstNonzero);
+  const positive = minimal[0]! & 0x80 ? Buffer.concat([Buffer.from([0]), minimal]) : minimal;
+  return der(0x02, positive);
+}
+
 function signedCertificate(input: {
   readonly serial: Buffer;
   readonly publicKeyDer: Buffer;
@@ -109,10 +130,9 @@ function signedCertificate(input: {
       ),
     );
   };
-  const serial = input.serial[0]! & 0x80 ? Buffer.concat([Buffer.from([0]), input.serial]) : input.serial;
   const tbs = sequence(
     der(0xa0, der(0x02, Buffer.from([2]))),
-    der(0x02, serial),
+    encodedPositiveSerial(input.serial),
     algorithm,
     input.issuer,
     sequence(utcTime(notBefore), utcTime(notAfter)),
@@ -123,6 +143,32 @@ function signedCertificate(input: {
   const signature = createSign("RSA-SHA256").update(tbs).sign(input.signingKey);
   return certificatePem(sequence(tbs, algorithm, bitString(signature)));
 }
+
+test("fixture serials with leading zero and high bit produce valid positive X.509 certificates", () => {
+  const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const name = certificateName("Inari serial fixture test");
+  for (const [serial, expected] of [
+    [Buffer.from([0x00, 0x01]), "01"],
+    [Buffer.from([0x80, 0x01]), "8001"],
+  ] as const) {
+    assert.deepEqual(
+      encodedPositiveSerial(serial),
+      expected === "01" ? Buffer.from([0x02, 0x01, 0x01]) : Buffer.from([0x02, 0x03, 0x00, 0x80, 0x01]),
+    );
+    const certificate = new X509Certificate(
+      signedCertificate({
+        serial,
+        publicKeyDer: pair.publicKey.export({ format: "der", type: "spki" }),
+        issuer: name,
+        subject: name,
+        extensions: [],
+        signingKey: pair.privateKey,
+      }),
+    );
+    assert.equal(certificate.serialNumber, expected);
+    assert.equal(certificate.verify(pair.publicKey), true);
+  }
+});
 
 async function writeCertificateFiles(certificate: TestCertificate): Promise<void> {
   await writeFile(certificate.certificate, certificate.certificatePem, { mode: 0o600 });
@@ -143,7 +189,7 @@ async function issueCertificate(
     certificate,
     privateKey: privateKeyPath,
     certificatePem: signedCertificate({
-      serial: randomBytes(16),
+      serial: randomPositiveSerial(),
       publicKeyDer: pair.publicKey.export({ format: "der", type: "spki" }),
       issuer: certificateName("Inari local Runtime test CA"),
       subject: certificateName(prefix),
@@ -174,7 +220,7 @@ async function createCertificates(directory: string): Promise<{
     certificate: path.join(directory, "ca-certificate.pem"),
     privateKey: path.join(directory, "ca-private-key.pem"),
     certificatePem: signedCertificate({
-      serial: randomBytes(16),
+      serial: randomPositiveSerial(),
       publicKeyDer: pair.publicKey.export({ format: "der", type: "spki" }),
       issuer: certificateName("Inari local Runtime test CA"),
       subject: certificateName("Inari local Runtime test CA"),

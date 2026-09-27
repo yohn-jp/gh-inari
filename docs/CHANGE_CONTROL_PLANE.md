@@ -78,6 +78,16 @@ A Source may have multiple contributing Implementations. Its completion must
 be evaluated against composed evidence, not inferred from child count or the
 last merged PR.
 
+For the governed Source integration candidate, an authorized independent
+reviewer finalizes a repository-owned, versioned Source acceptance record. It
+binds the immutable repository and Source identities, governed integration PR,
+exact head SHA, current Source criteria version/digest, reviewer identity and
+authority, and an explicit result for every criterion. The protected-ref
+[Source Acceptance Policy](./SOURCE_ACCEPTANCE_POLICY.md) is the sole reviewer
+authorization source and defines independence against the Source requester,
+integration PR author, and complete exact-head candidate contributors. The
+App, bot, and Hosted cannot be Source acceptance reviewers.
+
 ### 4.3 Change
 
 The canonical target identity is:
@@ -103,6 +113,13 @@ An Implementation may name multiple canonical Sources. That set narrows which
 Source operations may be requested, but it does not create multiple implicit
 integration parents or permit arbitrary PR targeting.
 
+Task termination is a separate event owned by the Implementation lifecycle.
+An explicitly authorized Runtime operator finalizes a versioned record owned
+by the repository and bound to its immutable identity, this Implementation,
+the current authorization digest, and accepted base evidence. A Source Change
+abort, Issue closure, or Session's own abort assertion cannot finalize the
+task event.
+
 ### 4.5 Session
 
 A local Session binding carries the Implementation task, permitted claims,
@@ -113,6 +130,14 @@ Implementation contract's Source set.
 Adding a Source later does not widen an issued Session. Removing a Source
 prevents subsequent Source operations. Task/body/base/branch freshness remain
 separate checks.
+
+Admission rereads current task-termination evidence for each task-bound
+operation, including an operation from an already issued Session. A successful
+authoritative read showing no termination event means the Implementation is
+not terminated; all other Admission checks still apply. A terminated
+Implementation makes all of its Sessions fail closed. A failed or unavailable
+read, or invalid or mismatched current evidence, denies. Closing a Session only
+closes that Session and does not terminate its Implementation task.
 
 The existing task-bound `change.implement` compatibility claim serves only
 Implementation publication and branch-side composition. It cannot authorize
@@ -152,6 +177,13 @@ record as a Source-root record merely because relationships now exist.
 Bounded historical observation/adoption may remain. A compatibility reader
 must produce an explicit canonical or historical classification and must not
 preserve an independent old execution engine.
+
+An Implementation-root Change abort can remain readable as historical data,
+but it does not authorize new task termination or substitute for Admission's
+current task-evidence check. Current code still projects Implementation
+`aborted` from a bound ABORTED Change identity; migrate that producer/consumer
+path to the versioned repository-owned task record while retaining only the
+bounded historical read.
 
 ## 5. Domain invariants
 
@@ -217,6 +249,18 @@ is verified as reviewable. REVIEW is not review approval or successful CI.
 The required current checks, reviews, governance, and merge-policy conditions
 are actually satisfied. A cached green badge or a child PR's checks cannot
 prove the current composed candidate accepted.
+
+This is Change policy acceptance for the exact current candidate, distinct
+from the reviewer's Source criteria acceptance. Source completion requires
+both applicable current Change policy evidence and a current Source acceptance
+record whose results satisfy every Source criterion. A missing, unavailable,
+invalid, mismatched, stale, dismissed, or revoked record fails closed. A changed
+integration PR head or Source criteria version/digest, or lost reviewer
+authorization or independence, invalidates its use for completion. Recheck
+these bindings, current protected-ref Source Acceptance Policy, and complete
+candidate contributor evidence whenever the record is used; neither
+an earlier review nor a branch name alone certifies the current candidate.
+The record grants no merge or provider mutation authority.
 
 ### 6.5 MERGED
 
@@ -360,6 +404,23 @@ different purposes. None may infer permission from a stale branch name alone.
 Executor publishes the admitted PR under Inari Access. Desired title, body,
 head/base, relationships, and provenance come from canonical semantic plans.
 The provider adapter does not invent omitted values.
+
+Local Source or Epic integration branch and Draft PR publication requires an
+authenticated local operator, identified through the Runtime owner-enrolled
+operator-key proof contract, and a separate current Runtime-owned exact grant
+for each operation: `branch.create` for the integration branch and
+`pullRequest.create` for the Draft PR. Each grant binds the immutable
+repository, the `source-integration` or `epic-integration` role, the exact
+Source or Epic, and the exact branch/head/base. A grant for one operation
+does not authorize the other. For every operation, Admission rereads its
+grant and current repository, branch, head, base, and policy evidence, then
+intersects them before effect. Authentication, App permission, branch
+spelling, and task Session identity do not authorize either operation.
+Unavailable, stale, revoked, or mismatched evidence denies before provider
+effects. Executor performs admitted effects as Inari Access, not with
+operator credentials. See [Caller Authentication and Capability
+Authorization](./AGENT_CAPABILITY_AUTHORIZATION.md) for the local operator
+subject, challenge, caller, and grant boundaries.
 
 ### 11.2 Noncanonical PRs
 
@@ -581,6 +642,9 @@ implicit user-token fallback.
 
 `MERGED` is reported only after authoritative reread. Source or Epic closure
 remains its own acceptance decision and cannot be inferred from one leaf merge.
+Source and Epic composition consume the current Source acceptance result at
+their respective boundaries; an Epic cannot infer a Source's criteria results
+from integrated leaves or Change `ACCEPTED` alone.
 
 ## 25. Product boundaries
 

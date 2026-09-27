@@ -47,6 +47,12 @@ import type { LocalExecutorEvidenceRequest } from "../local-control/executor-htt
 import { ExecutorCredentialStore, type StoredIssuerKey } from "./credential-store.js";
 import { LocalExecutorError } from "./errors.js";
 import { issuerKeyMissing, issuerKeyReference, requireLocalExecutorAppId } from "./issuer-input.js";
+import {
+  finalizeExecutorTaskTermination,
+  readExecutorTaskTermination,
+  taskTerminationReadCapability,
+} from "./task-termination.js";
+import type { ImplementationAuthorizationRecord } from "../implementation-authorization.js";
 
 function issuerKeyInvalid(): LocalExecutorError {
   return new LocalExecutorError(
@@ -364,21 +370,7 @@ export async function readLocalExecutorEvidence(
   const broker = binding.broker();
   return withOwnerFailures((keep) =>
     broker.withRepositoryReadCapability({}, async (capability) => {
-      const adapter = new GitHubAdapter({
-        repository: identity.nameWithOwner,
-        hostname: identity.repositoryHost,
-        transport: {
-          request: async (providerRequest) => {
-            if (providerRequest.method !== "GET") throw new Error("Executor evidence reads cannot perform mutation.");
-            const response = await capability.transport.request({
-              hostname: providerRequest.hostname,
-              method: "GET",
-              path: providerRequest.path,
-            });
-            return { ...response, body: response.body ?? null };
-          },
-        },
-      });
+      const adapter = readOnlyAdapter(capability, identity);
       const runtime = await keep(() => resolveDelegator(adapter, request.authorityId));
       const authority = Object.freeze({
         ref: `refs/heads/${runtime.provenance.ref}`,
@@ -408,6 +400,14 @@ export async function readLocalExecutorEvidence(
         typeof pullRequestNumber === "number"
           ? await frontierRepository.observePullRequest(pullRequestNumber)
           : undefined;
+      const taskTermination =
+        request.taskTerminationAuthorization === undefined
+          ? undefined
+          : await readExecutorTaskTermination(
+              taskTerminationReadCapability(capability, identity),
+              request.taskTerminationAuthorization,
+              implementation,
+            );
       return Object.freeze({
         repository: identity,
         authority,
@@ -415,8 +415,56 @@ export async function readLocalExecutorEvidence(
         change,
         implementation,
         ...(reviewEvidence === undefined ? {} : { reviewEvidence }),
+        ...(taskTermination === undefined ? {} : { taskTermination }),
       });
     }),
+  );
+}
+
+function readOnlyAdapter(capability: GitHubAppRepositoryReadCapability, identity: RepositoryIdentity): GitHubAdapter {
+  return new GitHubAdapter({
+    repository: identity.nameWithOwner,
+    hostname: identity.repositoryHost,
+    transport: {
+      request: async (providerRequest) => {
+        if (providerRequest.method !== "GET") throw new Error("Executor evidence reads cannot perform mutation.");
+        const response = await capability.transport.request({
+          hostname: providerRequest.hostname,
+          method: "GET",
+          path: providerRequest.path,
+        });
+        return { ...response, body: response.body ?? null };
+      },
+    },
+  });
+}
+
+/** Internal conditional effect. No HTTP mutation route is registered for this function. */
+export async function finalizeLocalExecutorTaskTermination(
+  authorization: ImplementationAuthorizationRecord,
+  proposedRecord: unknown,
+  environment: NodeJS.ProcessEnv,
+): Promise<import("../github/task-termination-record.js").TaskTerminationFinalization> {
+  const identity: RepositoryIdentity = {
+    repositoryHost: authorization.repository.repositoryHost,
+    repositoryId: authorization.repository.repositoryId,
+    nameWithOwner: authorization.repository.repository ?? "",
+  };
+  const binding = await localExecutorIssuerBinding(identity, environment);
+  await verifyIssuerBinding(binding);
+  const broker = binding.broker();
+  const current = await broker.withRepositoryReadCapability({}, async (capability) => {
+    const repository = createGitHubImplementationFrontierRepository({
+      adapter: readOnlyAdapter(capability, identity),
+      cwd: process.cwd(),
+      changeReader: {
+        read: (request) => projectChange(broker, providerRepository(identity), identity, request),
+      },
+    });
+    return readCurrentImplementationAdmissionEvidence(repository, authorization.implementation.number);
+  });
+  return broker.withBranchAdvanceCapability({ target: identity }, (gitData) =>
+    finalizeExecutorTaskTermination(gitData, authorization, current, proposedRecord),
   );
 }
 

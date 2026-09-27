@@ -76,6 +76,10 @@ import {
   type ValidatedSemanticIssueArtifact,
 } from "./types.js";
 import type { ChangeExecutionDeadline } from "../change-execution-port.js";
+import {
+  assertArtifactObservationIdentityCurrent,
+  type ArtifactObservationIdentity,
+} from "../artifact-observation-identity.js";
 
 const MAX_PULL_REQUEST_LIST_ITEMS = 100;
 const OPERATIONAL_PAGE_SIZE = 100;
@@ -1229,7 +1233,8 @@ export class GitHubAdapterCore {
   async updateIssue(
     issueNumber: number,
     artifact: ValidatedRenderedIssueArtifact,
-    deadline?: ChangeExecutionDeadline,
+    deadline: ChangeExecutionDeadline | undefined,
+    observationIdentity: ArtifactObservationIdentity,
   ): Promise<GitHubIssue> {
     assertIssueNumber(issueNumber, "issue_number");
     assertValidatedRenderedIssueArtifact(artifact);
@@ -1237,7 +1242,8 @@ export class GitHubAdapterCore {
     assertArtifactRepository(artifact, context);
     // GitHub's issues API also accepts pull request numbers; read first so a
     // pull request is never silently overwritten with Issue Form content.
-    await this.getIssue(issueNumber, deadline);
+    const current = await this.getIssue(issueNumber, deadline);
+    assertArtifactObservationIdentityCurrent("issue", observationIdentity, current, issueNumber);
     const result = await this.runApi(
       context,
       `repos/${context.nameWithOwner}/issues/${issueNumber}`,
@@ -1371,12 +1377,15 @@ export class GitHubAdapterCore {
   async updatePullRequest(
     pullRequestNumber: number,
     artifact: ValidatedRenderedPullRequestArtifact,
-    deadline?: ChangeExecutionDeadline,
+    deadline: ChangeExecutionDeadline | undefined,
+    observationIdentity: ArtifactObservationIdentity,
   ): Promise<GitHubPullRequest> {
     assertIssueNumber(pullRequestNumber, "pull_request_number");
     assertValidatedRenderedPullRequestArtifact(artifact);
     const context = await this.resolveRepositoryContext(deadline);
     assertArtifactRepository(artifact, context);
+    const current = await this.getPullRequest(pullRequestNumber, deadline);
+    assertArtifactObservationIdentityCurrent("pr", observationIdentity, current, pullRequestNumber);
     const result = await this.runApi(
       context,
       `repos/${context.nameWithOwner}/pulls/${pullRequestNumber}`,

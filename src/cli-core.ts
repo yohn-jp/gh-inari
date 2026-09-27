@@ -81,6 +81,11 @@ import {
   updateGovernedExistingArtifact,
 } from "./reconciliation.js";
 import {
+  ARTIFACT_RECONCILIATION_VERSION,
+  executeArtifactReconciliation,
+  type ArtifactReconciliationResult,
+} from "./artifact-reconciliation-executor.js";
+import {
   discoverSemanticTemplates,
   importNativeTemplate,
   renderSemanticCompactSchema,
@@ -536,17 +541,14 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     if (domain === "issue" || domain === "pr") {
       return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
     }
-    if (domain === "branch") {
-      return await runSemanticBranchObservationCommand(command, rest, parsed, root, dependencies);
-    }
     if (domain === "skill") {
       return runSkillCommand(command, json);
     }
     throw new CliError("UNKNOWN_COMMAND", `Unknown command "${parsed.positionals.join(" ")}".`);
   } catch (error: unknown) {
+    if (json || isMachineCommand(parsed.positionals)) return reportMachineFailure(error);
     const shape = toErrorShape(error);
-    if (json || isMachineCommand(parsed.positionals)) console.log(JSON.stringify({ ok: false, error: shape }));
-    else console.error(`${shape.code}: ${shape.message}`);
+    console.error(`${shape.code}: ${shape.message}`);
     return classifyExitCode(error);
   }
 }
@@ -3866,6 +3868,22 @@ async function runArtifactCommand(
   throw new CliError("UNKNOWN_COMMAND", `Unknown ${domain} command "${command ?? ""}".`);
 }
 
+/** Execute one Canon-validated public reconcile route through the Core executor. */
+export async function executeCliArtifactReconciliation(
+  domain: "issue" | "pr",
+  number: number,
+  repository: string | undefined,
+  dependencies: CliDependencies = {},
+): Promise<ArtifactReconciliationResult> {
+  const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
+  const adapter = createAdapter(dependencies, root, repository);
+  return executeArtifactReconciliation(adapter, {
+    version: ARTIFACT_RECONCILIATION_VERSION,
+    domain,
+    number,
+  });
+}
+
 async function runIntegrationRoutingCommand(rest: readonly string[], parsed: ParsedArgs): Promise<number> {
   if (rest.length > 0) throw new CliError("UNKNOWN_COMMAND", `Unexpected PR routing argument "${rest[0] ?? ""}".`);
   const unsupported = Object.keys(parsed.options).find((key) => !["json", "from"].includes(key));
@@ -4071,6 +4089,28 @@ async function runOperationalObservationCommand(
     }),
   );
   return 0;
+}
+
+/** Invoke the existing Core View semantics from a typed CLI Canon route. */
+export async function executeCliArtifactView(
+  domain: "issue" | "pr",
+  number: number,
+  repository: string | undefined,
+  dependencies: CliDependencies = {},
+): Promise<number> {
+  const parsed: ParsedArgs = {
+    positionals: [domain, "view", String(number)],
+    options: repository === undefined ? {} : { repository },
+    fields: [],
+    capabilities: [],
+    repeated: {},
+  };
+  const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
+  try {
+    return await runOperationalObservationCommand(domain, number, parsed, root, dependencies, "view");
+  } catch (error: unknown) {
+    return reportMachineFailure(error);
+  }
 }
 
 async function runOperationalDiscoveryCommand(
@@ -5055,45 +5095,47 @@ async function runSemanticObservationCheckCommand(
   return comparison.valid ? 0 : EXIT_VALIDATION;
 }
 
-async function runSemanticBranchObservationCommand(
-  command: string | undefined,
-  rest: readonly string[],
-  parsed: ParsedArgs,
+export interface SemanticBranchObservationInput {
+  readonly operation: "branch.check" | "branch.semantic.check";
+  readonly branchName: string;
+  readonly from: string | undefined;
+  readonly repository: string | undefined;
+  readonly repositoryAlias: string | undefined;
+  readonly template: string | undefined;
+}
+
+/** Typed CLI adapter for the existing semantic Branch observation operation. */
+export async function runSemanticBranchObservationCommand(
+  input: SemanticBranchObservationInput,
+  dependencies: CliDependencies = {},
+): Promise<number> {
+  const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
+  try {
+    return await executeSemanticBranchObservation(input, root, dependencies);
+  } catch (error: unknown) {
+    // Branch observations have always used the machine error envelope, including
+    // when --json is absent. Keep that product error projection at the Core edge.
+    console.log(JSON.stringify({ ok: false, error: toErrorShape(error) }));
+    return classifyExitCode(error);
+  }
+}
+
+async function executeSemanticBranchObservation(
+  input: SemanticBranchObservationInput,
   root: string,
   dependencies: CliDependencies,
 ): Promise<number> {
-  const branchCheck =
-    command === "check" ? rest : command === "semantic" && rest[0] === "check" ? rest.slice(1) : undefined;
-  if (branchCheck === undefined) {
-    throw new CliError("UNKNOWN_COMMAND", `Unknown branch command "${command ?? ""}".`);
-  }
-  if (branchCheck.length !== 1) throw new CliError("INVALID_BRANCH_NAME", "Branch name is required.", "$argv[2]");
-  const branchName = branchCheck[0];
-  const operation = command === "check" ? "branch.check" : "branch.semantic.check";
+  const { branchName, operation, from, repository, template } = input;
   if (branchName.length === 0 || branchName.length > 512 || /[\u0000-\u001F\u007F]/u.test(branchName)) {
     throw new CliError("INVALID_BRANCH_NAME", "Branch name is invalid.", "$argv[2]");
   }
-  const unsupported = Object.keys(parsed.options).find(
-    (key) => !["json", "template", "repository", "from"].includes(key),
-  );
-  if (unsupported !== undefined) {
-    const option = getOption(unsupported as OptionId);
-    throw new CliError(
-      "INVALID_OPTION",
-      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by semantic Branch check.`,
-      "$argv",
-    );
+  if (repository !== undefined && input.repositoryAlias !== undefined) {
+    throw new CliError("INVALID_OPTION", "Specify only one repository option.", "$argv");
   }
-  if (parsed.capabilities.length > 0 || parsed.fields.length > 0) {
-    throw new CliError("INVALID_OPTION", "Semantic Branch check does not accept capability or field input.", "$argv");
-  }
-  const input = await readJsonValue(parsed.options.from);
-  const adapter = createAdapter(dependencies, root, parsed.options.repository);
-  const effectiveContract = await compileRepositoryEffectiveBranchContract(
-    adapter,
-    templateSelector(parsed, undefined),
-  );
-  const materialization = tryMaterializeSemanticArtifact(effectiveContract, input);
+  const artifactInput = await readJsonValue(from);
+  const adapter = createAdapter(dependencies, root, repository ?? input.repositoryAlias);
+  const effectiveContract = await compileRepositoryEffectiveBranchContract(adapter, template);
+  const materialization = tryMaterializeSemanticArtifact(effectiveContract, artifactInput);
   if (!materialization.valid || materialization.artifact === undefined) {
     console.log(
       JSON.stringify(
@@ -5350,7 +5392,7 @@ async function runExistingRemediation(
     return 0;
   }
 
-  const mutated = await updateGovernedExistingArtifact(adapter, domain, number, desired);
+  const mutated = await updateGovernedExistingArtifact(adapter, domain, number, read, desired);
   console.log(
     JSON.stringify({
       ok: true,
@@ -5908,6 +5950,11 @@ function toErrorShape(error: unknown): CliErrorShape {
   return { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "Operation failed." };
 }
 
+function reportMachineFailure(error: unknown): number {
+  console.log(JSON.stringify({ ok: false, error: toErrorShape(error) }));
+  return classifyExitCode(error);
+}
+
 function classifyExitCode(error: unknown): number {
   if (
     error instanceof SemanticValidationError ||
@@ -5956,6 +6003,7 @@ function classifyExitCode(error: unknown): number {
     return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code === "GOVERNANCE_POLICY_OVERRIDE_FORBIDDEN") return EXIT_VALIDATION;
   if (isObjectWithCode(error) && error.code.startsWith("ARTIFACT_CONTRACT_")) return EXIT_VALIDATION;
+  if (isObjectWithCode(error) && error.code.startsWith("ARTIFACT_OBSERVATION_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_REMOTE_")) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code.startsWith("CHANGE_EXECUTION_")) return EXIT_REMOTE;
   if (

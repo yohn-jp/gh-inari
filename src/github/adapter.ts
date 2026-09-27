@@ -10,6 +10,7 @@ import { resolveGitHubUserCredential, GitHubUserCredentialError } from "./user-c
 import { resolveAuthenticatedGitHubUser, GitHubUserIdentityError } from "./user-identity.js";
 
 export * from "./adapter-core.js";
+export * from "../artifact-observation-identity.js";
 
 const standaloneAuthenticationProvider: GitHubAdapterAuthenticationProvider = {
   createTransport: (options) => {

@@ -387,6 +387,35 @@ Enrollment, delegation, trust publication, configuration changes, reviews,
 and merges retain their own authority boundaries. Remote identity does not
 implicitly make the caller a local operator.
 
+An authenticated local operator is distinct from both a delegated local
+Session and a remote Repository Access Assertion. Local authentication
+identifies the operator; it does not by itself grant Source or Epic
+integration publication authority, and the local path does not require GitHub
+OAuth.
+
+The local operator subject is the immutable key ID of an operator public key
+enrolled in the Runtime owner's versioned operator-key registry. The Runtime
+owner controls enrollment and revocation. A local CLI or browser proves
+possession of the matching operator-held private key by signing a fresh
+Runtime challenge. The challenge binds the Runtime audience, a nonce, time,
+and the requested authentication context. The Runtime owner authentication
+seam verifies the signature against the enrolled public key and rejects
+expired, replayed, wrong-audience, or context-mismatched proofs. It passes
+Admission bounded authenticated subject evidence for the verified key ID and
+challenge context, not the operator private key or a reusable credential. The
+private key remains with the operator; Console may relay the challenge and
+signed response but does not own or persist the key or other operator
+credentials.
+
+Authentication proves the enrolled subject only. Before every privileged
+operation, Runtime admission rereads current enrollment and revocation state
+and separately evaluates the current exact operation-to-target grant and
+repository policy. Missing, stale, revoked, or mismatched evidence denies.
+Loopback, an operating-system username, a process label, an anonymous
+Setup/Console bearer, and GitHub visibility do not establish the local
+operator subject. This proof creates no Source/Epic delegation claim and does
+not change the separate provider App credential boundary.
+
 ## 9. Session Certificate V1 reference
 
 This section preserves the existing representation contract for bounded
@@ -480,9 +509,28 @@ Session's delegated authority
 ```
 
 For remote human-operated execution, the verified assertion establishes
-identity/eligibility first. The Runtime's explicit subject/operation
-authorization supplies the semantic grant; eligibility is not that grant.
-The same current-policy, task, state, and provider-effect limits then apply.
+identity/eligibility first. The Runtime operator's current explicit grant in
+Runtime-owned owner configuration binds the immutable GitHub user ID and
+provider host to semantic operation IDs, an immutable repository ID, and exact
+targets. Admission matches that grant to the assertion and request, then
+intersects it with current repository/task policy, state, and provider-effect
+limits. Hosted eligibility and assertion validity do not supply the semantic
+grant.
+
+For local Source or Epic integration branch and Draft PR publication,
+Admission separately requires a current Runtime-owned exact grant for each
+semantic operation: `branch.create` for the branch and `pullRequest.create`
+for the Draft PR. Each grant binds publication role (`source-integration` or
+`epic-integration`), immutable repository identity, exact Source or Epic, and
+the exact branch/head/base. Neither operation grant implies the other. For
+each operation, Admission rereads its grant and current repository, branch,
+head, base, and policy evidence, then intersects them before effect. Missing,
+stale, revoked, unavailable, or mismatched evidence denies. Executor performs
+admitted effects using Inari Access; operator credentials are not stored by
+Admission or used for provider execution. These grants do not become a
+Source/Epic delegation claim in an Implementation Session. Sessions remain
+leaf-scoped, and the existing #1213 bridge remains only for valid same-task
+leaf publication through original expiry or reissue.
 
 No later layer adds a permission absent from an earlier required gate.
 
@@ -508,10 +556,36 @@ A Source operation requires membership in both signed and current Source
 sets. There is no implicit primary Source. Unrelated, removed, malformed,
 cross-repository, or stale Source evidence is denied.
 
-Exactly the existing task-bound `change.implement` compatibility claim may
-support leaf PR publication/branch-side fallback. It must not authorize
-`change.issue/show/ready/abort/merge` on the Implementation as a Change root.
-This renewal does not add `pullRequest.create` to existing Authority ceilings.
+For newly authorized Implementation task Sessions, current repository and
+task policy must authorize exact leaf PR publication before Runtime Authority
+adds `pullRequest.create` to its capability ceiling and issues the explicit
+claim in the Authority-signed LocalSessionBinding. That claim is scoped to
+the immutable repository, Implementation task, exact leaf head and accepted
+base, and the bound publication request. Admission checks those identities
+against current policy and evidence for each operation. Neither the App's
+provider permission, a branch name, nor `change.implement` creates the
+claim. `branch.advance` remains a separate exact branch-write grant.
+
+The #1213 LocalSessionBinding version 1 task-bound `change.implement` claim
+is a legacy input. Its canonical output is only same-task Implementation
+leaf PR publication; it is not a `pullRequest.create` claim or an
+Implementation-root Change grant. The existing Session launcher is its
+producer; capability admission and authorized execution are its consumers.
+For an already signed valid binding, those consumers verify its original
+signature, trust, task, immutable repository, validity interval, exact leaf
+head and accepted base, bound request, and current repository/task policy.
+They admit only that same-task leaf publication, never
+`change.issue/show/ready/abort/merge` on the Implementation as a Change root
+or a branch write through this claim. Existing bindings gain no new grant;
+their bridge eligibility ends at original expiry or explicit reissue.
+
+Once the replacement producer is active, new task Session issuance omits
+the compatibility claim and signs the exact `pullRequest.create` claim only
+under the new ceiling and policy. Keep legacy consumer validation until no
+active valid legacy binding can require it and end-to-end tests certify
+issuance, Admission, authorized execution, provider publication, and
+postcondition verification through the explicit path. Then retire bridge
+admission. Historical readers may still classify old binding data.
 
 ### 11.4 Branch advancement
 
@@ -879,13 +953,19 @@ versioned, tested interfaces.
 Changes to issuer trust, subject authorization, permission mapping, key
 custody, signature domain, replay semantics, compatibility, or remote
 bootstrap are architecture changes. Implementers do not invent them to make
-a missing producer seam disappear.
+a missing producer seam disappear. The remote subject decision is a Runtime
+operator grant for exact immutable GitHub user IDs, semantic operation IDs,
+and targets in Runtime-owned owner configuration. Admission consumes only a
+current grant, intersected with current repository and task policy. Missing,
+stale, revoked, or mismatched host/user/repository/operation/target grants
+deny; usernames and Hosted eligibility cannot replace them.
 
 Dedicated-App Hosted OAuth registration/callback/client authentication and
-remote subject/operation authorization require explicit implementation
-contracts before those paths can be advertised as complete. Their absence
-must not be hidden by accepting arbitrary callback metadata or granting every
-visible repository full App authority.
+the Runtime owner grant producer/Admission consumer require explicit
+implementation contracts before those paths can be advertised as complete.
+Their absence must not be hidden by accepting arbitrary callback metadata or
+granting every visible repository full App authority. Hosted does not issue
+semantic grants or hold the Runtime owner configuration.
 
 ## 23. Completion condition
 

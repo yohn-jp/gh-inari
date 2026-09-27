@@ -21,6 +21,10 @@ import {
   IMPLEMENTATION_EXECUTION_EVIDENCE_KIND,
   IMPLEMENTATION_EXECUTION_EVIDENCE_VERSION,
 } from "./implementation-execution-evidence.js";
+import {
+  IMPLEMENTATION_TASK_TERMINATION_KIND,
+  IMPLEMENTATION_TASK_TERMINATION_VERSION,
+} from "./implementation-task-termination.js";
 
 const repository = { repositoryHost: "github.com", repositoryId: "100", repository: "acme/inari" } as const;
 const implementationSource = { ...repository, number: 678 } as const;
@@ -177,7 +181,27 @@ function implementationAbortedChangeIdentity(
   };
 }
 
-/** Genuine raw evidence that resolves to a bound, aborted Implementation lifecycle. */
+function taskTerminationRead(record: ImplementationAuthorizationRecord): Record<string, unknown> {
+  return {
+    status: "authoritative",
+    provenance: { source: "closure-test" },
+    records: [
+      {
+        record: {
+          version: IMPLEMENTATION_TASK_TERMINATION_VERSION,
+          kind: IMPLEMENTATION_TASK_TERMINATION_KIND,
+          repository: record.repository,
+          implementation: record.implementation,
+          authorizationDigest: record.governedBodyDigest,
+          base: record.base,
+        },
+        provenance: { source: "closure-test-record" },
+      },
+    ],
+  };
+}
+
+/** Genuine raw evidence that resolves to a currently aborted Implementation task. */
 function implementationEvidenceAborted(target: IssueReference): Record<string, unknown> {
   const record = implementationAuthorization(target);
   const body = renderImplementationIssueBody(parseImplementationContract(implementationContract(target)));
@@ -186,7 +210,75 @@ function implementationEvidenceAborted(target: IssueReference): Record<string, u
     issue: { reference: target, body },
     repository,
     base: implementationBase,
+    taskTermination: taskTerminationRead(record),
+  };
+}
+
+/** Historical Implementation-root Change evidence, without current termination authority. */
+function implementationEvidenceHistoricalAbort(
+  target: IssueReference,
+  taskTermination?: Record<string, unknown>,
+): Record<string, unknown> {
+  const record = implementationAuthorization(target);
+  const body = renderImplementationIssueBody(parseImplementationContract(implementationContract(target)));
+  return {
+    authorization: record,
+    issue: { reference: target, body },
+    repository,
+    base: implementationBase,
     changeIdentity: implementationAbortedChangeIdentity(target, record),
+    ...(taskTermination === undefined ? {} : { taskTermination }),
+  };
+}
+
+function taskTerminationAbsentRead(): Record<string, unknown> {
+  return {
+    status: "authoritative",
+    provenance: { source: "closure-test" },
+    records: [],
+  };
+}
+
+function implementationEvidenceActive(target: IssueReference): Record<string, unknown> {
+  const record = implementationAuthorization(target);
+  const body = renderImplementationIssueBody(parseImplementationContract(implementationContract(target)));
+  return {
+    authorization: record,
+    issue: { reference: target, body },
+    repository,
+    base: implementationBase,
+  };
+}
+
+function sourceChange(target: IssueReference, merged: boolean): Record<string, unknown> {
+  const projection = projectChangeFromGitHubEvidence({
+    change: { repositoryHost: target.repositoryHost, repositoryId: target.repositoryId, rootIssue: target.number },
+    branchGovernance: { pattern: "^feat/[0-9]+-[a-z0-9-]+$" },
+    naming: { type: "feat", slug: "closure" },
+    baseBranch: "main",
+    evidence: {
+      issue: { status: "available", value: { number: target.number, state: "open" } },
+      branches: { status: "available", value: [{ name: `feat/${target.number}-closure` }] },
+      pullRequests: {
+        status: "available",
+        value: [
+          {
+            number: 9_000 + target.number,
+            head: `feat/${target.number}-closure`,
+            base: "main",
+            state: "open",
+            draft: false,
+            merged: false,
+          },
+        ],
+      },
+    },
+  });
+  return {
+    ...projection,
+    ...(projection.change === undefined
+      ? {}
+      : { change: { ...projection.change, state: merged ? ("MERGED" as const) : ("ABORTED" as const) } }),
   };
 }
 
@@ -378,17 +470,121 @@ test("tracker closure requires authoritative terminal evidence for every provide
   assert.equal(complete.projection?.status, "closable");
 });
 
-test("an aborted tracker child does not satisfy tracker completion", () => {
+test("one aborted Implementation child does not terminate a sibling or close its Source tracker", () => {
   const tracker = issue(26);
   const child = issue(27);
+  const sibling = issue(28);
   const result = tryProjectSemanticIssueClosure({
     target: tracker,
     intent: "close",
-    lifecycle: lifecycle([node(tracker, "open", { role: "tracker" }), node(child, "closed", { parent: tracker })]),
-    children: [{ reference: child, implementation: implementationEvidenceAborted(child) }],
+    lifecycle: lifecycle([
+      node(tracker, "open", { role: "tracker" }),
+      node(child, "closed", { parent: tracker }),
+      node(sibling, "closed", { parent: tracker }),
+    ]),
+    children: [
+      { reference: child, implementation: implementationEvidenceAborted(child) },
+      { reference: sibling, implementation: implementationEvidence(sibling) },
+    ],
   });
   assert.equal(result.valid, true);
   assert.equal(result.projection?.status, "blocked");
+  assert.deepEqual(
+    result.projection?.childTerminalEvidence?.map((entry) => [entry.reference.number, entry.implementation.state]),
+    [
+      [child.number, "aborted"],
+      [sibling.number, "completed"],
+    ],
+  );
+});
+
+test("historical Implementation-root Change abort remains readable without terminating its task", () => {
+  const target = issue(270);
+  const noCurrentRead = tryProjectSemanticIssueClosure({
+    target,
+    intent: "close",
+    lifecycle: lifecycle([node(target, "open", { role: "leaf" })]),
+    implementation: implementationEvidenceHistoricalAbort(target),
+  });
+  assert.equal(noCurrentRead.valid, false);
+  assert.equal(noCurrentRead.projection?.status, "unverifiable");
+  assert.deepEqual(noCurrentRead.projection?.terminalEvidence.implementation, {
+    status: "unverifiable",
+    classification: "historical-only",
+    historicalState: "aborted",
+  });
+
+  const result = tryProjectSemanticIssueClosure({
+    target,
+    intent: "close",
+    lifecycle: lifecycle([node(target, "open", { role: "leaf" })]),
+    implementation: implementationEvidenceHistoricalAbort(target, taskTerminationAbsentRead()),
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.projection?.status, "blocked");
+  assert.deepEqual(result.projection?.terminalEvidence.implementation, {
+    status: "active",
+    classification: "historical-only",
+    historicalState: "aborted",
+  });
+});
+
+test("Source Change and Implementation task termination remain separately classified", () => {
+  const source = issue(280);
+  const sourceAbort = tryProjectSemanticIssueClosure({
+    target: source,
+    intent: "close",
+    lifecycle: lifecycle([node(source, "open", { role: "leaf" })]),
+    change: sourceChange(source, false),
+  });
+  assert.equal(sourceAbort.valid, true);
+  assert.equal(sourceAbort.projection?.status, "closable");
+  assert.equal(sourceAbort.projection?.terminalEvidence.change.state, "aborted");
+
+  const task = issue(281);
+  const sourceAndTaskEvidence = tryProjectSemanticIssueClosure({
+    target: task,
+    intent: "close",
+    lifecycle: lifecycle([node(task, "open", { role: "leaf" })]),
+    implementation: implementationEvidenceActive(task),
+    change: sourceChange(task, false),
+  });
+  assert.equal(sourceAndTaskEvidence.valid, false);
+  assert.equal(sourceAndTaskEvidence.projection?.status, "unverifiable");
+  assert.deepEqual(sourceAndTaskEvidence.projection?.terminalEvidence.change, {
+    status: "terminal",
+    state: "aborted",
+    outcome: "aborted",
+  });
+  assert.ok(
+    sourceAndTaskEvidence.diagnostics.some((entry) => entry.code === "CLOSURE_TERMINAL_EVIDENCE_CONTRADICTORY"),
+  );
+
+  const taskAbort = tryProjectSemanticIssueClosure({
+    target: task,
+    intent: "close",
+    lifecycle: lifecycle([node(task, "open", { role: "leaf" })]),
+    implementation: implementationEvidenceAborted(task),
+  });
+  assert.equal(taskAbort.valid, true);
+  assert.equal(taskAbort.projection?.status, "closable");
+  assert.equal(taskAbort.projection?.terminalEvidence.implementation.state, "aborted");
+});
+
+test("missing or unavailable current task-termination evidence cannot close an Implementation Issue", () => {
+  const target = issue(290);
+  const unavailable = implementationEvidence(target, {
+    taskTermination: { status: "unavailable", provenance: { source: "closure-test" } },
+  });
+  const result = tryProjectSemanticIssueClosure({
+    target,
+    intent: "close",
+    lifecycle: lifecycle([node(target, "open", { role: "leaf" })]),
+    implementation: unavailable,
+  });
+  assert.equal(result.valid, false);
+  assert.equal(result.projection?.status, "unverifiable");
+  assert.ok(result.diagnostics.some((entry) => entry.code === "CLOSURE_TERMINAL_EVIDENCE_INVALID"));
 });
 
 test("duplicate child evidence entries for one tracker child fail closed regardless of order", () => {

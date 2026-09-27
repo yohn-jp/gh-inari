@@ -69,8 +69,26 @@ Issue or newer timestamp is not enough.
 
 `aborted` requires the task's applicable termination evidence. Source Change
 abort and Implementation task termination must not be equated merely because
-a task contributes to that Source. The full identity/lifecycle migration must
-prove the join rather than reusing an old Implementation-root assumption.
+a task contributes to that Source. The termination record binds directly to
+the task authorization identity in §6.1; Source lifecycle is not a proxy.
+
+The canonical task evidence is a versioned termination record owned by the
+repository and finalized by an explicitly authorized Runtime operator. It is
+bound to the immutable repository, Implementation Issue, current canonical
+body authorization digest, and accepted base evidence. Issue closure and a
+Session's self-asserted abort do not finalize it. A Source Change abort and a
+Session close remain their own lifecycle events.
+
+Admission resolves the authoritative current termination state for every
+task-bound operation. A successful read proving that no termination event is
+recorded means only that the task is not terminated; other Admission checks
+still apply. Once the task is terminated, every existing Session for that
+task fails closed. A failed or unavailable read, or invalid or mismatched
+current evidence, denies the operation. The termination producer uses the
+Runtime's authorized operation and Executor-owned repository effect; the
+Admission evidence reader and Implementation lifecycle projection consume the
+resulting current evidence. This contract does not prescribe a record path or
+wire encoding.
 
 ### 2.3 Immutable authorization event
 
@@ -219,12 +237,27 @@ make a Change operation pass an equality check.
 The signed local binding retains task identity, branch observation, and
 current Implementation authorization with its Source set. Source lifecycle
 claims are issued for that set. Branch advancement remains exact leaf-branch
-authority.
+authority under `branch.advance`.
 
-The #1213 task-bound `change.implement` compatibility claim may support
-Implementation leaf publication/branch-side composition only. It must not
-permit the Implementation to masquerade as a Source Change. No additional
-Authority ceiling is introduced merely to remove the compatibility bridge.
+Newly authorized Implementation task Sessions receive an explicit
+`pullRequest.create` claim in the Runtime Authority ceiling and signed
+binding only when current repository and task policy authorize that exact
+leaf publication. The claim and each publication request must match the
+immutable repository, Implementation, exact leaf head, accepted base, and
+current policy. The claim is not inferred from `change.implement`, branch
+spelling, or an App permission.
+
+For a valid #1213 binding issued before replacement, the task-bound
+`change.implement` claim remains a compatibility input only for exact
+same-task Implementation leaf PR publication. Admission must verify the
+original signed binding and validity interval, current task authorization,
+repository, leaf head, accepted base, request, and current policy. It must
+not reinterpret the old claim as a new `pullRequest.create` grant or permit
+Implementation-root Source Change operations. Its use ends at the binding's
+original expiry or explicit reissue; replacement issuance omits it. Retire
+legacy admission only after no active valid binding can require it and the
+explicit path has end-to-end proof. Historical readers may still classify
+old bindings.
 
 ### 6.4 Publication and integration
 
@@ -232,11 +265,36 @@ An Implementation leaf PR links the Implementation and binds its exact
 branch/base/head. A Source integration PR binds the Source and its composed
 acceptance. An Epic integration PR binds the product-level integration.
 
+The Source integration acceptance is a versioned record finalized by an
+authorized independent reviewer. It binds immutable repository and Source
+identities, the governed Source integration PR and exact head SHA, the current
+Source criteria version/digest, reviewer identity and current authority, and
+an explicit result for each criterion. The protected-ref
+[Source Acceptance Policy](./SOURCE_ACCEPTANCE_POLICY.md) alone authorizes the
+reviewer; independence is checked against the Source requester, integration
+PR author, and complete exact-head candidate contributors at every use.
+Change `ACCEPTED` checks, reviews, governance, and
+merge-policy evidence remains necessary but does not itself prove these
+criteria. Source and Epic composition consume the current Source acceptance
+result separately from task conformance and Change policy acceptance.
+
 The accepted topology may be:
 
 ```text
 Implementation leaf -> Source integration -> Epic integration -> default
 ```
+
+Local Source or Epic integration branch and Draft PR publication requires
+separate current Runtime-owned exact grants: `branch.create` for branch
+creation and `pullRequest.create` for Draft PR creation. Each grant binds the
+immutable repository, integration role, exact Source or Epic, and exact
+branch/head/base. A grant for one operation does not authorize the other.
+Admission intersects each grant with current repository policy for each
+operation. Local operator authentication alone does not grant either
+operation. Executor performs the admitted provider effects as Inari Access.
+These grants are not added to an Implementation Session. The preceding
+#1213 compatibility bridge remains limited to same-task leaf publication
+through its original expiry or explicit reissue.
 
 Standalone work remains supported through its explicit route. Do not invent
 an integration hierarchy where none is required. Existing in-flight topology
@@ -287,6 +345,15 @@ current Inari authorization.
 Completion requires the exact admitted task's evidence and conformance.
 A merged leaf does not close its Source or Epic without their acceptance
 checks. A Source being closed elsewhere does not magically certify a task.
+Source completion fails closed if the acceptance record is missing,
+unavailable, invalid, stale, mismatched, dismissed, or revoked, including a
+changed integration head or criteria version/digest or lost reviewer authority
+or independence. The current protected-ref policy and exact candidate
+contributor evidence must be rechecked when the record is consumed. Historical
+Source data remains readable with bounded
+classification, but without a current versioned record it cannot be reported
+as accepted. The record grants no merge or provider mutation authority;
+neither Runtime nor Relay receives a GitHub user token to obtain it.
 
 Review rework inside the admitted contract follows its current validity and
 scope rules. Work beyond that contract requires a newly authorized bounded
@@ -296,9 +363,24 @@ Supersession records a new identity and explicit relationship; it does not
 widen the old grant. Abort preserves inspectable provenance while removing
 current execution authority according to the task's actual lifecycle.
 
-The Source/task termination join must be explicit in the implementation.
-The wider Source may have other active Implementations, so one task's state
-cannot be inferred solely from another child's or the Source's flag.
+Task termination is finalized only by an explicitly authorized Runtime
+operator recording the repository-owned versioned task event against the
+current authorization digest and accepted base. Source Change abort terminates
+that Change only; Session close closes that Session only. Neither Issue closure
+nor a Session's self-asserted abort finalizes task termination. Admission
+rereads current task-termination evidence for each task-bound operation. A
+successful read proving no termination event is recorded establishes only that
+the task is not terminated; all other current checks still apply. Every
+Session for a terminated task fails closed. A failed or unavailable read, or
+invalid or mismatched current evidence, denies. A Source may have other active
+Implementations, so one task's state cannot be inferred from another task or
+the Source's flag.
+
+The producer seam is the operator-authorized Runtime lifecycle operation and
+its Executor-verified repository effect. The consumer seams are Admission's
+per-operation current-evidence read and the Implementation lifecycle
+projection. They must compose the same repository, Implementation, current
+authorization digest, and accepted base binding.
 
 ## 10. Authoring and review
 
@@ -320,6 +402,12 @@ or acceptance requirements return to the owner/design review.
 Historical identity is preserved during observation. No record is re-rooted,
 reparented, widened, or deleted merely because the target architecture changed.
 Bounded readers adapt only proven semantics into the canonical model.
+
+The current `implementation-lifecycle.ts` projection accepts a bound
+ABORTED Change identity as Implementation `aborted` evidence. Preserve that
+behavior only as a bounded reader for historical data during migration. New
+task termination and Admission must use the repository-owned versioned task
+record; the old Change identity is not new task-termination authority.
 
 The old Implementation-root execution model is not retained as a parallel new
 execution architecture. Migrate Source/task/publication joins across all

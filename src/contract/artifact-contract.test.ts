@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   ARTIFACT_CONTRACT_KINDS,
   FIELD_PRIMITIVES,
+  SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
   deserializeArtifactContract,
   isArtifactContract,
   parseArtifactContract,
@@ -121,6 +122,45 @@ const pullRequestContract = {
   ],
 } satisfies Record<string, unknown>;
 
+const schemaNativeContract = {
+  version: SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
+  kind: "issue",
+  id: "structured-verification",
+  schema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    properties: {
+      summary: { type: "string", minLength: 1 },
+      verification: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            command: { type: "string" },
+            outcome: { type: "string", enum: ["passed", "failed", "blocked"] },
+          },
+          required: ["command", "outcome"],
+          additionalProperties: false,
+        },
+      },
+      "metadata/source": { type: "object", properties: { number: { type: "integer" } } },
+    },
+    required: ["summary", "verification"],
+    additionalProperties: false,
+  },
+  bindings: {
+    "/summary": {
+      authority: { kind: "supplied" },
+      presentation: { control: "multiline" },
+    },
+    "/verification": {
+      authority: { kind: "supplied" },
+      presentation: { control: "checklist", options: { passed: "Passed", failed: "Failed" } },
+    },
+    "/metadata~1source": { authority: { kind: "platform" } },
+  },
+} satisfies Record<string, unknown>;
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -143,6 +183,91 @@ test("serialization is deterministic and survives a public round trip", () => {
   const roundTripped = deserializeArtifactContract(serialized);
   assert.equal(serialized, serializeArtifactContract(roundTripped));
   assert.equal(serialized, serializeArtifactContract(parseArtifactContract(branchContract)));
+});
+
+test("schema-native version 2 parses one Draft 2020-12 schema and direct RFC 6901 bindings", () => {
+  assert.deepEqual(validateArtifactContract(schemaNativeContract), { valid: true, violations: [] });
+  const contract = parseArtifactContract(schemaNativeContract);
+  assert.equal(contract.version, SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION);
+  assert.equal(contract.schema?.type, "object");
+  assert.equal(Object.hasOwn(contract.bindings ?? {}, "/metadata~1source"), true);
+
+  const serialized = serializeArtifactContract(contract);
+  const roundTripped = deserializeArtifactContract(serialized);
+  assert.equal(roundTripped.version, SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION);
+  assert.equal(serialized, serializeArtifactContract(roundTripped));
+});
+
+test("schema-native contracts accept nested object and array-of-object shapes through JSON Schema", () => {
+  const contract = parseArtifactContract(schemaNativeContract);
+  const schema = contract.schema as Record<string, unknown>;
+  const properties = schema.properties as Record<string, Record<string, unknown>>;
+  assert.equal(properties["metadata/source"]?.type, "object");
+  assert.equal(properties.verification?.type, "array");
+  assert.equal(FIELD_PRIMITIVES.includes("text"), true);
+});
+
+test("schema-native bindings reject nested, wildcard, malformed, and undeclared pointers", () => {
+  for (const pointer of ["/verification/*/command", "/summary/label", "/bad~2escape", "/missing"]) {
+    const invalid = clone(schemaNativeContract) as { bindings: Record<string, unknown> };
+    invalid.bindings[pointer] = { authority: { kind: "supplied" } };
+    assert.ok(
+      violationCodes(invalid).includes("ARTIFACT_CONTRACT_INVALID_BINDING_PATH"),
+      `expected ${pointer} to be rejected`,
+    );
+  }
+});
+
+test("schema-native bindings reject schema-owned shape and constraint fields", () => {
+  for (const key of ["required", "type", "cardinality", "constraints", "minItems", "pattern"]) {
+    const invalid = clone(schemaNativeContract) as { bindings: { "/summary": Record<string, unknown> } };
+    invalid.bindings["/summary"][key] = "duplicate-schema-semantics";
+    assert.ok(violationCodes(invalid).includes("ARTIFACT_CONTRACT_UNKNOWN_PROPERTY"), `expected ${key} to fail`);
+  }
+});
+
+test("schema-native presentation options have finite entry and string bounds", () => {
+  const tooManyOptions = clone(schemaNativeContract) as {
+    bindings: { "/verification": { presentation: { control: string; options: Record<string, string> } } };
+  };
+  tooManyOptions.bindings["/verification"].presentation.options = Object.fromEntries(
+    Array.from({ length: 33 }, (_, index) => [`option-${index}`, `Option ${index}`]),
+  );
+  assert.ok(violationCodes(tooManyOptions).includes("ARTIFACT_CONTRACT_INVALID_VALUE"));
+
+  const longOptionKey = clone(schemaNativeContract) as {
+    bindings: { "/verification": { presentation: { control: string; options: Record<string, string> } } };
+  };
+  longOptionKey.bindings["/verification"].presentation.options = { ["o".repeat(65)]: "Option" };
+  assert.ok(violationCodes(longOptionKey).includes("ARTIFACT_CONTRACT_INVALID_VALUE"));
+
+  const longOptionLabel = clone(schemaNativeContract) as {
+    bindings: { "/verification": { presentation: { control: string; options: Record<string, string> } } };
+  };
+  longOptionLabel.bindings["/verification"].presentation.options = { passed: "P".repeat(129) };
+  assert.ok(violationCodes(longOptionLabel).includes("ARTIFACT_CONTRACT_INVALID_VALUE"));
+});
+
+test("schema-native roots must be closed Draft 2020-12 object schemas accepted by the shared runtime", () => {
+  const wrongDialect = clone(schemaNativeContract) as { schema: Record<string, unknown> };
+  wrongDialect.schema.$schema = "https://json-schema.org/draft/2019-09/schema";
+  assert.ok(violationCodes(wrongDialect).includes("ARTIFACT_CONTRACT_INVALID_SCHEMA"));
+
+  const openWorld = clone(schemaNativeContract) as { schema: Record<string, unknown> };
+  delete openWorld.schema.additionalProperties;
+  assert.ok(violationCodes(openWorld).includes("ARTIFACT_CONTRACT_INVALID_SCHEMA"));
+
+  const undeclaredRequired = clone(schemaNativeContract) as {
+    schema: { required: string[] };
+  };
+  undeclaredRequired.schema.required.push("not-a-root-property");
+  assert.ok(violationCodes(undeclaredRequired).includes("ARTIFACT_CONTRACT_INVALID_SCHEMA"));
+
+  const unsupportedKeyword = clone(schemaNativeContract) as {
+    schema: { properties: { summary: Record<string, unknown> } };
+  };
+  unsupportedKeyword.schema.properties.summary.type = "text";
+  assert.ok(violationCodes(unsupportedKeyword).includes("ARTIFACT_CONTRACT_INVALID_SCHEMA"));
 });
 
 test("rejects an artifact kind outside the closed Canon v2 vocabulary", () => {

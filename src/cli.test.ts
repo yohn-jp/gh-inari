@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { GitHubAdapter, type GitHubPullRequest } from "./github/index.js";
+import { GitHubAdapter, type GitHubArtifactRequest, type GitHubPullRequest } from "./github/index.js";
+import { renderPullRequestArtifact } from "./artifact.js";
 import {
   nativeTestTransport,
   type FixtureCommandResult,
@@ -38,6 +39,7 @@ import { publishLocalRuntimeEndpoint } from "./local-control/runtime-discovery.j
 import { readLocalSessionBinding, readLocalSessionChangeIssueProvenance } from "./cli/runtime/session-launcher.js";
 import { createRepositoryBranchPolicy } from "./repository-branch-policy.js";
 import { compileRepositoryGovernedContract } from "./governance.js";
+import { parsePullRequestTemplate } from "./pull-request-template.js";
 
 class CliStubTransport implements FixtureCommandTransport {
   private readonly callHistory: string[][] = [];
@@ -370,16 +372,24 @@ function remoteSemanticArtifactResponses(
 const isolatedConfigHome = mkdtempSync(path.join(os.tmpdir(), "inari-cli-config-"));
 const isolatedEnvironment = { INARI_CONFIG_HOME: isolatedConfigHome };
 
+function captureCliProcess(
+  argv: readonly string[],
+  dependencies: Parameters<typeof runCli>[1] = {},
+): { readonly exitCode: number; readonly stdout: string; readonly stderr: string } {
+  const moduleUrl = new URL("./cli.ts", import.meta.url).href;
+  const source = `import { runCli } from ${JSON.stringify(moduleUrl)}; process.exitCode = await runCli(${JSON.stringify(argv)}, ${JSON.stringify(dependencies)});`;
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: { ...process.env, ...isolatedEnvironment },
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  return { exitCode: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
+}
+
 async function captureHelp(argv: readonly string[]): Promise<{ exitCode: number; output: string }> {
-  const originalLog = console.log;
-  const lines: string[] = [];
-  console.log = (line: string) => lines.push(line);
-  try {
-    const exitCode = await runCli([...argv]);
-    return { exitCode, output: lines.join("\n") };
-  } finally {
-    console.log = originalLog;
-  }
+  const result = captureCliProcess(argv);
+  return { exitCode: result.exitCode, output: result.stdout + result.stderr };
 }
 
 test("--help exits 0 and prints root usage naming the governed domains", async () => {
@@ -389,43 +399,47 @@ test("--help exits 0 and prints root usage naming the governed domains", async (
   assert.match(output, /issue/);
   assert.match(output, /\bpr\b/);
   assert.match(output, /template/);
-  assert.match(output, /unsupported commands are rejected locally/);
 });
 
-test("no arguments prints root usage matching --help", async () => {
+test("no arguments use Canon root usage failure", async () => {
   const { exitCode, output } = await captureHelp([]);
-  assert.equal(exitCode, 1);
+  assert.notEqual(exitCode, 0);
+  assert.match(output, /no command/i);
   assert.match(output, /Usage: inari <command>/);
 });
 
-test("issue --help prints only issue operations, not pr's", async () => {
+test("Canon route help scopes commands to the issue family", async () => {
   const { exitCode, output } = await captureHelp(["issue", "--help"]);
   assert.equal(exitCode, 0);
   assert.match(output, /Usage: inari issue <command>/);
-  assert.match(output, /issue create/);
+  assert.match(output, /Commands:/);
+  assert.match(output, /\bcreate\b/);
   assert.doesNotMatch(output, /pr create/);
 });
 
-test("issue create --help prints that leaf's usage and an example, not the full command tree", async () => {
+test("Canon issue create help projects the command contract grammar", async () => {
   const { exitCode, output } = await captureHelp(["issue", "create", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari issue create \[--template <template>\]/);
-  assert.match(output, /generic array values repeat as --field name=<value>/);
-  assert.match(output, /checklist values repeat as --field name=<option-id>/);
-  assert.match(output, /Example:/);
+  assert.match(output, /Usage: inari issue create .*--title <title>/);
+  assert.match(output, /--field <<name>=<value>>/);
   assert.doesNotMatch(output, /pr create/);
   assert.doesNotMatch(output, /issue normalize/);
 });
 
-test("pr create short help projects branch requirements and checklist field syntax", async () => {
+test("Canon PR create help projects required branch and title options", async () => {
   const { exitCode, output } = await captureHelp(["pr", "create", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(
-    output,
-    /Usage: inari pr create \[--template <template>\] --title <title> --head <branch> --base <branch>/,
-  );
-  assert.match(output, /generic array values repeat as --field name=<value>/);
-  assert.match(output, /checklist values repeat as --field name=<option-id>/);
+  assert.match(output, /Usage: inari pr create .*--title <title>.*--head <branch>.*--base <branch>/);
+  assert.match(output, /--field <<name>=<value>>/);
+});
+
+test("Canon owns the public issue and PR reconcile grammar and Help", async () => {
+  for (const domain of ["issue", "pr"] as const) {
+    const { exitCode, output } = await captureHelp([domain, "reconcile", "--help"]);
+    assert.equal(exitCode, 0);
+    assert.match(output, new RegExp(`Usage: inari ${domain} reconcile <number>`));
+    assert.match(output, /--repository <repository>/);
+  }
 });
 
 test("pr routing exposes the canonical read-only Core result", async () => {
@@ -549,6 +563,7 @@ test("pr publish exposes the same stable classification as Core", async () => {
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["pr", "publish", "--from", inputPath, "--json"], {
+      environment: isolatedEnvironment,
       createAdapter: () => new PublicationAdapter(),
     });
     assert.equal(exitCode, 0, lines[0]);
@@ -562,33 +577,68 @@ test("pr publish exposes the same stable classification as Core", async () => {
   }
 });
 
-test("template import --help prints that leaf's usage", async () => {
+test("Canon template import help projects the required input option", async () => {
   const { exitCode, output } = await captureHelp(["template", "import", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari template import --from/);
+  assert.match(output, /Usage: inari template import --from <path>/);
 });
 
-test("--help=full prints the complete command and option reference", async () => {
+test("Canon full root help renders the compiled route tree", async () => {
   const { exitCode, output } = await captureHelp(["--help=full"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /issue normalize <number>/);
-  assert.match(output, /pr normalize <number>/);
-  assert.match(output, /--require-capability/);
-  assert.match(output, /skill \[scenario\]/);
+  assert.match(output, /Usage: inari <command>/);
+  assert.match(output, /issue\tissue commands/);
+  assert.match(output, /pr\tpr commands/);
+  assert.match(output, /skill\t/);
 });
 
-test("pr sync help exposes the complete canonical --from envelope", async () => {
+test("Canon setup help and discovery preserve each nested product route", () => {
+  const help = captureCliProcess(["setup", "--help"]);
+  assert.equal(help.exitCode, 0, help.stderr);
+  assert.match(help.stdout, /Usage: inari setup <command>/);
+  assert.match(help.stdout, /\bstatus\b/);
+  assert.match(help.stdout, /\bnext\b/);
+  assert.match(help.stdout, /\bconsole\b/);
+
+  const group = captureCliProcess(["setup", "--help=json"]);
+  assert.equal(group.exitCode, 0, group.stderr);
+  const groupHelp = JSON.parse(group.stdout) as {
+    readonly commands: readonly { readonly id: string; readonly route: readonly string[] }[];
+  };
+  assert.deepEqual(
+    groupHelp.commands.map(({ id, route }) => ({ id, route })),
+    [
+      { id: "setup.console", route: ["setup", "console"] },
+      { id: "setup.next", route: ["setup", "next"] },
+      { id: "setup.status", route: ["setup", "status"] },
+    ],
+  );
+
+  const child = captureCliProcess(["setup", "status", "--help=json"]);
+  assert.equal(child.exitCode, 0, child.stderr);
+  const childHelp = JSON.parse(child.stdout) as {
+    readonly commands: readonly {
+      readonly id: string;
+      readonly route: readonly string[];
+      readonly fields: readonly { readonly key: string }[];
+    }[];
+  };
+  assert.equal(childHelp.commands.length, 1);
+  const childCommand = childHelp.commands[0];
+  assert.ok(childCommand);
+  assert.deepEqual(
+    { id: childCommand.id, route: childCommand.route },
+    { id: "setup.status", route: ["setup", "status"] },
+  );
+  assert.ok(childCommand.fields.some(({ key }) => key === "detail"));
+  assert.ok(childCommand.fields.some(({ key }) => key === "repository-id"));
+});
+
+test("Canon PR sync help projects its option and positional grammar", async () => {
   const { exitCode, output } = await captureHelp(["pr", "sync", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari pr sync <number> .*--from <path>/);
+  assert.match(output, /Usage: inari pr sync .*--from <path>.*<number>/);
   assert.doesNotMatch(output, /--field/);
-  assert.match(output, /fields \(object\)/);
-  assert.match(output, /title \(string\)/);
-  assert.match(output, /head \(string\)/);
-  assert.match(output, /base \(string\)/);
-  assert.match(output, /draft \(boolean\)/);
-  assert.match(output, /maintainerCanModify \(boolean\)/);
-  assert.match(output, /`fields` must be the semantic object/);
 });
 
 test("issue sync help explains that omitted values are preserved", async () => {
@@ -1045,18 +1095,18 @@ test("skill with an unknown scenario returns a stable machine-readable error", a
   }
 });
 
-test("skill --help prints a scenario index without full playbook content", async () => {
+test("Canon skill help projects the delegated optional scenario grammar", async () => {
   const { exitCode, output } = await captureHelp(["skill", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari skill \[scenario\]/);
-  assert.match(output, /author-issue/);
+  assert.match(output, /Usage: inari skill \[<scenario>\]/);
+  assert.match(output, /List bounded operational playbooks/);
   assert.doesNotMatch(output, /Invariants:/);
 });
 
-test("skill <scenario> --help prints that scenario's summary, not the full playbook", async () => {
+test("Canon skill scenario help stays at the delegated route boundary", async () => {
   const { exitCode, output } = await captureHelp(["skill", "author-issue", "--help"]);
   assert.equal(exitCode, 0);
-  assert.match(output, /Usage: inari skill author-issue/);
+  assert.match(output, /Usage: inari skill \[<scenario>\]/);
   assert.doesNotMatch(output, /Invariants:/);
 });
 
@@ -1066,25 +1116,25 @@ test("skill never falls through to the real gh binary", async () => {
   assert.equal(await runCli(["skill", "bogus-scenario"]), 2);
 });
 
-test("no arguments exits 1", async () => {
+test("no arguments use Canon's usage exit status", async () => {
   const originalLog = console.log;
   console.log = () => {};
   try {
     const exitCode = await runCli([]);
-    assert.equal(exitCode, 1);
+    assert.equal(exitCode, 2);
   } finally {
     console.log = originalLog;
   }
 });
 
-test("unknown command exits 1", async () => {
+test("unknown command uses Canon's usage exit status", async () => {
   const originalLog = console.log;
   const originalError = console.error;
   console.log = () => {};
   console.error = () => {};
   try {
     const exitCode = await runCli(["bogus"]);
-    assert.equal(exitCode, 1);
+    assert.equal(exitCode, 2);
   } finally {
     console.log = originalLog;
     console.error = originalError;
@@ -1188,24 +1238,27 @@ test("an earlier unrelated invalid option is not relabeled merely because --body
   });
 });
 
-test("unknown and hostile argv are rejected locally without process delegation", async () => {
+test("unknown and hostile argv stay in Canon usage handling without command execution", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "inari-hostile-argv-"));
+  const marker = path.join(directory, "executed");
   const cases: readonly (readonly string[])[] = [
     ["repo", "view", "--json", "name"],
     ["pr", "legacy", "--state", "open", "--json"],
-    ["repo", "view", "--help", "--json"],
-    ["--unknown-option=$(touch /tmp/inari-should-not-run)", "--json"],
+    [`--unknown-option=$(touch ${marker})`, "--json"],
     ["--json", "--", "repo", "view"],
   ];
-  for (const argv of cases) {
-    const result = await captureJson(argv);
-    assert.equal(result.exitCode, 1, argv.join(" "));
-    const code = (result.output.error as { code?: string } | undefined)?.code;
-    assert.ok(code === "UNKNOWN_COMMAND" || code === "INVALID_OPTION", argv.join(" "));
-    if (code === "UNKNOWN_COMMAND")
-      assert.match(
-        String((result.output.error as { message?: string } | undefined)?.message),
-        /closed command surface/u,
-      );
+  try {
+    for (const argv of cases) {
+      const result = captureCliProcess(argv);
+      assert.equal(result.exitCode, 2, argv.join(" "));
+      const usage = JSON.parse(result.stderr) as { error?: { kind?: string; code?: string } };
+      assert.equal(usage.error?.kind, "usage", argv.join(" "));
+      assert.ok(usage.error?.code === "unknown-command" || usage.error?.code === "unknown-option", argv.join(" "));
+      assert.doesNotMatch(result.stdout + result.stderr, /touch|inari-hostile-argv/, argv.join(" "));
+    }
+    assert.equal(existsSync(marker), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -1521,53 +1574,22 @@ test("template import warns on the CLI when --to writes outside discoverable sem
 });
 
 test("version comes from real package metadata", async () => {
-  const lines: string[] = [];
-  const originalLog = console.log;
-  console.log = (line: string) => lines.push(line);
-  try {
-    const root = fileURLToPath(new URL("..", import.meta.url));
-    const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as {
-      name?: string;
-      version?: string;
-    };
-    assert.equal(await runCli(["--version"]), 0);
-    assert.equal(lines[0], `${packageJson.name} ${packageJson.version}`);
-  } finally {
-    console.log = originalLog;
-  }
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as {
+    name?: string;
+    version?: string;
+  };
+  const result = captureCliProcess(["--version"]);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout.trim(), packageJson.version);
 });
 
-test("machine-readable version reports the invocation contract and capabilities", async () => {
-  const lines: string[] = [];
-  const originalLog = console.log;
-  console.log = (line: string) => lines.push(line);
-  try {
-    assert.equal(
-      await runCli(["--version", "--json"], {
-        packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
-      }),
-      0,
-    );
-    const output = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
-    assert.equal(output.ok, true);
-    assert.equal(output.name, "gh-inari");
-    assert.equal(output.version, "0.3.0");
-    assert.equal(output.protocol, 1);
-    assert.equal(output.commandContractVersion, COMMAND_CONTRACT_VERSION);
-    assert.deepEqual(output.invocation, {
-      canonical: "inari",
-      direct: "gh-inari",
-      fallback: "npx --yes gh-inari",
-    });
-    assert.deepEqual(output.capabilities, [
-      "canonical-invocation",
-      "machine-readable-version",
-      "capability-diagnostics",
-    ]);
-    assert.equal(JSON.stringify(output).includes("extension"), false);
-  } finally {
-    console.log = originalLog;
-  }
+test("Canon machine-readable version projects installed package identity", async () => {
+  const result = captureCliProcess(["--version", "--json"], {
+    packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), { name: "gh-inari", version: "0.3.0" });
 });
 
 test("minimum-version checks use bounded SemVer precedence in version and diagnose paths", async () => {
@@ -1657,6 +1679,71 @@ test("diagnose reports only the standalone canonical runtime contract", async ()
   } finally {
     console.log = originalLog;
   }
+});
+
+test("root diagnostic aliases remain bounded transitions to named readiness routes", async () => {
+  for (const alias of ["--diagnose", "--doctor"]) {
+    const result = await captureJson([alias, "--json"], {
+      packageMetadata: { name: "gh-inari", version: "0.3.0", description: "" },
+      runCanonicalDiagnosticCommand: (args) => {
+        assert.deepEqual(args, ["version", "--json"]);
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            ok: true,
+            name: "gh-inari",
+            version: "0.3.0",
+            protocol: 1,
+            commandContractVersion: COMMAND_CONTRACT_VERSION,
+            capabilities: [...RUNTIME_CAPABILITIES],
+            invocation: { canonical: "inari" },
+          }),
+          stderr: "",
+        };
+      },
+    });
+    assert.equal(result.exitCode, 0, alias);
+    assert.equal(result.output.ok, true, alias);
+    assert.equal((result.output.canonical as { status?: string }).status, "ready", alias);
+  }
+});
+
+test("unknown and incomplete option prefixes stay in the Canon usage boundary", async () => {
+  for (const argv of [
+    ["--unknown-option", "issue", "create", "--json"],
+    ["setup", "--unknown-setup-option", "--json"],
+  ]) {
+    const result = captureCliProcess(argv);
+    assert.equal(result.exitCode, 2, argv.join(" "));
+    let usage: { error?: { kind?: string; code?: string } };
+    try {
+      usage = JSON.parse(result.stderr) as { error?: { kind?: string; code?: string } };
+    } catch {
+      assert.fail(`${argv.join(" ")} did not emit structured Canon usage: ${result.stderr}`);
+    }
+    assert.equal(usage.error?.kind, "usage", argv.join(" "));
+    assert.ok(
+      usage.error?.code === "unknown-command" ||
+        usage.error?.code === "unknown-option" ||
+        usage.error?.code === "missing-option-value",
+      argv.join(" "),
+    );
+    assert.doesNotMatch(result.stdout + result.stderr, /GOVERNED_CREATE_OPTION/, argv.join(" "));
+  }
+
+  for (const argv of [
+    ["--repository", "--json", "issue", "create"],
+    ["setup", "--repository", "--json"],
+  ]) {
+    const incomplete = captureCliProcess(argv);
+    assert.equal(incomplete.exitCode, 2, argv.join(" "));
+    assert.match(incomplete.stderr, /error: unknown option/u, argv.join(" "));
+    assert.match(incomplete.stderr, /Usage: inari <command>/u, argv.join(" "));
+  }
+
+  const unknownChildOption = captureCliProcess(["setup", "status", "--unknown-setup-option", "--json"]);
+  assert.notEqual(unknownChildOption.exitCode, 0);
+  assert.doesNotMatch(unknownChildOption.stdout + unknownChildOption.stderr, /Usage: inari <command>/u);
 });
 
 test("invalid create input is rejected after target governance is resolved and before mutation", async () => {
@@ -1785,6 +1872,7 @@ test("PR create rejects a missing title before mutation", async () => {
       ["pr", "create", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
+        environment: isolatedEnvironment,
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
@@ -1989,6 +2077,7 @@ test("valid PR create reaches the adapter with a canonical rendered body", async
       ["pr", "create", "--template", "default", "--from", inputPath, "--repository", "acme/inari", "--json"],
       {
         repositoryRoot,
+        environment: isolatedEnvironment,
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
@@ -2062,6 +2151,7 @@ test("PR create preflights the actual resolved head branch, not the --from docum
       ],
       {
         repositoryRoot,
+        environment: isolatedEnvironment,
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
@@ -2116,6 +2206,7 @@ test("PR create fails closed before mutation when the actual resolved head branc
       ],
       {
         repositoryRoot,
+        environment: isolatedEnvironment,
         createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
       },
     );
@@ -2845,6 +2936,19 @@ test("pr edit mutates every supported metadata field and omits draft from PATCH"
     command(
       JSON.stringify({
         number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 81,
         title: "feat: renamed",
         body: REMOTE_PR_BODY,
         state: "open",
@@ -2892,6 +2996,60 @@ test("pr edit mutates every supported metadata field and omits draft from PATCH"
     assert.ok(update.includes("maintainer_can_modify=false"));
     assert.equal(
       update.some((argument) => argument.startsWith("draft=")),
+      false,
+    );
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("PR remediation fails closed when the target changes after its initial read", async () => {
+  const transport = new CliStubTransport([
+    ...remoteArtifactResponses(
+      [{ path: ".github/PULL_REQUEST_TEMPLATE.md", sha: "pr-template-sha", source: REMOTE_PR_TEMPLATE }],
+      {
+        number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature", sha: "head-a" },
+        base: { ref: "main", sha: "base-a" },
+      },
+      { sha: "pr-policy-sha", source: REMOTE_PR_POLICY },
+    ),
+    ...governanceFreshnessRecheckResponses(".github/PULL_REQUEST_TEMPLATE.md", "pr-template-sha", {
+      sha: "pr-policy-sha",
+    }),
+    command(
+      JSON.stringify({
+        number: 81,
+        title: "feat: remediation",
+        body: "Concurrent provider edit",
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature", sha: "head-a" },
+        base: { ref: "release", sha: "base-b" },
+      }),
+    ),
+  ]);
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["pr", "edit", "81", "--title", "feat: renamed", "--repository", "acme/inari"], {
+      createAdapter: (options) => new GitHubAdapter({ ...options, transport: nativeTestTransport(transport) }),
+    });
+    assert.notEqual(exitCode, 0);
+    const output = JSON.parse(lines[0] ?? "{}") as { error?: { code?: string; message?: string } };
+    assert.equal(output.error?.code, "ARTIFACT_OBSERVATION_STALE");
+    assert.match(output.error?.message ?? "", /no update was applied/u);
+    assert.equal(
+      transport.calls.some((args) => args.includes("PATCH")),
       false,
     );
   } finally {
@@ -3855,6 +4013,19 @@ test("pr sync reaches the adapter with a converged canonical body", async () => 
     command(
       JSON.stringify({
         number: 81,
+        title: "feat: remediation",
+        body: REMOTE_PR_BODY,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      }),
+    ),
+    command(
+      JSON.stringify({
+        number: 81,
         title: "feat: synced",
         body: "Rendered body",
         state: "open",
@@ -4240,14 +4411,202 @@ async function captureJson(
 ): Promise<{ exitCode: number; output: Record<string, unknown> }> {
   const originalLog = console.log;
   const lines: string[] = [];
+  const cliOutput: string[] = [];
   console.log = (line: string) => lines.push(line);
   try {
-    const exitCode = await runCli([...argv], dependencies);
-    return { exitCode, output: JSON.parse(lines[0] ?? "{}") as Record<string, unknown> };
+    const exitCode = await runCli([...argv], {
+      ...dependencies,
+      writeResult: (result) => {
+        if (result.stdout !== "") cliOutput.push(result.stdout);
+        if (result.stderr !== "") cliOutput.push(result.stderr);
+      },
+    });
+    return { exitCode, output: JSON.parse(lines[0] ?? cliOutput[0] ?? "{}") as Record<string, unknown> };
   } finally {
     console.log = originalLog;
   }
 }
+
+function artifactReconciliationCliFixture(input: {
+  readonly domain: "issue" | "pr";
+  readonly body: string;
+  readonly templates?: readonly { readonly path: string; readonly source: string; readonly sha: string }[];
+  readonly stale?: boolean;
+  readonly possibleEffect?: boolean;
+}) {
+  const isIssue = input.domain === "issue";
+  const templatePath = isIssue ? ".github/ISSUE_TEMPLATE/feature.yml" : ".github/PULL_REQUEST_TEMPLATE.md";
+  const defaultTemplate = {
+    path: templatePath,
+    source: isIssue ? REMOTE_ISSUE_TEMPLATE : "## Summary\n\nDescribe the change.\n",
+    sha: "reconcile-template-sha",
+  };
+  const templates = input.templates ?? [defaultTemplate];
+  const blobs = new Map(templates.map((template) => [template.sha, template.source]));
+  const tree = templates.map((template) => ({ path: template.path, type: "blob", sha: template.sha }));
+  let artifact: Record<string, unknown> = isIssue
+    ? {
+        number: 80,
+        title: "feat: reconcile",
+        body: input.body,
+        state: "open",
+        html_url: "https://github.com/acme/inari/issues/80",
+        labels: [],
+        assignees: [],
+      }
+    : {
+        number: 81,
+        title: "feat: reconcile",
+        body: input.body,
+        state: "open",
+        html_url: "https://github.com/acme/inari/pull/81",
+        draft: false,
+        maintainer_can_modify: true,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+      };
+  const reads = { artifact: 0, updates: 0 };
+  const route = isIssue ? "issues/80" : "pulls/81";
+  const transport = {
+    request: async (request: GitHubArtifactRequest) => {
+      const endpoint = request.path.replace(/^repos\/acme\/inari\/?/u, "");
+      if (endpoint === "")
+        return { status: 200, body: { id: 100000157, full_name: "acme/inari", default_branch: "main" } };
+      if (endpoint === "git/trees/main?recursive=1")
+        return { status: 200, body: { sha: GOVERNANCE_TREE_SHA, truncated: false, tree } };
+      if (endpoint.startsWith("git/blobs/")) {
+        const sha = decodeURIComponent(endpoint.slice("git/blobs/".length));
+        const source = blobs.get(sha);
+        return source === undefined
+          ? { status: 404, body: { message: "not found" } }
+          : { status: 200, body: { sha, encoding: "base64", content: Buffer.from(source).toString("base64") } };
+      }
+      if (endpoint === route && request.method === "GET") {
+        reads.artifact += 1;
+        const observed =
+          input.stale && reads.artifact === 2 ? { ...artifact, title: "feat: concurrent edit" } : artifact;
+        return { status: 200, body: observed };
+      }
+      if (endpoint === route && request.method === "PATCH") {
+        reads.updates += 1;
+        artifact = { ...artifact, ...request.body };
+        return input.possibleEffect
+          ? { status: 500, body: { message: "provider response lost after possible effect" } }
+          : { status: 200, body: artifact };
+      }
+      return { status: 404, body: { message: "not found" } };
+    },
+  };
+  return {
+    reads,
+    dependencies: {
+      createAdapter: (options: ConstructorParameters<typeof GitHubAdapter>[0]) =>
+        new GitHubAdapter({ ...options, transport }),
+    },
+  };
+}
+
+function markedIssueBody(body: string, path = ".github/ISSUE_TEMPLATE/feature.yml"): string {
+  return `${body}\n<!-- inari:template ${JSON.stringify({ version: "1", kind: "issue", path })} -->\n`;
+}
+
+function reorderedIssueBody(): string {
+  const sections = ["### Problem", "### Proposal", "### Non-goals", "### Acceptance criteria"].map((heading) => {
+    const start = REMOTE_ISSUE_BODY.indexOf(heading);
+    const laterHeadings = ["### Problem", "### Proposal", "### Non-goals", "### Acceptance criteria"]
+      .map((candidate) => REMOTE_ISSUE_BODY.indexOf(candidate))
+      .filter((index) => index > start);
+    const end = laterHeadings.length === 0 ? REMOTE_ISSUE_BODY.length : Math.min(...laterHeadings);
+    return REMOTE_ISSUE_BODY.slice(start, end).trim();
+  });
+  return markedIssueBody([sections[1], sections[0], sections[2], sections[3]].join("\n\n"));
+}
+
+test("issue and PR reconcile routes forward Core outcomes and retry evidence unchanged", async () => {
+  const canonicalIssue = markedIssueBody(REMOTE_ISSUE_BODY);
+  const canonicalPr = renderPullRequestArtifact(
+    parsePullRequestTemplate("## Summary\n\nDescribe the change.\n", {
+      id: "default",
+      type: "pull-request-default",
+      kind: "pull-request",
+      name: "Default",
+      path: ".github/PULL_REQUEST_TEMPLATE.md",
+    }),
+    { fields: { summary: "A deterministic pull request summary" } },
+  );
+  const cases = [
+    {
+      name: "Issue unchanged",
+      domain: "issue" as const,
+      body: canonicalIssue,
+      expectedOutcome: "unchanged",
+      expectedExit: 0,
+    },
+    {
+      name: "PR unchanged",
+      domain: "pr" as const,
+      body: canonicalPr,
+      expectedOutcome: "unchanged",
+      expectedExit: 0,
+    },
+    {
+      name: "Issue reconciled",
+      domain: "issue" as const,
+      body: reorderedIssueBody(),
+      expectedOutcome: "reconciled",
+      expectedExit: 0,
+      expectedEffect: "applied",
+    },
+    {
+      name: "Issue blocked",
+      domain: "issue" as const,
+      body: "not a canonical artifact\n",
+      templates: [
+        { path: ".github/ISSUE_TEMPLATE/bug.yml", source: REMOTE_ISSUE_TEMPLATE, sha: "bug-sha" },
+        { path: ".github/ISSUE_TEMPLATE/feature.yml", source: REMOTE_ISSUE_TEMPLATE, sha: "feature-sha" },
+      ],
+      expectedOutcome: "blocked",
+      expectedExit: 2,
+    },
+    {
+      name: "Issue safely retryable after stale observation",
+      domain: "issue" as const,
+      body: reorderedIssueBody(),
+      stale: true,
+      expectedOutcome: "safe-pre-effect-retry",
+      expectedExit: 3,
+      expectedEffect: "not-started",
+      expectedRetry: "safe",
+    },
+    {
+      name: "Issue ambiguous after a possible effect",
+      domain: "issue" as const,
+      body: reorderedIssueBody(),
+      possibleEffect: true,
+      expectedOutcome: "possible-effect-ambiguity",
+      expectedExit: 3,
+      expectedEffect: "possible",
+      expectedRetry: "fresh-observation-required",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const fixture = artifactReconciliationCliFixture(testCase);
+    const number = testCase.domain === "issue" ? "80" : "81";
+    const result = await captureJson(
+      [testCase.domain, "reconcile", number, "--repository", "acme/inari"],
+      fixture.dependencies,
+    );
+    assert.equal(result.exitCode, testCase.expectedExit, `${testCase.name}: ${JSON.stringify(result.output)}`);
+    assert.equal(result.output.operation, `${testCase.domain}.reconcile`, testCase.name);
+    assert.equal(result.output.domain, testCase.domain, testCase.name);
+    assert.equal(result.output.outcome, testCase.expectedOutcome, testCase.name);
+    if (testCase.expectedEffect !== undefined)
+      assert.equal(result.output.effect, testCase.expectedEffect, testCase.name);
+    if (testCase.expectedRetry !== undefined) assert.equal(result.output.retry, testCase.expectedRetry, testCase.name);
+    assert.equal(fixture.reads.updates, testCase.possibleEffect || testCase.expectedOutcome === "reconciled" ? 1 : 0);
+  }
+});
 
 async function runIssueValidateDirectFields(
   argv: readonly string[],
@@ -4872,6 +5231,11 @@ function sourceImplementationEvidence(
   sources: readonly Record<string, unknown>[],
   baseHead: string,
   projection: ReturnType<typeof projectChangeFromGitHubEvidence>,
+  currentBase: { readonly branch: string; readonly revision: string; readonly freshness: string } = {
+    branch: "main",
+    revision: baseHead,
+    freshness: baseHead,
+  },
 ): Record<string, unknown> {
   const reference = { ...SOURCE_REPOSITORY, number: SOURCE_IMPLEMENTATION };
   const body = renderImplementationIssueBody({
@@ -4907,7 +5271,7 @@ function sourceImplementationEvidence(
     implementation: reference,
     issue: { reference, body },
     repository: SOURCE_REPOSITORY,
-    base: { branch: "main", revision: baseHead, freshness: baseHead },
+    base: currentBase,
     readiness: { evidence: [] },
     change: projection,
   };
@@ -5019,6 +5383,7 @@ test("#1213 an Implementation Session issues and shows only its current canonica
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
   // The Implementation's own branch-side projection (PR publication / branch.advance), never a Source root.
   let implementationHead = baseHead;
+  let currentImplementationBaseEvidence = { branch: "main", revision: baseHead, freshness: baseHead };
   const implementationProjection = () =>
     sourceChangeProjection(SOURCE_IMPLEMENTATION, SOURCE_BRANCH, implementationHead);
   const executions: { readonly operation: string; readonly issue: number }[] = [];
@@ -5030,7 +5395,14 @@ test("#1213 an Implementation Session issues and shows only its current canonica
     key: keyPair,
     notBefore: new Date("2026-01-01T00:00:00.000Z"),
     maxSessionTtlSeconds: 3_600,
-    capabilityCeiling: ["change.implement", "change.ready", "change.abort", "change.merge", "branch.advance"],
+    capabilityCeiling: [
+      "change.implement",
+      "change.ready",
+      "change.abort",
+      "change.merge",
+      "branch.advance",
+      "pullRequest.create",
+    ],
   });
   writeLocalJson(
     "admission",
@@ -5051,7 +5423,11 @@ test("#1213 an Implementation Session issues and shows only its current canonica
   });
   // Two same-repository Sources (no primary) and one cross-repository Source.
   let currentSources: Record<string, unknown>[] = [source(1208), source(1209), source(7, "987654321")];
-  const evidenceRequests: { issue?: number; implementationIssue?: number }[] = [];
+  const evidenceRequests: {
+    issue?: number;
+    implementationIssue?: number;
+    taskTerminationAuthorization?: boolean;
+  }[] = [];
   const issuedRoots: number[] = [];
   const trust = {
     repository: { repositoryHost: "github.com", repositoryId: SOURCE_REPOSITORY_ID, nameWithOwner: "acme/inari" },
@@ -5072,14 +5448,33 @@ test("#1213 an Implementation Session issues and shows only its current canonica
     readBranchPolicy: async () => sourceBranchPolicy(currentSources),
     readEvidence: async (request) => {
       if (request.issue === undefined) return trust;
-      evidenceRequests.push({ issue: request.issue, implementationIssue: request.implementationIssue });
+      evidenceRequests.push({
+        issue: request.issue,
+        implementationIssue: request.implementationIssue,
+        taskTerminationAuthorization: request.taskTerminationAuthorization !== undefined,
+      });
       const projection =
         request.issue === SOURCE_IMPLEMENTATION ? implementationProjection() : sourceChangeProjection(request.issue);
-      return {
+      const evidence = {
         ...trust,
         change: projection,
-        implementation: sourceImplementationEvidence(currentSources, baseHead, implementationProjection()),
+        implementation: sourceImplementationEvidence(
+          currentSources,
+          baseHead,
+          implementationProjection(),
+          currentImplementationBaseEvidence,
+        ),
       };
+      return request.taskTerminationAuthorization === undefined
+        ? evidence
+        : {
+            ...evidence,
+            taskTermination: {
+              status: "absent",
+              provenance: { source: "github-git-data", commit: "a".repeat(40) },
+              recordProvenance: [],
+            },
+          };
     },
     readGovernedContract: async () =>
       compileRepositoryGovernedContract(sourcePullRequestAdapter() as never, "pr", "default"),
@@ -5161,15 +5556,24 @@ test("#1213 an Implementation Session issues and shows only its current canonica
     assert.ok(binding);
     // The Session task stays the Implementation; change.* claims are exactly the same-repository Sources.
     assert.deepEqual(binding.task, { kind: "issue", number: SOURCE_IMPLEMENTATION });
+    assert.deepEqual(binding.implementationBinding?.base, currentImplementationBaseEvidence);
     assert.deepEqual(
       binding.capabilities.filter((claim) => claim.kind !== "branch.advance"),
       [
         ...[1208, 1209].flatMap((issue) =>
           ["change.implement", "change.ready", "change.abort", "change.merge"].map((kind) => ({ kind, issue })),
         ),
-        // The single task-bound compatibility claim: Implementation PR publication, never a Change root.
-        { kind: "change.implement", issue: SOURCE_IMPLEMENTATION },
+        { kind: "pullRequest.create", head: SOURCE_BRANCH, base: "main", max: 1 },
       ],
+    );
+    assert.deepEqual(
+      binding.capabilities.find((claim) => claim.kind === "pullRequest.create"),
+      {
+        kind: "pullRequest.create",
+        head: SOURCE_BRANCH,
+        base: binding.implementationBinding?.base.branch,
+        max: 1,
+      },
     );
     assert.deepEqual(
       binding.capabilities.filter((claim) => claim.kind === "branch.advance"),
@@ -5193,6 +5597,24 @@ test("#1213 an Implementation Session issues and shows only its current canonica
       assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, issue)?.rootIssue, issue);
     assert.equal(readLocalSessionChangeIssueProvenance(binding, environment), undefined);
     assert.equal(readLocalSessionChangeIssueProvenance(binding, environment, 7), undefined);
+
+    const acceptedBaseEvidence = currentImplementationBaseEvidence;
+    currentImplementationBaseEvidence = {
+      branch: "main",
+      revision: "f".repeat(40),
+      freshness: "f".repeat(40),
+    };
+    const staleAuthorization = await captureCli(
+      ["session", "start", "--issue", String(SOURCE_IMPLEMENTATION), "--", process.execPath, "-e", "process.exit(0)"],
+      environment,
+      dependencies,
+    );
+    assert.notEqual(staleAuthorization.exitCode, 0, staleAuthorization.stdout);
+    assert.deepEqual(
+      (await readdir(sessionsDirectory)).filter((name) => name.endsWith(".json")),
+      [bindingFile],
+    );
+    currentImplementationBaseEvidence = acceptedBaseEvidence;
 
     environment.INARI_SESSION_ID = sessionId;
     for (const issue of [1208, 1209]) {
@@ -5237,7 +5659,10 @@ test("#1213 an Implementation Session issues and shows only its current canonica
     const removed = await captureCli(["change", "show", "1209", "--json"], environment, dependencies);
     assert.notEqual(removed.exitCode, 0);
     assert.equal(JSON.parse(removed.stdout).error.details.reason, "ADMISSION_TASK_MISMATCH");
-    assert.deepEqual(evidenceRequests, [{ issue: 1209, implementationIssue: SOURCE_IMPLEMENTATION }]);
+    assert.deepEqual(evidenceRequests, [
+      { issue: 1209, implementationIssue: SOURCE_IMPLEMENTATION, taskTerminationAuthorization: false },
+      { issue: 1209, implementationIssue: SOURCE_IMPLEMENTATION, taskTerminationAuthorization: true },
+    ]);
     const kept = await captureCli(["change", "show", "1208", "--json"], environment, dependencies);
     assert.equal(kept.exitCode, 0, kept.stdout);
     assert.deepEqual(issuedRoots, [1208, 1209]);

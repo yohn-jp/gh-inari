@@ -58,8 +58,47 @@ semantic task/capability/operation authorization. It consumes Executor's
 bounded evidence and execution ports. It holds no GitHub user/provider token,
 App key, or Authority private signing key.
 
+For privileged local operator calls, the Runtime owner authentication seam
+verifies the fresh challenge signature and replay status against the
+versioned operator-key registry. It passes Admission bounded authenticated
+subject evidence for the verified immutable key ID and challenge context.
+Admission rereads current enrollment and revocation state for each privileged
+operation. The public-key registry remains Runtime-owner configuration; the
+operator-held private key and reusable credentials do not enter Admission,
+Console, or Executor. Console may present the challenge and relay its signed
+response without becoming an authentication or credential owner. Expired,
+replayed, audience-mismatched, context-mismatched, unavailable, or revoked
+proof denies.
+
 A remote Repository Access Assertion is another bounded caller-evidence
 input, not permission to bypass local policy or auto-issue full capabilities.
+Admission consumes current Runtime operator grants for exact immutable GitHub
+user IDs, provider hosts, semantic operation IDs, immutable repository IDs,
+and targets from Runtime-owned owner configuration. It matches each verified
+remote subject and request to a current grant and intersects that grant with
+current repository/task policy. Missing or revoked grants, stale owner
+configuration generations, or grants for the wrong host, user ID,
+repository, operation, or target deny before effects.
+
+The Runtime operator owns grant management and persistence at the owner
+configuration boundary. That owner producer does not make Admission a
+credential store or let Hosted issue semantic grants. Admission's current-
+grant consumer must fail closed when the owner evidence is unavailable.
+
+For local Source or Epic integration publication, an authenticated local
+operator needs a separate current Runtime-owned exact grant for each
+operation: `branch.create` for branch creation and `pullRequest.create` for
+Draft PR creation. Each grant binds the `source-integration` or
+`epic-integration` role, immutable repository, exact Source or Epic, and exact
+branch/head/base. Neither grant authorizes the other operation. Admission
+rereads its grant and current repository, branch, head, base, and policy
+evidence for each operation and intersects them before effect; unavailable,
+stale, revoked, or mismatched evidence denies. Local operator authentication
+alone does not authorize either mutation. Executor performs admitted effects
+with Inari Access; operator credentials do not enter provider execution.
+Local operator subject proof follows [Caller Authentication and
+Capability Authorization](./AGENT_CAPABILITY_AUTHORIZATION.md); it creates no
+Source/Epic delegation claim and does not require Local GitHub OAuth.
 
 ### Executor
 
@@ -91,7 +130,7 @@ Console code to load every private component through a barrel import.
 Hosted owns transient OAuth verification and its service-signed assertion.
 Relay owns authenticated Runtime connections and bounded delivery state.
 They do not own repository semantic state, task authorization, provider
-execution, or a central Inari Session store.
+execution, Runtime operator grants, or a central Inari Session store.
 
 ## 3. Existing module ownership
 

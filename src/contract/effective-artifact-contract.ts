@@ -10,9 +10,11 @@
  */
 
 import {
+  SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION,
   type ArtifactContract,
   type ArtifactContractDerivation,
   type ArtifactContractKind,
+  type SchemaNativeArtifactContract,
   type Cardinality,
   type DerivationReference,
   type FieldContentConstraints,
@@ -22,6 +24,7 @@ import {
   type ValueShape,
 } from "./artifact-contract.js";
 import { JSON_SCHEMA_DIALECT, type ArtifactContractProvenance } from "./ir.js";
+import { compileJsonSchema } from "./json-schema-runtime.js";
 import type { JsonSchema, JsonSchemaDocument } from "./schema.js";
 
 export const EFFECTIVE_ARTIFACT_CONTRACT_VERSION = "1" as const;
@@ -79,8 +82,11 @@ function cloneImmutable<T>(value: T): T {
     return Object.freeze(value.map((entry) => cloneImmutable(entry))) as T;
   }
   if (isRecord(value)) {
-    const clone: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort(compareStrings)) clone[key] = cloneImmutable(value[key]);
+    const clone = Object.fromEntries(
+      Object.keys(value)
+        .sort(compareStrings)
+        .map((key) => [key, cloneImmutable(value[key])]),
+    );
     return Object.freeze(clone) as T;
   }
   return value;
@@ -199,6 +205,15 @@ function declarationName(field: FieldDeclaration): string {
   return field.id;
 }
 
+function effectiveSchemaId(contract: ArtifactContract): string {
+  return [
+    "urn:inari:effective-artifact-contract",
+    encodeURIComponent(contract.version),
+    encodeURIComponent(contract.kind),
+    encodeURIComponent(contract.id),
+  ].join(":");
+}
+
 function buildInputSchema(contract: ArtifactContract): JsonSchemaDocument {
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
@@ -217,18 +232,102 @@ function buildInputSchema(contract: ArtifactContract): JsonSchemaDocument {
   required.sort(compareStrings);
   return {
     $schema: JSON_SCHEMA_DIALECT,
-    $id: [
-      "urn:inari:effective-artifact-contract",
-      encodeURIComponent(contract.version),
-      encodeURIComponent(contract.kind),
-      encodeURIComponent(contract.id),
-    ].join(":"),
+    $id: effectiveSchemaId(contract),
     title: `${contract.kind} ${contract.id} caller input`,
     type: "object",
     properties,
     ...(required.length === 0 ? {} : { required }),
     additionalProperties: false,
   };
+}
+
+const ROOT_SCHEMA_PROJECTION_UNSUPPORTED_KEYWORDS = [
+  "$ref",
+  "allOf",
+  "anyOf",
+  "oneOf",
+  "not",
+  "if",
+  "then",
+  "else",
+  "const",
+  "enum",
+  "minProperties",
+  "maxProperties",
+  "dependentRequired",
+  "dependentSchemas",
+] as const;
+
+function rootPropertyPointer(name: string): string {
+  return `/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`;
+}
+
+export function buildSchemaNativeInputSchema(contract: SchemaNativeArtifactContract): JsonSchemaDocument {
+  const rootSchema = contract.schema;
+  const sourceProperties = isRecord(rootSchema.properties) ? rootSchema.properties : undefined;
+  if (sourceProperties === undefined) {
+    throw new EffectiveArtifactContractCompilationError("Schema-native root properties are unavailable.");
+  }
+
+  const properties: [string, JsonSchema][] = [];
+  const suppliedProperties = new Set<string>();
+  let hasExcludedProperties = false;
+  for (const name of Object.keys(sourceProperties).sort(compareStrings)) {
+    const binding = contract.bindings[rootPropertyPointer(name)];
+    if (binding === undefined) {
+      throw new EffectiveArtifactContractCompilationError("Schema-native property binding is unavailable.");
+    }
+    if (binding.authority.kind !== "supplied") {
+      hasExcludedProperties = true;
+      continue;
+    }
+    // Schema-native contracts admit Draft 2020-12 subtrees that are wider
+    // than the legacy projected-schema type. Keep the validated subtree intact.
+    properties.push([name, sourceProperties[name] as JsonSchema]);
+    suppliedProperties.add(name);
+  }
+
+  const patternProperties = rootSchema.patternProperties;
+  if (isRecord(patternProperties) && Object.keys(patternProperties).length > 0) {
+    throw new EffectiveArtifactContractCompilationError(
+      "Schema-native root patternProperties cannot be projected into closed caller input.",
+    );
+  }
+  if (
+    hasExcludedProperties &&
+    ROOT_SCHEMA_PROJECTION_UNSUPPORTED_KEYWORDS.some((keyword) => Object.hasOwn(rootSchema, keyword))
+  ) {
+    throw new EffectiveArtifactContractCompilationError(
+      "Schema-native root constraints cannot be projected equivalently to supplied caller input.",
+    );
+  }
+
+  const required = Array.isArray(rootSchema.required)
+    ? rootSchema.required
+        .filter((name): name is string => typeof name === "string" && suppliedProperties.has(name))
+        .sort(compareStrings)
+    : [];
+  const projectedSchema = {
+    ...Object.fromEntries(
+      Object.entries(rootSchema).filter(
+        ([keyword]) => keyword !== "properties" && keyword !== "required" && keyword !== "additionalProperties",
+      ),
+    ),
+    $schema: JSON_SCHEMA_DIALECT,
+    $id: typeof rootSchema.$id === "string" ? rootSchema.$id : effectiveSchemaId(contract),
+    type: "object",
+    properties: Object.fromEntries(properties),
+    ...(required.length === 0 ? {} : { required }),
+    additionalProperties: false,
+  };
+  try {
+    compileJsonSchema(projectedSchema);
+  } catch {
+    throw new EffectiveArtifactContractCompilationError(
+      "Schema-native caller schema contains references that cannot be resolved after supplied-only projection.",
+    );
+  }
+  return projectedSchema as JsonSchemaDocument;
 }
 
 function topologicalOrder(derivations: readonly ArtifactContractDerivation[]): readonly string[] {
@@ -306,7 +405,11 @@ export function compileEffectiveArtifactContract(
     [...contract.derivations].sort((left, right) => compareStrings(left.target, right.target)),
   );
   const capabilities = cloneImmutable(normalizeCapabilities(options.capabilities));
-  const inputSchema = cloneImmutable(buildInputSchema(contract));
+  const inputSchema = cloneImmutable(
+    contract.version === SCHEMA_NATIVE_ARTIFACT_CONTRACT_VERSION
+      ? buildSchemaNativeInputSchema(contract)
+      : buildInputSchema(contract),
+  );
   const dependencyGraph = cloneImmutable(buildDependencyGraph(derivations));
   const evaluationOrder = cloneImmutable(topologicalOrder(derivations));
 

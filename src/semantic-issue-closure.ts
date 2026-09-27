@@ -70,6 +70,8 @@ export interface SemanticIssueClosureTerminalEvidenceProjection {
   readonly status: SemanticIssueClosureTerminalEvidenceStatus;
   readonly state?: SemanticIssueClosureTerminalState;
   readonly outcome?: "successful" | "aborted";
+  readonly classification?: "historical-only";
+  readonly historicalState?: "aborted" | "merged";
 }
 
 export interface SemanticIssueClosureProjection {
@@ -255,12 +257,22 @@ function hasCycle(
   return projection.issues.some((issue) => visit(issue.reference));
 }
 
+function historicalLifecycleFields(
+  result: ReturnType<typeof tryProjectImplementationLifecycle>,
+): Pick<SemanticIssueClosureTerminalEvidenceProjection, "classification" | "historicalState"> {
+  return result.historicalTermination === undefined
+    ? {}
+    : { classification: "historical-only", historicalState: "aborted" };
+}
+
 function terminalEvidence(
   value: unknown,
   kind: "implementation" | "change",
   target: IssueReference,
   diagnostics: SemanticIssueClosureDiagnostic[],
   pathPrefix = "$",
+  implementationLifecycle?: ReturnType<typeof tryProjectImplementationLifecycle>,
+  implementationChangeIsHistorical = false,
 ): SemanticIssueClosureTerminalEvidenceProjection {
   if (value === undefined) return { status: "absent" };
   if (!isRecord(value)) {
@@ -275,7 +287,7 @@ function terminalEvidence(
   }
 
   if (kind === "implementation") {
-    const result = tryProjectImplementationLifecycle(value);
+    const result = implementationLifecycle ?? tryProjectImplementationLifecycle(value);
     const implementation =
       result.authorization === undefined
         ? undefined
@@ -332,7 +344,12 @@ function terminalEvidence(
         );
         return { status: "unverifiable" };
       }
-      return { status: "terminal", state: "completed", outcome: "successful" };
+      return {
+        status: "terminal",
+        state: "completed",
+        outcome: "successful",
+        ...historicalLifecycleFields(result),
+      };
     }
     if (result.status === "aborted") {
       if (result.current !== false || result.authorized !== false) {
@@ -345,7 +362,12 @@ function terminalEvidence(
         );
         return { status: "unverifiable" };
       }
-      return { status: "terminal", state: "aborted", outcome: "aborted" };
+      return {
+        status: "terminal",
+        state: "aborted",
+        outcome: "aborted",
+        ...historicalLifecycleFields(result),
+      };
     }
     if (result.current !== true || result.authorized !== true) {
       diagnostics.push(
@@ -355,9 +377,9 @@ function terminalEvidence(
           "Non-terminal Implementation evidence is not current and authorized.",
         ),
       );
-      return { status: "unverifiable" };
+      return { status: "unverifiable", ...historicalLifecycleFields(result) };
     }
-    return { status: "active" };
+    return { status: "active", ...historicalLifecycleFields(result) };
   }
 
   const changeResult = validateChangeProjectionResult(value);
@@ -400,9 +422,61 @@ function terminalEvidence(
     );
     return { status: "unverifiable" };
   }
+  if (implementationChangeIsHistorical)
+    return {
+      status: "absent",
+      classification: "historical-only",
+      ...(projection.change.state === "ABORTED"
+        ? { historicalState: "aborted" as const }
+        : projection.change.state === "MERGED"
+          ? { historicalState: "merged" as const }
+          : {}),
+    };
   if (projection.change.state === "MERGED") return { status: "terminal", state: "merged", outcome: "successful" };
   if (projection.change.state === "ABORTED") return { status: "terminal", state: "aborted", outcome: "aborted" };
   return { status: "active" };
+}
+
+function implementationLifecycleForTarget(
+  value: unknown,
+  target: IssueReference,
+): ReturnType<typeof tryProjectImplementationLifecycle> | undefined {
+  if (!isRecord(value)) return undefined;
+  const result = tryProjectImplementationLifecycle(value);
+  if (result.authorization === undefined) return undefined;
+  return issueReferenceKey(result.authorization.implementation) === issueReferenceKey(target) ? result : undefined;
+}
+
+function terminalEvidencePair(
+  implementationValue: unknown,
+  changeValue: unknown,
+  target: IssueReference,
+  diagnostics: SemanticIssueClosureDiagnostic[],
+  pathPrefix = "$",
+): {
+  readonly implementation: SemanticIssueClosureTerminalEvidenceProjection;
+  readonly change: SemanticIssueClosureTerminalEvidenceProjection;
+} {
+  const implementationLifecycle = implementationLifecycleForTarget(implementationValue, target);
+  return {
+    implementation: terminalEvidence(
+      implementationValue,
+      "implementation",
+      target,
+      diagnostics,
+      pathPrefix,
+      implementationLifecycle,
+    ),
+    change: terminalEvidence(
+      changeValue,
+      "change",
+      target,
+      diagnostics,
+      pathPrefix,
+      undefined,
+      implementationLifecycle?.historicalTermination !== undefined,
+    ),
+  };
 }
 
 function combineTerminalEvidence(
@@ -585,14 +659,15 @@ export function tryProjectSemanticIssueClosure(input: unknown): SemanticIssueClo
         childrenTerminalConfirmed = false;
         continue;
       }
-      const childImplementation = terminalEvidence(
+      const childEvidence = terminalEvidencePair(
         childEntry.implementation,
-        "implementation",
+        childEntry.change,
         child,
         diagnostics,
         childPath,
       );
-      const childChange = terminalEvidence(childEntry.change, "change", child, diagnostics, childPath);
+      const childImplementation = childEvidence.implementation;
+      const childChange = childEvidence.change;
       childTerminalEvidence.push({ reference: child, implementation: childImplementation, change: childChange });
       const childCombined = combineTerminalEvidence(childImplementation, childChange, diagnostics);
       if (childCombined === "absent") {
@@ -612,8 +687,9 @@ export function tryProjectSemanticIssueClosure(input: unknown): SemanticIssueClo
       }
     }
   }
-  const implementation = terminalEvidence(input.implementation, "implementation", target, diagnostics);
-  const change = terminalEvidence(input.change, "change", target, diagnostics);
+  const targetTerminalEvidence = terminalEvidencePair(input.implementation, input.change, target, diagnostics);
+  const implementation = targetTerminalEvidence.implementation;
+  const change = targetTerminalEvidence.change;
   const combinedTerminalStatus = combineTerminalEvidence(implementation, change, diagnostics);
   const targetState = targetIssue.observedState;
   if (targetState === undefined) {

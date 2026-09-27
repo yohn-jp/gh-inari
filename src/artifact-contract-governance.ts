@@ -2,8 +2,10 @@
  * Repository Canon resolution for the Semantic Artifact pipeline.
  *
  * This module is the repository-facing Core adapter boundary. It resolves an
- * Artifact Contract Canon from the authoritative default branch and compiles
- * it through the shared Effective Artifact Contract compiler. It
+ * Artifact Contract Canon or numeric-v1 semantic-template source from the
+ * authoritative default branch and compiles it through the shared Effective
+ * Artifact Contract compiler. Numeric-v1 sources use the existing compatibility
+ * producer and require their committed native projection to match. It
  * does not select semantic values, derive identities, or project GitHub
  * representations, and it does not define its own Canon location or
  * selector policy: discovery and template-resolution precedence are
@@ -22,6 +24,13 @@ import {
   type ArtifactContractProvenance,
 } from "./contract/index.js";
 import { GitHubAdapter, type RepositoryContext, type RepositoryTreeEntry } from "./github/index.js";
+import {
+  compileSemanticTemplateArtifactContract,
+  parseSemanticTemplate,
+  renderSemanticNative,
+  SemanticTemplateError,
+  type SemanticTemplateSource,
+} from "./semantic-template.js";
 import {
   createRemoteArtifactContractIdentities,
   resolveRemoteArtifactContractIdentity,
@@ -87,6 +96,9 @@ export type EffectiveArtifactContractOutcome =
       readonly message: string;
       readonly failureCode?: string;
     };
+
+type RepositoryContractSource = ArtifactContract | SemanticTemplateSource;
+const MAX_ARTIFACT_CONTRACT_DIAGNOSTICS = 8;
 
 /**
  * Resolve the authoritative Artifact Contract Canon identity using the same
@@ -209,7 +221,11 @@ function sourceProvenance(
   };
 }
 
-function parseCanonSource(source: string, path: string, kind: RepositoryEffectiveArtifactKind): ArtifactContract {
+function parseCanonSource(
+  source: string,
+  path: string,
+  identity: RepositoryArtifactContractIdentity,
+): RepositoryContractSource {
   let raw: unknown;
   try {
     raw = JSON.parse(source) as unknown;
@@ -221,13 +237,40 @@ function parseCanonSource(source: string, path: string, kind: RepositoryEffectiv
       { reason: error instanceof Error ? error.message : "invalid JSON" },
     );
   }
-  try {
-    const contract = parseArtifactContract(raw);
-    if (contract.kind !== kind) {
+
+  if (identity.kind !== "branch" && isRecord(raw) && raw.version === 1) {
+    let semantic: SemanticTemplateSource;
+    try {
+      semantic = parseSemanticTemplate(source, path);
+    } catch (error: unknown) {
+      if (error instanceof SemanticTemplateError) {
+        throw semanticTemplateResolutionError(path, error);
+      }
+      throw new ArtifactContractResolutionError(
+        "ARTIFACT_CONTRACT_SOURCE_INVALID",
+        path,
+        `Artifact Contract Canon "${path}" failed semantic-template v1 validation.`,
+        { reason: error instanceof Error ? error.message : "invalid semantic template" },
+      );
+    }
+    if (semantic.kind !== identity.kind) {
       throw new ArtifactContractResolutionError(
         "ARTIFACT_CONTRACT_KIND_INVALID",
         "$.kind",
-        `Artifact Contract Canon "${path}" must declare kind "${kind}".`,
+        `Artifact Contract Canon "${path}" must declare kind "${identity.kind}".`,
+        { kind: semantic.kind },
+      );
+    }
+    return semantic;
+  }
+
+  try {
+    const contract = parseArtifactContract(raw);
+    if (contract.kind !== identity.kind) {
+      throw new ArtifactContractResolutionError(
+        "ARTIFACT_CONTRACT_KIND_INVALID",
+        "$.kind",
+        `Artifact Contract Canon "${path}" must declare kind "${identity.kind}".`,
         { kind: contract.kind },
       );
     }
@@ -252,6 +295,114 @@ function parseCanonSource(source: string, path: string, kind: RepositoryEffectiv
   }
 }
 
+function semanticTemplateResolutionError(path: string, error: SemanticTemplateError): ArtifactContractResolutionError {
+  const violations = error.violations.slice(0, MAX_ARTIFACT_CONTRACT_DIAGNOSTICS);
+  return new ArtifactContractResolutionError(
+    "ARTIFACT_CONTRACT_SOURCE_INVALID",
+    path,
+    `Artifact Contract Canon "${path}" failed semantic-template v1 validation.`,
+    { violationCount: error.violations.length, violations },
+    violations.map((violation) => ({
+      code: "ARTIFACT_CONTRACT_SOURCE_INVALID",
+      path: violation.path,
+      message: violation.message,
+    })),
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSemanticTemplateSource(source: RepositoryContractSource): source is SemanticTemplateSource {
+  return typeof source.version === "number";
+}
+
+async function verifySemanticNativeProjection(
+  adapter: GitHubAdapter,
+  tree: readonly RepositoryTreeEntry[],
+  identity: RepositoryArtifactContractIdentity,
+  source: SemanticTemplateSource,
+): Promise<void> {
+  const entry = tree.find((candidate) => candidate.path === identity.generatedPath);
+  if (entry === undefined) {
+    throw new ArtifactContractResolutionError(
+      "ARTIFACT_CONTRACT_SOURCE_INVALID",
+      identity.generatedPath,
+      `Generated native projection "${identity.generatedPath}" was not found in the trusted repository tree.`,
+      { sourcePath: identity.sourcePath, generatedPath: identity.generatedPath },
+    );
+  }
+  if (entry.type !== "blob") {
+    throw new ArtifactContractResolutionError(
+      "ARTIFACT_CONTRACT_SOURCE_INVALID",
+      identity.generatedPath,
+      `Generated native projection "${identity.generatedPath}" is not a regular file.`,
+      { sourcePath: identity.sourcePath, generatedPath: identity.generatedPath },
+    );
+  }
+
+  let expected: string;
+  try {
+    expected = renderSemanticNative(source, identity.generatedPath);
+  } catch (error: unknown) {
+    throw new ArtifactContractResolutionError(
+      "ARTIFACT_CONTRACT_SOURCE_INVALID",
+      identity.sourcePath,
+      `Semantic-template v1 source "${identity.sourcePath}" cannot produce its native projection.`,
+      { reason: error instanceof Error ? error.message : "invalid semantic template" },
+    );
+  }
+
+  const actual = await adapter.getRepositoryBlob(entry.sha);
+  if (actual !== expected) {
+    throw new ArtifactContractResolutionError(
+      "ARTIFACT_CONTRACT_SOURCE_INVALID",
+      identity.generatedPath,
+      `Generated native projection "${identity.generatedPath}" does not match the semantic source at the trusted ref.`,
+      { sourcePath: identity.sourcePath, generatedPath: identity.generatedPath },
+    );
+  }
+}
+
+async function compileRepositorySource(
+  adapter: GitHubAdapter,
+  tree: readonly RepositoryTreeEntry[],
+  identity: RepositoryArtifactContractIdentity,
+  context: RepositoryContext,
+  ref: string,
+  treeSha: string,
+  entry: RepositoryTreeEntry,
+  source: string,
+  options: RepositoryEffectiveArtifactContractOptions,
+): Promise<EffectiveArtifactContract> {
+  const parsed = parseCanonSource(source, entry.path, identity);
+  const provenance = sourceProvenance(context, ref, treeSha, entry, source);
+  if (!isSemanticTemplateSource(parsed)) {
+    return compileEffectiveArtifactContract(parsed, { provenance, capabilities: options.capabilities });
+  }
+
+  await verifySemanticNativeProjection(adapter, tree, identity, parsed);
+  try {
+    const contract = compileSemanticTemplateArtifactContract(parsed);
+    return compileEffectiveArtifactContract(contract, { provenance, capabilities: options.capabilities });
+  } catch (error: unknown) {
+    if (error instanceof SemanticTemplateError) {
+      throw semanticTemplateResolutionError(entry.path, error);
+    }
+    if (error instanceof ArtifactContractValidationError) {
+      throw new ArtifactContractResolutionError(
+        "ARTIFACT_CONTRACT_SOURCE_INVALID",
+        entry.path,
+        `Artifact Contract Canon "${entry.path}" failed Core validation.`,
+        { violations: error.violations.slice(0, MAX_ARTIFACT_CONTRACT_DIAGNOSTICS) },
+        error.violations.slice(0, MAX_ARTIFACT_CONTRACT_DIAGNOSTICS),
+      );
+    }
+    throw error;
+  }
+}
+
 /**
  * Resolve the authoritative Artifact Contract Canon and compile its Effective
  * Artifact Contract. All repository identity and generation fields come from
@@ -271,9 +422,7 @@ export async function compileRepositoryEffectiveArtifactContract(
   const identity = await selectCanonIdentity(tree.entries, kind, selector, configuredDefault, context, ref);
   const entry = findCanonEntry(tree.entries, identity, context, ref);
   const source = await adapter.getRepositoryBlob(entry.sha);
-  const contract = parseCanonSource(source, entry.path, kind);
-  const provenance = sourceProvenance(context, ref, tree.sha, entry, source);
-  return compileEffectiveArtifactContract(contract, { provenance, capabilities: options.capabilities });
+  return compileRepositorySource(adapter, tree.entries, identity, context, ref, tree.sha, entry, source, options);
 }
 
 /**
@@ -295,15 +444,20 @@ export async function compileRepositoryEffectiveArtifactContracts(
     try {
       const entry = findCanonEntry(tree.entries, identity, context, ref);
       const source = await adapter.getRepositoryBlob(entry.sha);
-      const contract = parseCanonSource(source, entry.path, kind);
-      const provenance = sourceProvenance(context, ref, tree.sha, entry, source);
       outcomes.push({
         status: "compiled",
         identity,
-        contract: compileEffectiveArtifactContract(contract, {
-          provenance,
-          capabilities: options.capabilities,
-        }),
+        contract: await compileRepositorySource(
+          adapter,
+          tree.entries,
+          identity,
+          context,
+          ref,
+          tree.sha,
+          entry,
+          source,
+          options,
+        ),
       });
     } catch (error: unknown) {
       if (

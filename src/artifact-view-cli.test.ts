@@ -293,6 +293,20 @@ test("issue view keeps readable provider content when semantic template resoluti
   assert.equal((result.output.semantic as Record<string, unknown>).status, "legacy-artifact");
 });
 
+test("Issue View retains the existing option-before-route repository form", async () => {
+  const result = await capture(new ViewAdapter(issue(7, "Legacy body"), []), [
+    "--repository",
+    "acme/inari",
+    "issue",
+    "view",
+    "7",
+    "--json",
+  ]);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.output.operation, "issue.view");
+  assert.equal(result.output.number, 7);
+});
+
 test("issue view retains bounded semantic diagnostics for malformed, unmatched, ambiguous, legacy, and valid artifacts", async () => {
   const cases = [
     {

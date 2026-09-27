@@ -161,6 +161,34 @@ Source Change publication and Implementation leaf publication are different
 objects. An Epic is a composed tracking/integration boundary, not an
 Implementation Session.
 
+An authorized independent reviewer finalizes the repository-owned, versioned
+Source acceptance record for the exact composed Source candidate. It binds
+immutable repository and Source identities, the governed Source integration PR,
+its exact head revision, the current Source criteria version/digest, reviewer
+identity and current authority, and an explicit result for each criterion.
+The sole reviewer authorization source is the versioned, repository-owned
+Source Acceptance Policy on the protected canonical ref. Its immutable GitHub
+userId allowlist is bound to repository identity, protected-ref tree/source
+digest, and policy generation. The reviewer must be a currently authorized
+human independent of the Source requester, Source integration PR author, and
+every human author or provider-proven co-author of the complete exact-head PR
+commit set. Unresolved identity or incomplete candidate evidence fails closed.
+The [Source Acceptance Policy](./SOURCE_ACCEPTANCE_POLICY.md) owns the detailed
+reviewer-independence and current-evidence contract.
+Current Change `ACCEPTED` policy evidence remains necessary for its Change;
+checks, reviews, and merge policy alone do not establish Source criteria
+acceptance. Source completion requires the current record and composed
+acceptance evidence, not leaf PR success or child Issue closure. The record
+grants neither merge nor provider mutation authority.
+
+Task termination is a separate Implementation lifecycle event. Only an
+explicitly authorized Runtime operator may finalize a versioned termination
+record owned by the repository, bound to the immutable repository, the
+Implementation, its current authorization digest, and accepted base evidence.
+Aborting a Source Change or closing a Session does not terminate the task.
+Closing an Issue or a Session's own abort assertion is not task-termination
+authority.
+
 ### ARC-03: current evidence limits every grant
 
 A delegated Source operation requires the Source in both the signed
@@ -168,9 +196,75 @@ Implementation Source set and the freshly read current Source set. An added
 Source does not widen an existing Session; a removed Source is no longer
 admissible.
 
-The #1213 task-bound `change.implement` compatibility claim remains restricted
-to Implementation publication/branch-side composition. It is not an
-Implementation-root Change grant and does not add a new capability ceiling.
+Admission resolves current task-termination evidence for every task-bound
+operation, including operations from an already issued Session. A successful
+authoritative read showing no termination event means the task is not
+terminated; it does not replace other Admission checks. A terminated task
+causes its existing Sessions to fail closed. An unavailable, failed, invalid,
+or mismatched read denies. Hosted eligibility does not grant the Runtime
+operator permission to finalize the record.
+
+For remote human-operated work, Admission intersects a current explicit
+Runtime operator grant with current repository and, where applicable, task
+policy. The grant binds the immutable GitHub user ID and provider host to
+semantic operation IDs, an immutable repository ID, and exact targets. A
+grant cannot widen current Implementation authorization, Source membership,
+branch/base, execution scope, or effect preconditions.
+
+For local Source or Epic integration branch and Draft PR publication, local
+operator authentication is proven by possession of the private key
+corresponding to an immutable key ID in the Runtime owner's versioned,
+revocable operator-key registry, using a fresh signed Runtime challenge.
+The Runtime owner authentication seam verifies the signature, freshness,
+audience, context, and replay status, then supplies Admission bounded
+authenticated subject evidence for the verified key ID and challenge context.
+The operator retains the private key; Admission receives neither it nor a
+reusable operator credential. Authentication alone is not mutation authority.
+Admission requires a
+separate current Runtime-owned exact grant for each semantic operation:
+`branch.create` for integration-branch creation and `pullRequest.create` for
+Draft PR creation. Each grant binds the `source-integration` or
+`epic-integration` role, immutable repository, exact Source or Epic, and exact
+branch/head/base. Neither grant authorizes the other operation. For every
+operation, Admission rereads its grant and current repository, branch, head,
+base, and policy evidence, then intersects them before effect. Unavailable,
+stale, revoked, or mismatched evidence denies. Executor performs each
+admitted effect as Inari Access without receiving operator credentials.
+Local GitHub OAuth is not required. The
+challenge binds Runtime audience, nonce, time, and requested authentication
+context; expired or replayed proof is denied. Runtime admission rechecks
+current enrollment and revocation for every privileged operation. The
+operator retains the private key; Console may relay the signed challenge
+response but never owns or persists it. Loopback, username/process labels,
+anonymous Setup/Console bearer, and GitHub visibility do not establish the
+local operator subject. No Source/Epic delegation claim is issued and
+Implementation Sessions remain leaf-scoped. The existing #1213 bridge remains
+limited to valid same-task leaf publication through original expiry or
+explicit reissue. See [Caller Authentication and Capability
+Authorization](./AGENT_CAPABILITY_AUTHORIZATION.md) for the proof contract.
+
+The grant role `source-integration` is distinct from the current PR
+publication work-identity token `issue-integration`. The `pr-publication`
+consumer accepts that token only after validating its Source and Epic
+references against current exact routing; the token identifies a publication
+and supplies no Admission authority.
+
+For newly authorized Implementation task Sessions, the Runtime Authority
+ceiling and Authority-signed Session binding explicitly include
+`pullRequest.create` only when current repository and task policy authorize
+that exact operation. Admission binds it to the immutable repository, the
+Implementation, the exact leaf head and accepted base, the request, and
+current policy. Neither `change.implement` nor branch spelling supplies this
+grant. `branch.advance` retains its separate exact leaf-branch authority.
+
+An existing valid #1213 signed Session may use its task-bound
+`change.implement` compatibility claim only for the same Implementation's
+leaf PR publication until that binding's original expiry or explicit reissue.
+It gains no new capability and cannot use the claim for an
+Implementation-root Source Change operation. Replacement issuance stops the
+task-bound compatibility claim; bridge admission retires after no active
+valid legacy binding can require it and the explicit publication path has
+end-to-end certification. Historical binding readers may remain.
 
 ### ARC-04: Hosted authenticates and relays
 
@@ -191,7 +285,14 @@ trustworthy. Runtime explicitly trusts the issuer for identity and eligibility
 facts, then independently performs subject/operation admission.
 
 Repository visibility alone never grants all App write permissions or the
-entire Runtime Authority ceiling. Missing subject authorization fails closed.
+entire Runtime Authority ceiling. The Runtime operator owns the explicit
+subject/operation/target grants in Runtime-owned owner configuration; Hosted
+issues no semantic grant. Admission accepts a remote invocation only when the
+verified assertion matches a current grant and the current repository/task
+policy. Missing or revoked grants, stale owner configuration generations, or
+a mismatch in provider host, immutable user ID, repository, semantic operation,
+or target deny. OAuth success, installation permission, assertion validity,
+and display names do not supply a grant.
 
 ### ARC-06: Relay identity is a locator
 
@@ -470,6 +571,8 @@ not Inari permissions or provider behavior.
   attestation, request binding, issuer trust, and remote admission limits.
 - [Change Control Plane](./CHANGE_CONTROL_PLANE.md): identity, publication,
   lifecycle, idempotency, compensation, ready, abort, and merge boundaries.
+- [Source Acceptance Policy](./SOURCE_ACCEPTANCE_POLICY.md): protected-ref
+  reviewer authority, candidate contributor independence, and current use.
 - [XState](./XSTATE_CHANGE_MACHINE.md): executable lifecycle/operation control
   flow, bounded actor context, failure edges, and model proof.
 - [Implementation Contract](./IMPLEMENTATION_CONTRACT.md): bounded task,
