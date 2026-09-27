@@ -13,7 +13,7 @@ import {
   type SignedChangeProvenanceRecord,
 } from "../../change-provenance-record.js";
 import type { CapabilityClaim } from "../../agent-authority/capability.js";
-import { MAX_ISSUE_NUMBER } from "../../agent-authority/capability.js";
+import { CAPABILITY_CREATE_MAX, MAX_ISSUE_NUMBER } from "../../agent-authority/capability.js";
 import { resolveLocalRepositoryNameWithOwner } from "../../change-publish-projection.js";
 import {
   LocalRuntimeAuthorityError,
@@ -260,6 +260,31 @@ function sessionChangeRoots(
   return roots;
 }
 
+function observedImplementationBranch(
+  input: LocalBranchPolicyInput,
+  issue: number,
+  repository: LocalSessionRepositoryIdentity,
+  cwd: string,
+): string {
+  if (
+    input.target.implementation !== issue ||
+    input.target.repository.repositoryId !== repository.repositoryId ||
+    input.target.repository.repositoryHost !== repository.host
+  )
+    fail(
+      "ADMISSION_SESSION_BRANCH_MISMATCH",
+      "Branch observation does not match the Session repository and Implementation.",
+    );
+  try {
+    return observeLocalBranch({
+      ...branchPolicy(input),
+      observedBranch: observedLocalBranch(cwd),
+    }).expectedBranch;
+  } catch {
+    fail("ADMISSION_SESSION_BRANCH_MISMATCH", "Local branch does not match the repository policy observation.");
+  }
+}
+
 function createBinding(
   sessionId: string,
   issue: number,
@@ -278,37 +303,35 @@ function createBinding(
       if (authority.capabilityCeiling.includes(kind)) capabilities.push({ kind, issue: root });
     }
   }
-  // #1213: a Source-bound Session keeps one task-bound change.implement claim as
-  // the compatibility authority for the Implementation's own PR publication and
-  // branch-side fallback. Admission never admits it as a Change root.
-  if (
-    branchInput?.implementationBinding !== undefined &&
-    !roots.includes(issue) &&
-    authority.capabilityCeiling.includes("change.implement")
-  )
-    capabilities.push({ kind: "change.implement", issue });
+  const sourceBoundImplementation = branchInput?.implementationBinding !== undefined && !roots.includes(issue);
+  if (sourceBoundImplementation && branchInput?.implementationBinding !== undefined) {
+    const implementation = branchInput.implementationBinding;
+    if (
+      implementation.task.number !== issue ||
+      implementation.authorization.implementation.number !== issue ||
+      implementation.authorization.implementation.repositoryHost !== repository.host ||
+      implementation.authorization.implementation.repositoryId !== repository.repositoryId
+    )
+      fail(
+        "ADMISSION_SESSION_IMPLEMENTATION_BINDING_REQUIRED",
+        "Current authorized Implementation identity does not match this Session.",
+      );
+    if (!authority.capabilityCeiling.includes("pullRequest.create"))
+      fail(
+        "ADMISSION_SESSION_CAPABILITY_UNAVAILABLE",
+        "Runtime Authority does not trust exact pull request creation for this Implementation.",
+      );
+    capabilities.push({
+      kind: "pullRequest.create",
+      head: observedImplementationBranch(branchInput, issue, repository, cwd),
+      base: implementation.base.branch,
+      max: CAPABILITY_CREATE_MAX,
+    });
+  }
   if (authority.capabilityCeiling.includes("branch.advance")) {
     let branch: string;
     if (branchInput === undefined) branch = canonicalIssueBranch(cwd, issue);
-    else {
-      if (
-        branchInput.target.implementation !== issue ||
-        branchInput.target.repository.repositoryId !== repository.repositoryId ||
-        branchInput.target.repository.repositoryHost !== repository.host
-      )
-        fail(
-          "ADMISSION_SESSION_BRANCH_MISMATCH",
-          "Branch observation does not match the Session repository and Implementation.",
-        );
-      try {
-        branch = observeLocalBranch({
-          ...branchPolicy(branchInput),
-          observedBranch: observedLocalBranch(cwd),
-        }).expectedBranch;
-      } catch {
-        fail("ADMISSION_SESSION_BRANCH_MISMATCH", "Local branch does not match the repository policy observation.");
-      }
-    }
+    else branch = observedImplementationBranch(branchInput, issue, repository, cwd);
     capabilities.push({ kind: "branch.advance", branch });
   }
   if (!capabilities.some((claim) => claim.kind === "change.implement")) {

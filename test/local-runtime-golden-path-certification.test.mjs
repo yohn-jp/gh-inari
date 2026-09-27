@@ -267,7 +267,17 @@ async function certifyGoldenPath(scenario) {
               "--private-key",
               legacyAuthorityKey,
             ]
-          : ["setup", "--repository", REPOSITORY, "--endpoint", ENDPOINT, "--capability", "change.implement"];
+          : [
+              "setup",
+              "--repository",
+              REPOSITORY,
+              "--endpoint",
+              ENDPOINT,
+              "--capability",
+              "change.implement",
+              "--capability",
+              "pullRequest.create",
+            ];
       const prepare = async () => {
         const authorization = cli(prepareArgs);
         assert.equal(authorization.status, 0, `${authorization.stdout}\n${authorization.stderr}`);
@@ -302,6 +312,8 @@ async function certifyGoldenPath(scenario) {
             "1800",
             "--capability",
             "change.implement",
+            "--capability",
+            "pullRequest.create",
           ]),
           "legacy Authority bootstrap",
         );
@@ -503,6 +515,22 @@ writeFileSync(process.argv[2], JSON.stringify({
       const governed = await runSession(IMPLEMENTATION);
       assert.equal(governed.session.status, 0, `${governed.session.stdout}\n${governed.session.stderr}`);
       assert.match(governed.child.session, /^sess_/u);
+      const storedBinding = JSON.parse(
+        await readFile(path.join(configHome, "cli", "sessions", `${governed.child.session}.json`), "utf8"),
+      ).binding;
+      assert.deepEqual(storedBinding.task, { kind: "issue", number: IMPLEMENTATION });
+      assert.equal(storedBinding.repository.id, REPOSITORY_ID);
+      assert.equal(storedBinding.implementationBinding.repository.repositoryHost, "github.com");
+      assert.equal(storedBinding.implementationBinding.repository.repositoryId, REPOSITORY_ID);
+      assert.equal(storedBinding.implementationBinding.task.number, IMPLEMENTATION);
+      assert.deepEqual(
+        storedBinding.capabilities.filter((claim) => claim.kind === "pullRequest.create"),
+        [{ kind: "pullRequest.create", head: BRANCH, base: storedBinding.implementationBinding.base.branch, max: 1 }],
+      );
+      assert.equal(
+        storedBinding.capabilities.some((claim) => claim.kind === "change.implement" && claim.issue === IMPLEMENTATION),
+        false,
+      );
       const [created, repeated] = governed.child.runs;
       assert.equal(created.status, 0, JSON.stringify(created));
       assert.equal(created.output.route, "local-admission");
