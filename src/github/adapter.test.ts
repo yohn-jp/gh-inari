@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ContractViolationError,
+  createArtifactObservationIdentity,
   GitHubAuthenticationError,
   GitHubAdapter,
   GitHubApiError,
@@ -113,6 +114,33 @@ function pullRequestPayload(number = 43): string {
     requested_reviewers: [],
     requested_teams: [],
   });
+}
+
+function issueObservation(number: number): GitHubIssue {
+  return {
+    number,
+    title: "An issue",
+    body: "Rendered issue body",
+    state: "open",
+    url: `https://github.com/acme/inari/issues/${number}`,
+    labels: ["bug"],
+    assignees: ["octocat"],
+    repositoryId: "100000157",
+    repositoryHost: "github.com",
+  };
+}
+
+function pullRequestObservation(number: number): GitHubPullRequest {
+  return {
+    number,
+    title: "A pull request",
+    body: "Rendered pull request body",
+    state: "open",
+    url: `https://github.com/acme/inari/pull/${number}`,
+    draft: false,
+    head: "feature",
+    base: "main",
+  };
 }
 
 function operationalPullRequestPayload(number = 43): string {
@@ -548,6 +576,7 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
     command(0, issuePayload(45)),
     command(0, pullRequestPayload(46)),
     command(0, pullRequestPayload(47)),
+    command(0, pullRequestPayload(47)),
   ]);
   const adapter = new GitHubAdapter({ repository: "acme/inari", transport: nativeTestTransport(transport) });
   const issueArtifact = prepareIssueArtifact(governedFixture(issueContractFixture), {
@@ -575,9 +604,29 @@ test("supports MVP Issue and pull request reads and mutations through a fake tra
   assert.equal(pullRequest.head, "feature");
   assert.equal(pullRequest.draft, false);
   assert.equal((await adapter.createIssue(issueArtifact)).number, 44);
-  assert.equal((await adapter.updateIssue(45, issueArtifact)).number, 45);
+  assert.equal(
+    (
+      await adapter.updateIssue(
+        45,
+        issueArtifact,
+        undefined,
+        createArtifactObservationIdentity("issue", issueObservation(45)),
+      )
+    ).number,
+    45,
+  );
   assert.equal((await adapter.createPullRequest(pullRequestArtifact)).number, 46);
-  assert.equal((await adapter.updatePullRequest(47, pullRequestArtifact)).number, 47);
+  assert.equal(
+    (
+      await adapter.updatePullRequest(
+        47,
+        pullRequestArtifact,
+        undefined,
+        createArtifactObservationIdentity("pr", pullRequestObservation(47)),
+      )
+    ).number,
+    47,
+  );
 
   const issueCreate = transport.calls.find(
     (call) => call.args.includes("repos/acme/inari/issues") && call.args.includes("POST"),
@@ -1105,8 +1154,103 @@ test("updateIssue fails closed before mutating a pull-request-shaped resource", 
   }).artifact;
 
   await assert.rejects(
-    adapter.updateIssue(49, issueArtifact),
+    adapter.updateIssue(49, issueArtifact, undefined, createArtifactObservationIdentity("issue", issueObservation(49))),
     (error: unknown) => error instanceof GitHubResourceKindMismatchError,
+  );
+  assert.equal(
+    transport.calls.some((call) => call.args.includes("PATCH")),
+    false,
+  );
+});
+
+test("updateIssue rejects a concurrent governed metadata change before PATCH", async () => {
+  const changedIssue = {
+    ...JSON.parse(issuePayload(52)),
+    labels: [{ name: "bug" }, { name: "needs-review" }],
+  };
+  const transport = new StubFixtureTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, JSON.stringify(changedIssue)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport: nativeTestTransport(transport) });
+  const issueArtifact = prepareIssueArtifact(governedFixture(issueContractFixture), {
+    fields: {
+      problem: "A rendered issue",
+      category: "feature",
+      affected_areas: ["contracts"],
+      acceptance: ["tests"],
+    },
+    metadata: { title: "Rendered issue" },
+  }).artifact;
+
+  await assert.rejects(
+    adapter.updateIssue(52, issueArtifact, undefined, createArtifactObservationIdentity("issue", issueObservation(52))),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ARTIFACT_OBSERVATION_STALE" &&
+      !String(error.message).includes("Concurrent body edit"),
+  );
+  assert.equal(
+    transport.calls.some((call) => call.args.includes("PATCH")),
+    false,
+  );
+});
+
+test("updatePullRequest rejects a concurrent ref/base change before PATCH", async () => {
+  const changedPullRequest = JSON.parse(pullRequestPayload(53)) as Record<string, unknown>;
+  changedPullRequest.base = { ref: "release" };
+  changedPullRequest.head = { ref: "other-feature" };
+  const transport = new StubFixtureTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, JSON.stringify(changedPullRequest)),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport: nativeTestTransport(transport) });
+  const pullRequestArtifact = preparePullRequestArtifact(governedFixture(pullRequestContractFixture), {
+    fields: { summary: "A rendered pull request", linked_issue: "Closes #22", acceptance: ["tests"] },
+    metadata: { title: "A rendered pull request", head: "feature", base: "main" },
+  }).artifact;
+
+  await assert.rejects(
+    adapter.updatePullRequest(
+      53,
+      pullRequestArtifact,
+      undefined,
+      createArtifactObservationIdentity("pr", pullRequestObservation(53)),
+    ),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "ARTIFACT_OBSERVATION_STALE",
+  );
+  assert.equal(
+    transport.calls.some((call) => call.args.includes("PATCH")),
+    false,
+  );
+});
+
+test("updateIssue preserves provider failure evidence when its freshness reread fails", async () => {
+  const transport = new StubFixtureTransport([
+    command(0, "gh version 2.0"),
+    command(),
+    repositoryIdentityResponse(),
+    command(0, '{"number":54'),
+  ]);
+  const adapter = new GitHubAdapter({ repository: "acme/inari", transport: nativeTestTransport(transport) });
+  const issueArtifact = prepareIssueArtifact(governedFixture(issueContractFixture), {
+    fields: {
+      problem: "A rendered issue",
+      category: "feature",
+      affected_areas: ["contracts"],
+      acceptance: ["tests"],
+    },
+    metadata: { title: "Rendered issue" },
+  }).artifact;
+
+  await assert.rejects(
+    adapter.updateIssue(54, issueArtifact, undefined, createArtifactObservationIdentity("issue", issueObservation(54))),
+    (error: unknown) => error instanceof GitHubApiResponseError && error.code === "GITHUB_API_RESPONSE_INVALID",
   );
   assert.equal(
     transport.calls.some((call) => call.args.includes("PATCH")),
