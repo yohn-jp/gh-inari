@@ -213,6 +213,9 @@ const EXPECTED_PACKED_FILES = [
   "dist/implementation-authorization.d.ts",
   "dist/implementation-authorization.js",
   "dist/implementation-authorization.js.map",
+  "dist/implementation-task-termination.d.ts",
+  "dist/implementation-task-termination.js",
+  "dist/implementation-task-termination.js.map",
   "dist/implementation-readiness.d.ts",
   "dist/implementation-readiness.js",
   "dist/implementation-readiness.js.map",
@@ -859,6 +862,57 @@ function certifyInstalledContractPackage(consumer, packageName) {
   console.log("installed contract runtime verified: public package subpath resolves and validates Draft 2020-12");
 }
 
+function certifyInstalledImplementationTaskTerminationPackage(consumer, packageName) {
+  const smokePath = path.join(consumer, "implementation-task-termination-runtime.mjs");
+  const source = String.raw`
+import assert from "node:assert/strict";
+import {
+  IMPLEMENTATION_TASK_TERMINATION_KIND,
+  IMPLEMENTATION_TASK_TERMINATION_VERSION,
+  observeImplementationTaskTermination,
+  validateImplementationTaskTerminationRecord,
+} from "__PACKAGE_NAME__";
+
+const repository = {
+  repositoryHost: "github.com",
+  repositoryId: "1",
+  repository: "example/task-termination",
+};
+const implementation = { ...repository, number: 1 };
+const base = { branch: "main", revision: "a".repeat(40), freshness: "fresh-1" };
+const authorization = {
+  version: 1,
+  kind: "implementation-authorization",
+  implementation,
+  contractVersion: 1,
+  repository,
+  base,
+  governedBodyDigest: "b".repeat(64),
+};
+const record = {
+  version: IMPLEMENTATION_TASK_TERMINATION_VERSION,
+  kind: IMPLEMENTATION_TASK_TERMINATION_KIND,
+  repository,
+  implementation,
+  authorizationDigest: authorization.governedBodyDigest,
+  base,
+};
+
+assert.equal(IMPLEMENTATION_TASK_TERMINATION_KIND, "implementation-task-termination");
+assert.equal(validateImplementationTaskTerminationRecord(record, authorization).valid, true);
+assert.equal(
+  observeImplementationTaskTermination(
+    { status: "authoritative", provenance: { source: "repository" }, records: [{ record, provenance: { path: "termination.json" } }] },
+    authorization,
+  ).status,
+  "present",
+);
+`;
+  fs.writeFileSync(smokePath, `${source.replaceAll("__PACKAGE_NAME__", packageName)}\n`);
+  run(process.execPath, [smokePath], { cwd: consumer });
+  console.log("installed task termination runtime verified: public root API validates and observes a record");
+}
+
 function certifyInstalledArtifactReconciliationPackage(consumer, packageName) {
   const smokePath = path.join(consumer, "artifact-reconciliation-runtime.mjs");
   const source = String.raw`
@@ -1149,6 +1203,7 @@ async function certifyInstalledSetupConsole(tarballPath, packageName) {
     if (!path.relative(repoRoot, installed).startsWith(".."))
       throw new Error("installed package resolved inside the checkout");
     certifyInstalledContractPackage(consumer, packageName);
+    certifyInstalledImplementationTaskTerminationPackage(consumer, packageName);
     certifyInstalledArtifactReconciliationPackage(consumer, packageName);
     const environment = { ...process.env, INARI_CONFIG_HOME: path.join(root, "config") };
     for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) delete environment[name];
