@@ -117,8 +117,17 @@ if (role === "executor") {
     if (method === "GET" && route === prefix + "git/ref/heads/main") {
       return respond({ ref: "refs/heads/main", object: { type: "commit", sha: fixture.policySha } });
     }
-    if (method === "GET" && route.startsWith(prefix + "git/trees/") && url.search === "?recursive=1") {
+    if (
+      method === "GET" &&
+      (route === prefix + "git/trees/main" ||
+        route === prefix + "git/trees/" + fixture.policySha ||
+        route === prefix + "git/trees/" + fixture.treeSha) &&
+      url.search === "?recursive=1"
+    ) {
       return respond({ sha: fixture.treeSha, truncated: false, tree: fixture.tree });
+    }
+    if (method === "GET" && route === prefix + "git/commits/" + fixture.policySha) {
+      return respond({ sha: fixture.policySha, tree: { sha: fixture.treeSha } });
     }
     if (method === "GET" && route.startsWith(prefix + "git/blobs/")) {
       const sha = route.slice((prefix + "git/blobs/").length);
@@ -691,7 +700,7 @@ test(
       ]) {
         const sha = blobSha(content);
         blobs[sha] = content;
-        tree.push({ path: name, type: "blob", sha });
+        tree.push({ path: name, mode: "100644", type: "blob", sha });
       }
       await writeFile(
         fixtureFile,
