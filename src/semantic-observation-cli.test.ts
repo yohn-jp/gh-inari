@@ -55,27 +55,101 @@ class BranchObservationAdapter extends GitHubAdapter {
   }
 }
 
-test("semantic Branch CLI check delegates Canon, projection, observation, and comparison to Core", async () => {
+test("Canon branch routes preserve typed options and delegate observation to Core", async () => {
   const adapter = new BranchObservationAdapter(branchCanon);
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-semantic-observation-cli-"));
   const inputPath = path.join(directory, "input.json");
   await writeFile(inputPath, JSON.stringify({ name: "feat/example" }), "utf8");
   const lines: string[] = [];
+  const repositoryOverrides: (string | undefined)[] = [];
   const originalLog = console.log;
   try {
     console.log = (line: string) => lines.push(line);
-    const exitCode = await runCli(["branch", "semantic", "check", "feat/example", "--from", inputPath, "--json"], {
-      createAdapter: () => adapter,
-    });
-    assert.equal(exitCode, 0, lines.join("\n"));
+    const dependencies: Parameters<typeof runCli>[1] = {
+      createAdapter: (options) => {
+        repositoryOverrides.push(options?.repository);
+        return adapter;
+      },
+    };
+    const invocations: readonly (readonly string[])[] = [
+      ["branch", "semantic", "check", "feat/example", "--from", inputPath, "--json"],
+      ["--repository", "acme/repository", "--from", inputPath, "branch", "semantic", "check", "feat/example", "--json"],
+      [
+        "--repo",
+        "acme/repository",
+        "--template",
+        "branch",
+        "--from",
+        inputPath,
+        "branch",
+        "check",
+        "feat/example",
+        "--json",
+      ],
+      ["-R", "acme/repository", "--from", inputPath, "branch", "check", "feat/example", "--json"],
+    ];
+    const results: Record<string, unknown>[] = [];
+    for (const argv of invocations) {
+      const previousLines = lines.length;
+      const exitCode = await runCli([...argv], dependencies);
+      assert.equal(exitCode, 0, lines.slice(previousLines).join("\n"));
+      results.push(JSON.parse(lines[previousLines] ?? "{}") as Record<string, unknown>);
+    }
+
+    assert.deepEqual(
+      results.map((output) => output.operation),
+      ["branch.semantic.check", "branch.semantic.check", "branch.check", "branch.check"],
+    );
+    for (const output of results) {
+      assert.equal(output.valid, true);
+      assert.equal((output.diagnostics as unknown[]).length, 0);
+      assert.equal((output.desired as Record<string, unknown>).name, "feat/example");
+      assert.equal((output.observed as Record<string, unknown>).name, "feat/example");
+    }
+    assert.deepEqual(repositoryOverrides, [undefined, "acme/repository", "acme/repository", "acme/repository"]);
   } finally {
     console.log = originalLog;
     await rm(directory, { recursive: true, force: true });
   }
-  const output = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
-  assert.equal(output.operation, "branch.semantic.check");
-  assert.equal(output.valid, true);
-  assert.equal((output.diagnostics as unknown[]).length, 0);
-  assert.equal((output.desired as Record<string, unknown>).name, "feat/example");
-  assert.equal((output.observed as Record<string, unknown>).name, "feat/example");
+});
+
+test("branch pre-route prefixes fail closed for unknown, incomplete, duplicate, and surplus input", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-semantic-observation-prefix-"));
+  const inputPath = path.join(directory, "input.json");
+  await writeFile(inputPath, JSON.stringify({ name: "feat/example" }), "utf8");
+  let adapterCalls = 0;
+  try {
+    for (const argv of [
+      ["--unknown", "value", "branch", "semantic", "check", "feat/example", "--from", inputPath, "--json"],
+      ["--repository", "branch", "semantic", "check", "feat/example", "--from", inputPath, "--json"],
+      [
+        "--repo",
+        "acme/repository",
+        "-R",
+        "acme/other",
+        "branch",
+        "semantic",
+        "check",
+        "feat/example",
+        "--from",
+        inputPath,
+        "--json",
+      ],
+      ["branch", "semantic", "check", "feat/example", "--from", inputPath, "extra", "--json"],
+    ]) {
+      const results: { exitCode: number; stdout: string; stderr: string }[] = [];
+      const exitCode = await runCli([...argv], {
+        createAdapter: () => {
+          adapterCalls += 1;
+          throw new Error("invalid branch argv reached the semantic provider adapter");
+        },
+        writeResult: (result) => results.push(result),
+      });
+      assert.notEqual(exitCode, 0, argv.join(" "));
+      assert.equal(results.length, 1, argv.join(" "));
+    }
+    assert.equal(adapterCalls, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

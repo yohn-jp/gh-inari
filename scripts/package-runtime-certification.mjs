@@ -232,6 +232,24 @@ function executableOnPath(name, pathValue) {
 
 function prepareGovernedConsumer(consumerDirectory) {
   fs.cpSync(path.join(repoRoot, ".github"), path.join(consumerDirectory, ".github"), { recursive: true });
+  const branchContractPath = path.join(consumerDirectory, ".github", "inari", "branch.json");
+  fs.mkdirSync(path.dirname(branchContractPath), { recursive: true });
+  fs.writeFileSync(
+    branchContractPath,
+    `${JSON.stringify(
+      {
+        version: "1",
+        kind: "branch",
+        id: "default",
+        properties: {
+          name: { presence: "required", authority: { kind: "supplied" } },
+          source: { presence: "required", authority: { kind: "fixed", value: "main" } },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
   run("git", ["init", "--quiet"], { cwd: consumerDirectory });
   run("git", ["config", "user.name", "packed-runtime-certification"], { cwd: consumerDirectory });
   run("git", ["config", "user.email", "packed-runtime-certification@example.invalid"], {
@@ -259,6 +277,12 @@ function createIssueInput(rootDirectory) {
   return inputPath;
 }
 
+function createBranchInput(rootDirectory) {
+  const inputPath = path.join(rootDirectory, "branch-input.json");
+  fs.writeFileSync(inputPath, JSON.stringify({ name: "feat/example" }), "utf8");
+  return inputPath;
+}
+
 function createProviderState(statePath, workflowSha, issueBody) {
   fs.writeFileSync(
     statePath,
@@ -274,7 +298,10 @@ function createProviderState(statePath, workflowSha, issueBody) {
             rawProviderResponse: RAW_PROVIDER_SENTINEL,
           },
         },
-        branches: { main: "0123456789abcdef0123456789abcdef01234567" },
+        branches: {
+          main: "0123456789abcdef0123456789abcdef01234567",
+          "feat/example": "0123456789abcdef0123456789abcdef01234567",
+        },
         pulls: {},
         runs: [],
         artifacts: [],
@@ -406,6 +433,49 @@ function certifyInstalledRuntime(consumerDirectory, installedPackageDirectory, e
   );
   if (inspected.valid !== true || inspected.classification !== "valid" || "body" in inspected)
     fail("installed package exposed an invalid or raw provider Issue projection");
+
+  const branchInputPath = environment.INARI_PACKED_BRANCH_INPUT;
+  const branchStatePath = environment.INARI_PACKED_PROVIDER_STATE;
+  if (typeof branchInputPath !== "string" || typeof branchStatePath !== "string")
+    fail("packed Branch fixture paths are unavailable");
+  const providerStateBefore = fs.readFileSync(branchStatePath, "utf8");
+  const branch = jsonOutput(
+    invoke(
+      launcher,
+      ["--repository", "yohn-jp/gh-inari", "--from", branchInputPath, "branch", "check", "feat/example", "--json"],
+      { cwd: consumerDirectory, env: environment },
+    ),
+    "installed ordinary Branch check",
+  );
+  if (branch.operation !== "branch.check" || branch.valid !== true || branch.branch !== "feat/example")
+    fail("installed package did not project the ordinary Branch observation route through Core");
+
+  const semanticBranch = jsonOutput(
+    invoke(
+      launcher,
+      [
+        "--repo",
+        "yohn-jp/gh-inari",
+        "--from",
+        branchInputPath,
+        "branch",
+        "semantic",
+        "check",
+        "feat/example",
+        "--json",
+      ],
+      { cwd: consumerDirectory, env: environment },
+    ),
+    "installed semantic Branch check",
+  );
+  if (
+    semanticBranch.operation !== "branch.semantic.check" ||
+    semanticBranch.valid !== true ||
+    semanticBranch.branch !== "feat/example"
+  )
+    fail("installed package did not project the semantic Branch observation route through Core");
+  if (fs.readFileSync(branchStatePath, "utf8") !== providerStateBefore)
+    fail("installed Branch observations changed the packed provider state");
 }
 
 function suppliedTarballPath(args) {
@@ -471,6 +541,7 @@ async function main() {
       "http://127.0.0.1:1",
     );
     const inputPath = createIssueInput(certificationRoot);
+    const branchInputPath = createBranchInput(certificationRoot);
     const rendered = jsonOutput(
       invoke(
         path.join(consumerDirectory, "node_modules", ".bin", "inari"),
@@ -494,7 +565,12 @@ async function main() {
     };
     provider = await startHttpProvider(providerEnvironment);
 
-    const unavailable = { ...noProviderEnvironment, GITHUB_API_URL: provider.url };
+    const unavailable = {
+      ...noProviderEnvironment,
+      GITHUB_API_URL: provider.url,
+      INARI_PACKED_BRANCH_INPUT: branchInputPath,
+      INARI_PACKED_PROVIDER_STATE: statePath,
+    };
     if (executableOnPath("gh", unavailable.PATH) !== undefined)
       fail("gh must be unavailable in the package runtime PATH");
     certifyInstalledRuntime(consumerDirectory, installedPackageDirectory, unavailable);

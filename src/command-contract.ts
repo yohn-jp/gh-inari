@@ -6,6 +6,9 @@
  * the command surface has one authority.
  */
 
+import { defineCommands, option as canonOption, positional as canonPositional } from "@yohn-jp/cli-canon";
+import { z } from "zod";
+
 export const COMMAND_CONTRACT_VERSION = "1.18.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
@@ -232,6 +235,8 @@ export interface CommandDefinition {
   readonly path: readonly string[];
   readonly positionalSyntax?: string;
   readonly argumentExample?: string;
+  /** Requiredness projected from Canon for compatibility consumers. */
+  readonly requiredOptionIds?: readonly OptionId[];
   readonly summary: string;
   readonly optionIds: readonly OptionId[];
 }
@@ -820,6 +825,95 @@ export const COMMAND_OPTIONS = {
 } satisfies Record<OptionId, CommandOptionDefinition>;
 
 const COMMAND_OPTIONS_BY_ID: Readonly<Record<OptionId, CommandOptionDefinition>> = COMMAND_OPTIONS;
+
+function branchObservationCommand(route: readonly [string, ...string[]], summary: string, requiresFrom: boolean) {
+  return {
+    route,
+    summary,
+    examples: [`${AGENT_INVOCATION_CONTRACT.canonical} ${route.join(" ")} <name>`],
+    input: {
+      name: canonPositional(z.string(), { metavar: "name" }),
+      template: canonOption("--template", z.string(), {
+        metavar: "template",
+        description: COMMAND_OPTIONS_BY_ID.template.description,
+      }),
+      repository: canonOption("--repository", z.string(), {
+        aliases: ["-R"],
+        metavar: "repository",
+        description: COMMAND_OPTIONS_BY_ID.repository.description,
+      }),
+      repositoryAlias: canonOption("--repo", z.string(), {
+        metavar: "repository",
+        description: COMMAND_OPTIONS_BY_ID.repository.description,
+      }),
+      from: canonOption("--from", z.string(), {
+        metavar: "path",
+        description: COMMAND_OPTIONS_BY_ID.from.description,
+        required: requiresFrom,
+      }),
+    },
+    result: z.number().int().nonnegative(),
+  };
+}
+
+/** Canon is the sole Branch observation route/grammar owner. */
+export const BRANCH_OBSERVATION_COMMANDS = defineCommands({
+  "branch.check": branchObservationCommand(
+    ["branch", "check"],
+    "Compare a desired semantic Branch projection with bounded GitHub observation.",
+    false,
+  ),
+  "branch.semantic.check": branchObservationCommand(
+    ["branch", "semantic", "check"],
+    "Compare a desired semantic Branch projection with bounded GitHub observation.",
+    true,
+  ),
+});
+
+type BranchObservationCommandId = keyof typeof BRANCH_OBSERVATION_COMMANDS;
+
+function branchOptionId(key: string): OptionId {
+  if (key === "repositoryAlias") return "repository";
+  if (key === "template" || key === "repository" || key === "from") return key;
+  throw new Error(`Unsupported Canon Branch option field: ${key}`);
+}
+
+/**
+ * `projectCommandContract`, Skill references, and legacy Core Help still consume
+ * CommandDefinition. Keep this compatibility projection derived from Canon
+ * until those consumers share Canon-native projections.
+ */
+const BRANCH_COMMAND_COMPATIBILITY_PROJECTIONS: readonly CommandDefinition[] = (
+  Object.keys(BRANCH_OBSERVATION_COMMANDS) as BranchObservationCommandId[]
+).map((id) => {
+  const canonical = BRANCH_OBSERVATION_COMMANDS[id];
+  const optionFields = Object.entries(canonical.input).flatMap(([key, field]) =>
+    field.kind === "option" ? [{ key, field }] : [],
+  );
+  const positionalField = Object.entries(canonical.input).find(([, field]) => field.kind === "positional");
+  const optionIds: OptionId[] = ["help", "json"];
+  const requiredOptionIds: OptionId[] = [];
+  for (const { key, field } of optionFields) {
+    const optionId = branchOptionId(key);
+    if (!optionIds.includes(optionId)) optionIds.push(optionId);
+    if (field.required && !requiredOptionIds.includes(optionId)) requiredOptionIds.push(optionId);
+  }
+  const positionalSyntax =
+    positionalField === undefined
+      ? undefined
+      : `${positionalField[1].required ? "<" : "["}${positionalField[1].metavar ?? positionalField[0]}${positionalField[1].required ? ">" : "]"}`;
+
+  return {
+    id,
+    domain: "branch",
+    operation: canonical.route.slice(1).join("-"),
+    path: canonical.route,
+    ...(positionalSyntax === undefined ? {} : { positionalSyntax }),
+    requiredOptionIds,
+    summary: canonical.summary,
+    optionIds,
+  };
+});
 
 const command = (
   id: CommandId,
@@ -1458,24 +1552,7 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "<number>",
     "--from <frontier-evidence.json>",
   ),
-  command(
-    "branch.check",
-    "branch",
-    "check",
-    ["branch", "check"],
-    "Compare a desired semantic Branch projection with bounded GitHub observation.",
-    ["help", "json", "template", "repository", "from"],
-    "<name>",
-  ),
-  command(
-    "branch.semantic.check",
-    "branch",
-    "semantic-check",
-    ["branch", "semantic", "check"],
-    "Compare a desired semantic Branch projection with bounded GitHub observation.",
-    ["help", "json", "template", "repository", "from"],
-    "<name>",
-  ),
+  ...BRANCH_COMMAND_COMPATIBILITY_PROJECTIONS,
   command("template.list", "template", "list", ["template", "list"], "List discovered native and semantic templates.", [
     "help",
     "json",
@@ -2141,12 +2218,10 @@ export function commandUsage(entry: CommandDefinition): string {
     .map((id) => {
       const optionDefinition = getOption(id);
       const required =
+        entry.requiredOptionIds?.includes(id) === true ||
         ((entry.id === "issue.create" || entry.id === "pr.create") &&
           (id === "title" || (entry.id === "pr.create" && (id === "head" || id === "base")))) ||
-        ((entry.id === "issue.semantic.check" ||
-          entry.id === "pr.semantic.check" ||
-          entry.id === "branch.semantic.check") &&
-          id === "from") ||
+        ((entry.id === "issue.semantic.check" || entry.id === "pr.semantic.check") && id === "from") ||
         (entry.id === "pr.comment" && id === "rawBody") ||
         (entry.id === "pr.review" && (id === "expectedHead" || id === "reviewIntent")) ||
         (entry.id === "pr.merge" && (id === "expectedHead" || id === "expectedBase" || id === "mergeStrategy")) ||
