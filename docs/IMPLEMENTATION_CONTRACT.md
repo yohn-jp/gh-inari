@@ -281,6 +281,18 @@ The accepted topology may be:
 Implementation leaf -> Source integration -> Epic integration -> default
 ```
 
+Local Source or Epic integration branch and Draft PR publication requires
+separate current Runtime-owned exact grants: `branch.create` for branch
+creation and `pullRequest.create` for Draft PR creation. Each grant binds the
+immutable repository, integration role, exact Source or Epic, and exact
+branch/head/base. A grant for one operation does not authorize the other.
+Admission intersects each grant with current repository policy for each
+operation. Local operator authentication alone does not grant either
+operation. Executor performs the admitted provider effects as Inari Access.
+These grants are not added to an Implementation Session. The preceding
+#1213 compatibility bridge remains limited to same-task leaf publication
+through its original expiry or explicit reissue.
+
 Standalone work remains supported through its explicit route. Do not invent
 an integration hierarchy where none is required. Existing in-flight topology
 is not silently rerouted by document or branch-name changes.

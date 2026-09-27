@@ -73,6 +73,19 @@ configuration boundary. That owner producer does not make Admission a
 credential store or let Hosted issue semantic grants. Admission's current-
 grant consumer must fail closed when the owner evidence is unavailable.
 
+For local Source or Epic integration publication, an authenticated local
+operator needs a separate current Runtime-owned exact grant for each
+operation: `branch.create` for branch creation and `pullRequest.create` for
+Draft PR creation. Each grant binds the `source-integration` or
+`epic-integration` role, immutable repository, exact Source or Epic, and exact
+branch/head/base. Neither grant authorizes the other operation. Admission
+rereads its grant and current repository, branch, head, base, and policy
+evidence for each operation and intersects them before effect; unavailable,
+stale, revoked, or mismatched evidence denies. Local operator authentication
+alone does not authorize either mutation. Executor performs admitted effects
+with Inari Access; operator credentials do not enter Admission or provider
+execution.
+
 ### Executor
 
 Executor owns Inari Access App-scoped custody, installation/repository

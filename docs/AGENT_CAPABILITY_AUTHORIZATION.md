@@ -387,6 +387,12 @@ Enrollment, delegation, trust publication, configuration changes, reviews,
 and merges retain their own authority boundaries. Remote identity does not
 implicitly make the caller a local operator.
 
+An authenticated local operator is distinct from both a delegated local
+Session and a remote Repository Access Assertion. Local authentication
+identifies the operator; it does not by itself grant Source or Epic
+integration publication authority, and the local path does not require GitHub
+OAuth.
+
 ## 9. Session Certificate V1 reference
 
 This section preserves the existing representation contract for bounded
@@ -487,6 +493,21 @@ targets. Admission matches that grant to the assertion and request, then
 intersects it with current repository/task policy, state, and provider-effect
 limits. Hosted eligibility and assertion validity do not supply the semantic
 grant.
+
+For local Source or Epic integration branch and Draft PR publication,
+Admission separately requires a current Runtime-owned exact grant for each
+semantic operation: `branch.create` for the branch and `pullRequest.create`
+for the Draft PR. Each grant binds publication role (`source-integration` or
+`epic-integration`), immutable repository identity, exact Source or Epic, and
+the exact branch/head/base. Neither operation grant implies the other. For
+each operation, Admission rereads its grant and current repository, branch,
+head, base, and policy evidence, then intersects them before effect. Missing,
+stale, revoked, unavailable, or mismatched evidence denies. Executor performs
+admitted effects using Inari Access; operator credentials are not stored by
+Admission or used for provider execution. These grants do not become a
+Source/Epic delegation claim in an Implementation Session. Sessions remain
+leaf-scoped, and the existing #1213 bridge remains only for valid same-task
+leaf publication through original expiry or reissue.
 
 No later layer adds a permission absent from an earlier required gate.
 
