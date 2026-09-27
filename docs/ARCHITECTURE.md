@@ -202,6 +202,28 @@ semantic operation IDs, an immutable repository ID, and exact targets. A
 grant cannot widen current Implementation authorization, Source membership,
 branch/base, execution scope, or effect preconditions.
 
+For local Source or Epic integration branch and Draft PR publication, local
+operator authentication alone is not mutation authority. Admission requires
+a separate current Runtime-owned exact grant for each semantic operation:
+`branch.create` for integration-branch creation and `pullRequest.create` for
+Draft PR creation. Each grant binds the `source-integration` or
+`epic-integration` role, immutable repository, exact Source or Epic, and exact
+branch/head/base. Neither grant authorizes the other operation. For every
+operation, Admission rereads its grant and current repository, branch, head,
+base, and policy evidence, then intersects them before effect. Unavailable,
+stale, revoked, or mismatched evidence denies. Executor performs each
+admitted effect as Inari Access without passing operator credentials to
+Admission or provider execution. Local GitHub OAuth is not required. No
+Source/Epic delegation claim is issued and Implementation Sessions remain
+leaf-scoped. The existing #1213 bridge remains limited to valid same-task
+leaf publication through original expiry or explicit reissue.
+
+The grant role `source-integration` is distinct from the current PR
+publication work-identity token `issue-integration`. The `pr-publication`
+consumer accepts that token only after validating its Source and Epic
+references against current exact routing; the token identifies a publication
+and supplies no Admission authority.
+
 For newly authorized Implementation task Sessions, the Runtime Authority
 ceiling and Authority-signed Session binding explicitly include
 `pullRequest.create` only when current repository and task policy authorize
