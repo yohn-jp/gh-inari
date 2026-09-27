@@ -103,6 +103,13 @@ An Implementation may name multiple canonical Sources. That set narrows which
 Source operations may be requested, but it does not create multiple implicit
 integration parents or permit arbitrary PR targeting.
 
+Task termination is a separate event owned by the Implementation lifecycle.
+An explicitly authorized Runtime operator finalizes a versioned record owned
+by the repository and bound to its immutable identity, this Implementation,
+the current authorization digest, and accepted base evidence. A Source Change
+abort, Issue closure, or Session's own abort assertion cannot finalize the
+task event.
+
 ### 4.5 Session
 
 A local Session binding carries the Implementation task, permitted claims,
@@ -113,6 +120,14 @@ Implementation contract's Source set.
 Adding a Source later does not widen an issued Session. Removing a Source
 prevents subsequent Source operations. Task/body/base/branch freshness remain
 separate checks.
+
+Admission rereads current task-termination evidence for each task-bound
+operation, including an operation from an already issued Session. A successful
+authoritative read showing no termination event means the Implementation is
+not terminated; all other Admission checks still apply. A terminated
+Implementation makes all of its Sessions fail closed. A failed or unavailable
+read, or invalid or mismatched current evidence, denies. Closing a Session only
+closes that Session and does not terminate its Implementation task.
 
 The existing task-bound `change.implement` compatibility claim serves only
 Implementation publication and branch-side composition. It cannot authorize
@@ -152,6 +167,13 @@ record as a Source-root record merely because relationships now exist.
 Bounded historical observation/adoption may remain. A compatibility reader
 must produce an explicit canonical or historical classification and must not
 preserve an independent old execution engine.
+
+An Implementation-root Change abort can remain readable as historical data,
+but it does not authorize new task termination or substitute for Admission's
+current task-evidence check. Current code still projects Implementation
+`aborted` from a bound ABORTED Change identity; migrate that producer/consumer
+path to the versioned repository-owned task record while retaining only the
+bounded historical read.
 
 ## 5. Domain invariants
 
