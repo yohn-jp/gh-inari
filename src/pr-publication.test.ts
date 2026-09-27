@@ -168,6 +168,33 @@ test("exact retry returns the existing identity without creating again", async (
   assert.deepEqual(provider.calls, ["list"]);
 });
 
+test("historical Implementation markers must be complete terminal comments", async () => {
+  const marker = `<!-- inari:pr-publication ${JSON.stringify({ implementation })} -->`;
+  const candidate: PrPublicationRecord = {
+    number: 42,
+    url: "https://github.com/acme/inari/pull/42",
+    title: "feat: publish governed work",
+    body: `Closes #700\n${marker}`,
+    head: "feat/700-publication",
+    base: "issue/680-integration",
+    headRevision: "a".repeat(40),
+    repository,
+  };
+
+  const exactProvider = fakeProvider([candidate]);
+  const exact = await publishPullRequest(request(), exactProvider);
+  assert.equal(exact.classification, "returned-existing");
+  assert.deepEqual(exactProvider.calls, ["list"]);
+
+  for (const body of [`${candidate.body}\nUnbound trailing text`, `Closes #700\n${marker.slice(0, -4)}`]) {
+    const provider = fakeProvider([{ ...candidate, body }]);
+    const result = await publishPullRequest(request(), provider);
+    assert.equal(result.classification, "failed");
+    assert.ok(result.diagnostics.some((entry) => entry.code === "PR_PUBLICATION_CONFLICTING_MATCH"));
+    assert.deepEqual(provider.calls, ["list"]);
+  }
+});
+
 test("Source and Epic integrations publish and reread their own role identities", async () => {
   for (const role of ["issue-integration", "epic-integration"] as const) {
     const input = integrationRequest(role);

@@ -568,8 +568,10 @@ function bodyMarker(
   if (typeof body !== "string") return undefined;
   const start = body.lastIndexOf("inari:pr-publication ");
   if (start < 0) return undefined;
-  const match = /inari:pr-publication\s+(\{[^\r\n]*\})(?:\s+-->)?/u.exec(body.slice(start));
+  const match = /inari:pr-publication\s+(\{[^\r\n]*\})\s+-->/u.exec(body.slice(start));
   if (match === null || /inari:pr-publication\s+\{/u.test(body.slice(0, start))) return { invalid: true };
+  const markerStart = start >= 5 && body.slice(start - 5, start) === "<!-- " ? start - 5 : -1;
+  if (markerStart < 0 || body.slice(markerStart).trim() !== `<!-- ${match[0]}`) return { invalid: true };
   let parsed: unknown;
   try {
     parsed = JSON.parse(match[1]!);
@@ -579,11 +581,9 @@ function bodyMarker(
   const evidence = parseMarkerValue(parsed);
   if ("invalid" in evidence) return evidence;
   if ("historical" in evidence) {
-    const markerStart = start >= 5 && body.slice(start - 5, start) === "<!-- " ? start - 5 : start;
     return { historical: evidence.historical, bodyContent: body.slice(0, markerStart).replace(/\r?\n$/u, "") };
   }
   if (evidence.current.bodyLength > body.length) return { invalid: true };
-  const markerStart = start >= 5 && body.slice(start - 5, start) === "<!-- " ? start - 5 : start;
   const bodyContent = body.slice(0, evidence.current.bodyLength);
   const separator = bodyContent.length === 0 || bodyContent.endsWith("\n") || bodyContent.endsWith("\r") ? "" : "\n";
   if (
