@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cliFailure, jsonOutput, type CliOutcome } from "@yohn-jp/cli-canon";
+import { cliFailure, jsonOutput, textOutput, type CliOutcome } from "@yohn-jp/cli-canon";
 import { runNodeCli, type CliResult } from "@yohn-jp/cli-canon/node";
 import packageJson from "../package.json" with { type: "json" };
 import type { ProductPackageIdentity } from "@yohn-jp/cli-canon";
@@ -132,6 +132,74 @@ function routeFirstTransitionArgv(argv: readonly string[]): readonly string[] {
     return [...command.path, ...prefix, ...argv.slice(index + command.path.length)];
   }
   return argv;
+}
+
+/**
+ * CLI Canon 0.2 cannot parse product options before a command route. Preserve
+ * only branch observation prefixes whose flags come from that compiled
+ * command's fields; unknown, incomplete, duplicate, or ambiguous prefixes
+ * stay in place for Canon to reject.
+ */
+function branchPrefixTransitionArgv(
+  argv: readonly string[],
+  product: ReturnType<typeof compileInariCliProduct>,
+): readonly string[] | undefined {
+  const branchCommands = product.commands.filter(
+    (command) => command.id === "branch.check" || command.id === "branch.semantic.check",
+  );
+  const matches = branchCommands.flatMap((command) =>
+    argv.flatMap((_token, index) =>
+      command.route.every((segment, routeIndex) => argv[index + routeIndex] === segment) ? [{ command, index }] : [],
+    ),
+  );
+  if (matches.length === 0) return undefined;
+  if (matches.length !== 1) return argv;
+  const match = matches[0];
+  if (match === undefined || match.index === 0) return argv;
+
+  if (
+    argv.includes("--") ||
+    argv.some((token) => {
+      const name = token?.split("=", 1)[0];
+      return name === "--help" || name === "-h" || name === "--version";
+    })
+  ) {
+    return argv;
+  }
+
+  const prefix = argv.slice(0, match.index);
+  const flags = new Map<string, (typeof match.command.fields)[number]>();
+  for (const field of match.command.fields) {
+    if ((field.kind !== "option" && field.kind !== "flag") || field.flag === undefined) continue;
+    for (const candidate of [field.flag, ...(field.aliases ?? [])]) {
+      if (flags.has(candidate)) return argv;
+      flags.set(candidate, field);
+    }
+  }
+
+  const occurrences = new Map<string, number>();
+  for (let index = 0; index < prefix.length; index += 1) {
+    const token = prefix[index];
+    if (token === undefined || !token.startsWith("-") || token === "-") return argv;
+    const equals = token.indexOf("=");
+    const flag = equals < 0 ? token : token.slice(0, equals);
+    const field = flags.get(flag);
+    if (field === undefined) return argv;
+    const optionKey = field.key === "repositoryAlias" ? "repository" : field.key;
+    const count = (occurrences.get(optionKey) ?? 0) + 1;
+    if (count > 1 && field.repeatable !== true) return argv;
+    occurrences.set(optionKey, count);
+
+    if (field.kind === "flag") {
+      if (equals >= 0) return argv;
+      continue;
+    }
+    if (equals >= 0) continue;
+    if (prefix[index + 1] === undefined) return argv;
+    index += 1;
+  }
+
+  return [...match.command.route, ...prefix, ...argv.slice(match.index + match.command.route.length)];
 }
 
 /**
@@ -355,7 +423,11 @@ function projectArtifactReconciliationResult(result: ArtifactReconciliationResul
 
 /** The public CLI enters the compiled CLI Canon product and its standard shell. */
 export async function runCli(argv: string[], dependencies: CliDependencies = {}): Promise<number> {
-  const normalizedArgv = routeFirstTransitionArgv(namedDiagnosticAliasArgv(argv));
+  const namedArgv = namedDiagnosticAliasArgv(argv);
+  const metadata = (dependencies.packageMetadata ?? packageJson) as ProductPackageIdentity;
+  const product = compileInariCliProduct(metadata, packageJson.description, dependencies);
+  const branchArgv = branchPrefixTransitionArgv(namedArgv, product);
+  const normalizedArgv = branchArgv ?? routeFirstTransitionArgv(namedArgv);
   if (isValidatedSetupParentTransition(normalizedArgv)) return runCoreCli([...normalizedArgv], dependencies);
 
   const delegated = createLegacyDelegatedCommandSource(async (request) => {
@@ -368,12 +440,15 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         : await runCoreCli(delegatedArgv, dependencies);
     return { exitCode, stdout: "", stderr: "" };
   });
-  const metadata = (dependencies.packageMetadata ?? packageJson) as ProductPackageIdentity;
-  const product = compileInariCliProduct(metadata, packageJson.description, dependencies);
   const result = await runNodeCli(product, normalizedArgv, {
     delegatedSources: [delegated],
     resultPresenter: {
-      success: (execution) => projectArtifactReconciliationResult(execution.result as ArtifactReconciliationResult),
+      success: (execution) => {
+        if (execution.commandId === "branch.check" || execution.commandId === "branch.semantic.check") {
+          return execution.result === 0 ? textOutput("") : cliFailure("domain", "", execution.result, "stdout");
+        }
+        return projectArtifactReconciliationResult(execution.result as ArtifactReconciliationResult);
+      },
     },
   });
   writeCliResult(result, dependencies);

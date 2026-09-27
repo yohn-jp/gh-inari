@@ -99,11 +99,27 @@ test("derived delegated route owners resolve a product route and a prefix route"
   });
   const compiled = product();
 
-  const route = await runNodeCli(compiled, ["branch", "check", "feat/1255-cli-shell", "--json"], {
+  assert.equal(
+    delegated.commands.some(
+      (command) => command.id.includes("branch.check") || command.id.includes("branch.semantic.check"),
+    ),
+    false,
+  );
+
+  const ordinaryBranchHelp = await runNodeCli(compiled, ["branch", "check", "--help"], {
     delegatedSources: [delegated],
   });
-  assert.equal(route.exitCode, 0);
-  assert.equal(route.stdout, "branch check delegated\n");
+  assert.equal(ordinaryBranchHelp.exitCode, 0);
+  assert.match(ordinaryBranchHelp.stdout, /Usage: inari branch check <name>/);
+  assert.match(ordinaryBranchHelp.stdout, /\[--from <path>\]/);
+
+  const semanticBranchHelp = await runNodeCli(compiled, ["branch", "semantic", "check", "--help"], {
+    delegatedSources: [delegated],
+  });
+  assert.equal(semanticBranchHelp.exitCode, 0);
+  assert.match(semanticBranchHelp.stdout, /Usage: inari branch semantic check <name>/);
+  assert.match(semanticBranchHelp.stdout, /--from <path>/);
+  assert.doesNotMatch(semanticBranchHelp.stdout, /\[--from <path>\]/);
 
   const setupChild = await runNodeCli(
     compiled,
@@ -123,13 +139,6 @@ test("derived delegated route owners resolve a product route and a prefix route"
   assert.equal(setupConsole.exitCode, 0);
 
   assert.deepEqual(requests, [
-    {
-      sourceId: "inari-legacy-command-core",
-      commandId: "branch.check",
-      route: ["branch", "check"],
-      argv: ["feat/1255-cli-shell"],
-      presentation: "machine",
-    },
     {
       sourceId: "inari-legacy-command-core",
       commandId: "setup.status",

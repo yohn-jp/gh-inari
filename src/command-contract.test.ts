@@ -5,6 +5,7 @@ import {
   RUNTIME_CAPABILITIES,
   COMMAND_CONTRACT_ID,
   COMMAND_CONTRACT_VERSION,
+  BRANCH_OBSERVATION_COMMANDS,
   INARI_COMMANDS,
   commandExample,
   commandInvocation,
@@ -162,6 +163,30 @@ test("pr routing exposes the read-only canonical routing input", () => {
   assert.equal(command.id, "pr.routing");
   assert.deepEqual(command.optionIds, ["help", "json", "from"]);
   assert.match(commandUsage(command), /--from <path>/);
+});
+
+test("branch observation contract keeps ordinary input optional and semantic input required", () => {
+  const ordinary = getCommandForPositionals(["branch", "check", "feat/example"]);
+  const semantic = getCommandForPositionals(["branch", "semantic", "check", "feat/example"]);
+  assert.equal(ordinary?.id, "branch.check");
+  assert.equal(semantic?.id, "branch.semantic.check");
+  assert.deepEqual(ordinary?.optionIds, ["help", "json", "template", "repository", "from"]);
+  assert.deepEqual(semantic?.optionIds, ["help", "json", "template", "repository", "from"]);
+  assert.deepEqual(ordinary?.requiredOptionIds, []);
+  assert.deepEqual(semantic?.requiredOptionIds, ["from"]);
+  assert.equal(BRANCH_OBSERVATION_COMMANDS["branch.check"].input.from.required, false);
+  assert.equal(BRANCH_OBSERVATION_COMMANDS["branch.semantic.check"].input.from.required, true);
+  assert.match(commandUsage(ordinary!), /\[--from <path>\]/);
+  assert.match(commandUsage(semantic!), /--from <path>/);
+  assert.doesNotMatch(commandUsage(semantic!), /\[--from <path>\]/);
+  assert.equal(commandExample("branch.semantic.check"), "inari branch semantic check <name>");
+  const projected = projectCommandContract().commands.find((command) => command.id === "branch.semantic.check");
+  assert.ok(projected);
+  assert.deepEqual(projected.path, BRANCH_OBSERVATION_COMMANDS["branch.semantic.check"].route);
+  assert.deepEqual(
+    projected.options.find((option) => option.id === "repository")?.aliases,
+    getOption("repository").aliases,
+  );
 });
 
 test("pr publish exposes the explicit idempotent publication request", () => {

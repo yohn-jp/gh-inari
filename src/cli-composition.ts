@@ -10,8 +10,13 @@ import type { NodeDelegatedCommandSource } from "@yohn-jp/cli-canon/node";
 import type { CliResult } from "@yohn-jp/cli-canon/node";
 import type { ProductPackageIdentity } from "@yohn-jp/cli-canon";
 import { z } from "zod";
-import { executeCliArtifactReconciliation, type CliDependencies } from "./cli-core.js";
 import {
+  executeCliArtifactReconciliation,
+  runSemanticBranchObservationCommand,
+  type CliDependencies,
+} from "./cli-core.js";
+import {
+  BRANCH_OBSERVATION_COMMANDS,
   getOption,
   INARI_COMMANDS,
   commandExample,
@@ -23,6 +28,7 @@ import {
 const PRODUCT_NAME = "inari";
 const DELEGATED_SOURCE_ID = "inari-legacy-command-core";
 const RESERVED_SHELL_FLAGS = new Set(["--help", "-h", "--version", "--json"]);
+const CANON_BRANCH_COMMAND_IDS = new Set(["branch.check", "branch.semantic.check"]);
 const ARTIFACT_NUMBER = z
   .string()
   .regex(/^[1-9]\d*$/u, "expected a positive integer")
@@ -72,17 +78,36 @@ function artifactReconciliationHandlers(dependencies: CliDependencies) {
   });
 }
 
+function branchObservationHandlers(dependencies: CliDependencies) {
+  return bindHandlers(BRANCH_OBSERVATION_COMMANDS)({
+    "branch.check": ({ name, template, repository, repositoryAlias, from }) =>
+      runSemanticBranchObservationCommand(
+        { operation: "branch.check", branchName: name, template, repository, repositoryAlias, from },
+        dependencies,
+      ),
+    "branch.semantic.check": ({ name, template, repository, repositoryAlias, from }) =>
+      runSemanticBranchObservationCommand(
+        { operation: "branch.semantic.check", branchName: name, template, repository, repositoryAlias, from },
+        dependencies,
+      ),
+  });
+}
+
 export function compileInariCliProduct(
   packageMetadata: ProductPackageIdentity,
   description: string,
   dependencies: CliDependencies = {},
 ) {
+  const commands = { ...ARTIFACT_RECONCILIATION_COMMANDS, ...BRANCH_OBSERVATION_COMMANDS };
   return compileProduct({
     name: PRODUCT_NAME,
     description,
     packageMetadata,
-    commands: ARTIFACT_RECONCILIATION_COMMANDS,
-    handlers: artifactReconciliationHandlers(dependencies),
+    commands,
+    handlers: {
+      ...artifactReconciliationHandlers(dependencies),
+      ...branchObservationHandlers(dependencies),
+    },
   });
 }
 
@@ -198,7 +223,7 @@ function routeCommands(): readonly {
 }[] {
   const byRoute = new Map<string, CommandDefinition[]>();
   for (const entry of INARI_COMMANDS) {
-    if (entry.path.length === 0) continue;
+    if (entry.path.length === 0 || CANON_BRANCH_COMMAND_IDS.has(entry.id)) continue;
     const key = routeKey(entry.path);
     const existing = byRoute.get(key);
     if (existing === undefined) byRoute.set(key, [entry]);

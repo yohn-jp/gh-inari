@@ -541,9 +541,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     if (domain === "issue" || domain === "pr") {
       return await runArtifactCommand(domain, command, rest, parsed, root, dependencies, json);
     }
-    if (domain === "branch") {
-      return await runSemanticBranchObservationCommand(command, rest, parsed, root, dependencies);
-    }
     if (domain === "skill") {
       return runSkillCommand(command, json);
     }
@@ -5076,45 +5073,47 @@ async function runSemanticObservationCheckCommand(
   return comparison.valid ? 0 : EXIT_VALIDATION;
 }
 
-async function runSemanticBranchObservationCommand(
-  command: string | undefined,
-  rest: readonly string[],
-  parsed: ParsedArgs,
+export interface SemanticBranchObservationInput {
+  readonly operation: "branch.check" | "branch.semantic.check";
+  readonly branchName: string;
+  readonly from: string | undefined;
+  readonly repository: string | undefined;
+  readonly repositoryAlias: string | undefined;
+  readonly template: string | undefined;
+}
+
+/** Typed CLI adapter for the existing semantic Branch observation operation. */
+export async function runSemanticBranchObservationCommand(
+  input: SemanticBranchObservationInput,
+  dependencies: CliDependencies = {},
+): Promise<number> {
+  const root = path.resolve(dependencies.repositoryRoot ?? process.cwd());
+  try {
+    return await executeSemanticBranchObservation(input, root, dependencies);
+  } catch (error: unknown) {
+    // Branch observations have always used the machine error envelope, including
+    // when --json is absent. Keep that product error projection at the Core edge.
+    console.log(JSON.stringify({ ok: false, error: toErrorShape(error) }));
+    return classifyExitCode(error);
+  }
+}
+
+async function executeSemanticBranchObservation(
+  input: SemanticBranchObservationInput,
   root: string,
   dependencies: CliDependencies,
 ): Promise<number> {
-  const branchCheck =
-    command === "check" ? rest : command === "semantic" && rest[0] === "check" ? rest.slice(1) : undefined;
-  if (branchCheck === undefined) {
-    throw new CliError("UNKNOWN_COMMAND", `Unknown branch command "${command ?? ""}".`);
-  }
-  if (branchCheck.length !== 1) throw new CliError("INVALID_BRANCH_NAME", "Branch name is required.", "$argv[2]");
-  const branchName = branchCheck[0];
-  const operation = command === "check" ? "branch.check" : "branch.semantic.check";
+  const { branchName, operation, from, repository, template } = input;
   if (branchName.length === 0 || branchName.length > 512 || /[\u0000-\u001F\u007F]/u.test(branchName)) {
     throw new CliError("INVALID_BRANCH_NAME", "Branch name is invalid.", "$argv[2]");
   }
-  const unsupported = Object.keys(parsed.options).find(
-    (key) => !["json", "template", "repository", "from"].includes(key),
-  );
-  if (unsupported !== undefined) {
-    const option = getOption(unsupported as OptionId);
-    throw new CliError(
-      "INVALID_OPTION",
-      `Option ${option.aliases[0] ?? `--${option.key}`} is not supported by semantic Branch check.`,
-      "$argv",
-    );
+  if (repository !== undefined && input.repositoryAlias !== undefined) {
+    throw new CliError("INVALID_OPTION", "Specify only one repository option.", "$argv");
   }
-  if (parsed.capabilities.length > 0 || parsed.fields.length > 0) {
-    throw new CliError("INVALID_OPTION", "Semantic Branch check does not accept capability or field input.", "$argv");
-  }
-  const input = await readJsonValue(parsed.options.from);
-  const adapter = createAdapter(dependencies, root, parsed.options.repository);
-  const effectiveContract = await compileRepositoryEffectiveBranchContract(
-    adapter,
-    templateSelector(parsed, undefined),
-  );
-  const materialization = tryMaterializeSemanticArtifact(effectiveContract, input);
+  const artifactInput = await readJsonValue(from);
+  const adapter = createAdapter(dependencies, root, repository ?? input.repositoryAlias);
+  const effectiveContract = await compileRepositoryEffectiveBranchContract(adapter, template);
+  const materialization = tryMaterializeSemanticArtifact(effectiveContract, artifactInput);
   if (!materialization.valid || materialization.artifact === undefined) {
     console.log(
       JSON.stringify(
