@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { removeHtmlComments } from "./artifact.js";
+import { parseMarkdownStructure } from "./markdown-ast.js";
 import { issueReferenceKey, normalizeIssueReference, type IssueReference } from "./contract/issue-reference.js";
 import { type JsonSchema, type JsonSchemaDocument } from "./contract/schema.js";
 import { JSON_SCHEMA_DIALECT } from "./contract/ir.js";
@@ -1248,14 +1249,29 @@ export function parseImplementationIssueBody(body: string): ImplementationIssueB
         },
       ],
     };
-  const source = removeHtmlComments(body).replace(/\r\n?/gu, "\n").trim();
-  const lines = source.split("\n");
+  const markdown = parseMarkdownStructure(body);
+  const lineCount = body.replace(/^\uFEFF/u, "").split(/\r\n|\r|\n/u).length;
+  const sliceLines = (startLine: number, endLine: number): string =>
+    startLine > endLine ? "" : markdown.sourceSlice({ startLine, endLine });
+  const fieldContent = (startLine: number, endLine: number): string =>
+    removeHtmlComments(sliceLines(startLine, endLine)).trim();
   const headings = bodyHeadingMap();
+  const fieldHeadings = markdown.headings.filter((heading) => heading.depth === 3);
   const fields: Record<string, string> = {};
   let current: ImplementationTemplateFieldId | undefined;
-  let buffer: string[] = [];
-  const flush = (): void => {
-    if (current === undefined) return;
+  let contentStartLine = fieldHeadings[0] === undefined ? lineCount + 1 : fieldHeadings[0].endLine + 1;
+  const flush = (endLine: number): void => {
+    const value = fieldContent(contentStartLine, endLine);
+    if (current === undefined) {
+      if (value.length > 0)
+        addViolation(
+          violations,
+          "IMPLEMENTATION_BODY_INVALID",
+          "$",
+          "Content must be inside a canonical Implementation field.",
+        );
+      return;
+    }
     if (Object.hasOwn(fields, current)) {
       addViolation(
         violations,
@@ -1264,38 +1280,32 @@ export function parseImplementationIssueBody(body: string): ImplementationIssueB
         "Issue body field appears more than once.",
       );
     } else {
-      fields[current] = buffer.join("\n").trim();
+      fields[current] = value;
     }
   };
-  for (const line of lines) {
-    const heading = /^###\s+(.+?)\s*$/u.exec(line);
-    if (heading !== null) {
-      flush();
-      const id = headings.get(heading[1] as string);
-      if (id === undefined) {
-        addViolation(
-          violations,
-          "IMPLEMENTATION_BODY_UNKNOWN_HEADING",
-          "$",
-          `Unknown Implementation heading "${heading[1]}".`,
-        );
-        current = undefined;
-      } else {
-        current = id;
-      }
-      buffer = [];
-      continue;
-    }
-    if (current !== undefined) buffer.push(line);
-    else if (line.trim().length > 0)
+  const firstHeading = fieldHeadings[0];
+  if (fieldContent(1, (firstHeading?.startLine ?? lineCount + 1) - 1).length > 0)
+    addViolation(
+      violations,
+      "IMPLEMENTATION_BODY_INVALID",
+      "$",
+      "Content must be inside a canonical Implementation field.",
+    );
+
+  for (const [index, heading] of fieldHeadings.entries()) {
+    if (index > 0) flush(heading.startLine - 1);
+    const label = removeHtmlComments(heading.title).trim();
+    current = headings.get(label);
+    if (current === undefined)
       addViolation(
         violations,
-        "IMPLEMENTATION_BODY_INVALID",
+        "IMPLEMENTATION_BODY_UNKNOWN_HEADING",
         "$",
-        "Content must be inside a canonical Implementation field.",
+        `Unknown Implementation heading "${label}".`,
       );
+    contentStartLine = heading.endLine + 1;
   }
-  flush();
+  flush(lineCount);
   if (violations.length > 0) return { valid: false, violations };
   const result = implementationContractFromIssueFields(fields);
   return result.valid
