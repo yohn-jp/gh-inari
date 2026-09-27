@@ -166,6 +166,15 @@ Source acceptance record for the exact composed Source candidate. It binds
 immutable repository and Source identities, the governed Source integration PR,
 its exact head revision, the current Source criteria version/digest, reviewer
 identity and current authority, and an explicit result for each criterion.
+The sole reviewer authorization source is the versioned, repository-owned
+Source Acceptance Policy on the protected canonical ref. Its immutable GitHub
+userId allowlist is bound to repository identity, protected-ref tree/source
+digest, and policy generation. The reviewer must be a currently authorized
+human independent of the Source requester, Source integration PR author, and
+every human author or provider-proven co-author of the complete exact-head PR
+commit set. Unresolved identity or incomplete candidate evidence fails closed.
+The [Source Acceptance Policy](./SOURCE_ACCEPTANCE_POLICY.md) owns the detailed
+reviewer-independence and current-evidence contract.
 Current Change `ACCEPTED` policy evidence remains necessary for its Change;
 checks, reviews, and merge policy alone do not establish Source criteria
 acceptance. Source completion requires the current record and composed
@@ -546,6 +555,8 @@ not Inari permissions or provider behavior.
   attestation, request binding, issuer trust, and remote admission limits.
 - [Change Control Plane](./CHANGE_CONTROL_PLANE.md): identity, publication,
   lifecycle, idempotency, compensation, ready, abort, and merge boundaries.
+- [Source Acceptance Policy](./SOURCE_ACCEPTANCE_POLICY.md): protected-ref
+  reviewer authority, candidate contributor independence, and current use.
 - [XState](./XSTATE_CHANGE_MACHINE.md): executable lifecycle/operation control
   flow, bounded actor context, failure edges, and model proof.
 - [Implementation Contract](./IMPLEMENTATION_CONTRACT.md): bounded task,
