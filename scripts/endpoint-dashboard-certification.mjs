@@ -65,13 +65,10 @@ function hasCommit(ref) {
 function ensureCertificationRefs() {
   const shallow = run("git", ["rev-parse", "--is-shallow-repository"]) === "true";
   if (!shallow && hasCommit(CERTIFIED_EPIC_INTEGRATION_SHA) && hasCommit(MAIN_REF)) return;
-  run("git", [
-    "fetch",
-    "--no-tags",
-    ...(shallow ? ["--unshallow"] : []),
-    "origin",
-    "+refs/heads/main:refs/remotes/origin/main",
-  ]);
+  if (shallow) {
+    run("git", ["fetch", "--no-tags", "--unshallow", "origin"]);
+  }
+  run("git", ["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
 }
 
 function gitState() {
@@ -952,9 +949,11 @@ async function certifyDashboardBoundary(modules) {
   const onboardingAsset = path.join(dashboardDist, ".well-known", "inari");
   if (
     !fs.existsSync(path.join(dashboardDist, "index.html")) ||
-    !fs.existsSync(path.join(dashboardDist, "browser.js")) ||
-    !fs.existsSync(onboardingAsset)
+    !fs.existsSync(path.join(dashboardDist, "browser.js"))
   ) {
+    execFileSync("pnpm", ["--dir", "apps/dashboard", "build"], { cwd: repoRoot, stdio: "inherit" });
+  }
+  if (!fs.existsSync(onboardingAsset) || !fs.existsSync(path.join(dashboardDist, "_headers"))) {
     execFileSync("pnpm", ["run", "hosted-worker:build"], { cwd: repoRoot, stdio: "inherit" });
   }
   const shell = fs.readFileSync(path.join(dashboardDist, "index.html"), "utf8");
