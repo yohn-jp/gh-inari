@@ -8,6 +8,7 @@ import {
   CERTIFICATION_ENTRY_COMMANDS,
   REQUIRED_BIN_NAMES,
   freshEnvironment,
+  validatePackageIdentityOutput,
   validatePreflightOutput,
   validateSkillIndex,
   validateVersionOutput,
@@ -123,15 +124,17 @@ test("packed certification covers both executable names and the preflight entry 
   assert.deepEqual(
     CERTIFICATION_ENTRY_COMMANDS.map(({ args }) => args),
     [
-      ["--version", "--json"],
+      ["version", "--json"],
       ["--diagnose", "--json"],
       ["skill", "--json"],
     ],
   );
 });
 
-test("packed certification rejects runtime, preflight, and Skill contract drift", () => {
+test("packed certification rejects package, runtime, preflight, and Skill contract drift", () => {
   const expected = { name: "gh-inari", version: "0.7.0" };
+  assert.doesNotThrow(() => validatePackageIdentityOutput(expected, expected));
+  assert.throws(() => validatePackageIdentityOutput({ ...expected, extra: true }, expected), /package identity/u);
   assert.doesNotThrow(() => validateVersionOutput({ ok: true, ...expected, capabilities: ["runtime"] }, expected));
   assert.doesNotThrow(() =>
     validatePreflightOutput(
