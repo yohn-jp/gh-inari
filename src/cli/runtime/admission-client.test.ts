@@ -5,6 +5,7 @@ import * as compatibilityFacade from "../../local-control/admission-client.js";
 import * as launcherFacade from "../../local-control/session-launcher.js";
 import * as launcher from "./session-launcher.js";
 import * as client from "./admission-client.js";
+import type { LocalSessionBinding } from "../../local-control/session-binding.js";
 import type { ExecutionIntent } from "../../local-control/execution-intent.js";
 
 const TEST_ENDPOINT = "http://127.0.0.1:43123";
@@ -189,6 +190,80 @@ test("provider-backed branch policy remains bounded at 60 seconds", async () => 
   assert.deepEqual(timers.delays, [60_000]);
   assert.equal(timers.pendingCount, 0);
 });
+
+const TEST_SESSION_BINDING: LocalSessionBinding = {
+  version: 1,
+  sessionId: TEST_SESSION_ID,
+  repository: { id: "1330755860", name: "yohn-jp/gh-inari" },
+  task: { kind: "issue", number: 1350 },
+  capabilities: [],
+  authority: { id: "test-authority", publicKeyFingerprint: "a".repeat(64) },
+  iat: 1,
+  nbf: 1,
+  exp: 3601,
+  signature: "a".repeat(86),
+};
+
+for (const operation of ["registerSession", "closeSession"] as const) {
+  const method = operation === "registerSession" ? "POST" : "DELETE";
+  const path =
+    operation === "registerSession"
+      ? client.LOCAL_ADMISSION_CLIENT_SESSIONS_PATH
+      : `${client.LOCAL_ADMISSION_CLIENT_SESSIONS_PATH}/${TEST_SESSION_ID}`;
+  const status = operation === "registerSession" ? "active" : "closed";
+
+  test(`provider-backed ${operation} succeeds after 10 seconds`, async () => {
+    const timers = manualTimers();
+    const admission = client.createLocalAdmissionClient({
+      endpoint: TEST_ENDPOINT,
+      timers: timers.timers,
+      fetchImpl: async (input, init) => {
+        assert.equal(new URL(String(input)).pathname, path);
+        assert.equal(init?.method, method);
+        timers.advanceBy(13_800);
+        init?.signal?.throwIfAborted();
+        return jsonResponse({ ok: true, session: { id: TEST_SESSION_ID, status } });
+      },
+    });
+
+    assert.deepEqual(await admission[operation](TEST_SESSION_BINDING), { id: TEST_SESSION_ID, status });
+    assert.deepEqual(timers.delays, [60_000]);
+    assert.equal(timers.now, 13_800);
+    assert.equal(timers.pendingCount, 0);
+  });
+
+  test(`provider-backed ${operation} remains bounded at 60 seconds`, async () => {
+    const timers = manualTimers();
+    let calls = 0;
+    const admission = client.createLocalAdmissionClient({
+      endpoint: TEST_ENDPOINT,
+      timers: timers.timers,
+      fetchImpl: (input, init) => {
+        calls += 1;
+        assert.equal(new URL(String(input)).pathname, path);
+        assert.equal(init?.method, method);
+        return new Promise<Response>((_resolve, reject) => {
+          assert.ok(init?.signal);
+          init.signal.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      },
+    });
+    const result = admission[operation](TEST_SESSION_BINDING).then(
+      () => assert.fail("Session lifecycle unexpectedly succeeded"),
+      (error: unknown) => error,
+    );
+
+    timers.advanceBy(59_999);
+    assert.equal(timers.pendingCount, 1);
+    timers.advanceBy(1);
+    const error = await result;
+    assert.ok(error instanceof client.LocalAdmissionClientError);
+    assert.equal(error.code, "ADMISSION_REQUEST_TIMEOUT");
+    assert.deepEqual(timers.delays, [60_000]);
+    assert.equal(calls, 1);
+    assert.equal(timers.pendingCount, 0);
+  });
+}
 
 test("execution deadline expiry reports an unknown outcome without retrying", async () => {
   const timers = manualTimers();

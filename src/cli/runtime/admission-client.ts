@@ -220,7 +220,9 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
     const requestTimeoutMs =
       path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH
         ? executionTimeoutMs
-        : path === LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH
+        : path === LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH ||
+            path === LOCAL_ADMISSION_CLIENT_SESSIONS_PATH ||
+            path.startsWith(`${LOCAL_ADMISSION_CLIENT_SESSIONS_PATH}/`)
           ? DEFAULT_PROVIDER_CONTROL_TIMEOUT_MS
           : timeoutMs;
     const controller = new AbortController();

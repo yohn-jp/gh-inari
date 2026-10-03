@@ -5,6 +5,7 @@ import { mkdtemp, readdir, rm, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { createLocalAdmissionClient } from "./admission-client.js";
 import { createRepositoryBranchPolicy } from "../../repository-branch-policy.js";
 import { createDelegatorRecord } from "../../agent-authority/delegator-operations.js";
 import { loadDelegatorKeyPair } from "../../agent-authority/delegator-key.js";
@@ -100,7 +101,8 @@ test("Session launcher rejects stale injected branch policy before registration"
   }
 });
 
-test("#1213 a Source-bound Session keeps the Implementation task and issues per-Source claims and provenance", async () => {
+test("#1213 a Source-bound Session keeps the Implementation task and issues per-Source claims and provenance", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const root = await mkdtemp(path.join(os.tmpdir(), "inari-source-launcher-"));
   try {
     execFileSync("git", ["init", "--quiet"], { cwd: root });
@@ -176,23 +178,18 @@ test("#1213 a Source-bound Session keeps the Implementation task and issues per-
       implementationBinding,
     };
     const registered: LocalSessionBinding[] = [];
-    const admission = {
-      resolveRepository: async () => ({
-        host: "github.com" as const,
-        repositoryId: "123",
-        nameWithOwner: "acme/inari",
-      }),
-      registerSession: async (binding: LocalSessionBinding) => {
+    const admission = createLocalAdmissionClient({
+      endpoint: "http://127.0.0.1:43123",
+      fetchImpl: async (input, init) => {
+        assert.equal(new URL(String(input)).pathname, "/v1/sessions");
+        assert.equal(init?.method, "POST");
+        const { binding } = JSON.parse(String(init.body)) as { binding: LocalSessionBinding };
+        t.mock.timers.tick(13_800);
+        init.signal?.throwIfAborted();
         registered.push(binding);
-        return { id: binding.sessionId, status: "active" };
+        return new Response(JSON.stringify({ ok: true, session: { id: binding.sessionId, status: "active" } }));
       },
-      closeSession: async () => ({ id: "unused", status: "closed" }),
-      readBranchPolicy: async () => assert.fail("branch policy is not read by the launcher"),
-      readPullRequestContext: async () => assert.fail("contracts are not read by the launcher"),
-      executeIntent: async () => {
-        throw new Error("unreachable");
-      },
-    };
+    });
     const start = (overrides: Partial<Parameters<typeof startLocalSession>[0]> = {}) =>
       startLocalSession({
         cwd: root,
@@ -204,11 +201,6 @@ test("#1213 a Source-bound Session keeps the Implementation task and issues per-
         resolveRepository: async () => ({ host: "github.com", repositoryId: "123", nameWithOwner: "acme/inari" }),
         admission,
         branchObservation,
-        spawnChild: (() => {
-          const child = new EventEmitter();
-          queueMicrotask(() => child.emit("close", 0));
-          return child;
-        }) as unknown as typeof spawn,
         ...overrides,
       });
 
@@ -219,6 +211,7 @@ test("#1213 a Source-bound Session keeps the Implementation task and issues per-
     });
     assert.equal(registered.length, 0);
 
+    // Registration exceeding 10 seconds must still reach the child command.
     assert.equal(await start(), 0);
     const binding = registered[0];
     assert.ok(binding);
