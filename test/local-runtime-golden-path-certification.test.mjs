@@ -449,7 +449,12 @@ async function certifyGoldenPath(scenario) {
         const deadline = Date.now() + 60_000;
         for (;;) {
           state = ok(cli(["setup", "status", ...setupArgs], fresh), "status while Runtime starts").state;
-          if (dimension(state, "session-readiness").status === "ready") return runtime;
+          if (
+            dimension(state, "session-readiness").status === "ready" &&
+            dimension(state, "health").status === "healthy" &&
+            state.stage === "task-ready"
+          )
+            return runtime;
           assert.equal(runtime.exitCode, null, `Runtime exited: ${output}`);
           assert.ok(Date.now() < deadline, `Runtime never became ready: ${JSON.stringify(state.dimensions)} ${output}`);
           await new Promise((resolve) => setTimeout(resolve, 500));
