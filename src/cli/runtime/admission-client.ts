@@ -36,6 +36,7 @@ const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_SESSION_BINDING_BYTES = 16 * 1024;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const DEFAULT_CONTROL_TIMEOUT_MS = 10_000;
+const DEFAULT_PROVIDER_CONTROL_TIMEOUT_MS = 60_000;
 const MAX_CONTROL_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTION_TIMEOUT_MS = 60_000;
 const MAX_EXECUTION_TIMEOUT_MS = 60_000;
@@ -216,7 +217,12 @@ export function createLocalAdmissionClient(options: LocalAdmissionClientOptions)
       body,
       path === LOCAL_ADMISSION_CLIENT_SESSIONS_PATH ? MAX_SESSION_BINDING_BYTES + 128 : MAX_RESPONSE_BYTES,
     );
-    const requestTimeoutMs = path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH ? executionTimeoutMs : timeoutMs;
+    const requestTimeoutMs =
+      path === LOCAL_ADMISSION_CLIENT_EXECUTIONS_PATH
+        ? executionTimeoutMs
+        : path === LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH
+          ? DEFAULT_PROVIDER_CONTROL_TIMEOUT_MS
+          : timeoutMs;
     const controller = new AbortController();
     let timedOut = false;
     const timeout = timers.setTimeout(() => {
