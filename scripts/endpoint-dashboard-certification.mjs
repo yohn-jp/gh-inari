@@ -65,13 +65,10 @@ function hasCommit(ref) {
 function ensureCertificationRefs() {
   const shallow = run("git", ["rev-parse", "--is-shallow-repository"]) === "true";
   if (!shallow && hasCommit(CERTIFIED_EPIC_INTEGRATION_SHA) && hasCommit(MAIN_REF)) return;
-  run("git", [
-    "fetch",
-    "--no-tags",
-    ...(shallow ? ["--unshallow"] : []),
-    "origin",
-    "+refs/heads/main:refs/remotes/origin/main",
-  ]);
+  if (shallow) {
+    run("git", ["fetch", "--no-tags", "--unshallow", "origin"]);
+  }
+  run("git", ["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
 }
 
 function gitState() {
