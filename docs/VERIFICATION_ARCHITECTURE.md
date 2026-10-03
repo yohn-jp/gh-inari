@@ -103,7 +103,10 @@ product-specific package/runtime/Setup certification scripts.
 
 `pnpm run test:setup-browser` runs the existing actual browser boundary.
 `scripts/endpoint-dashboard-certification.mjs` is an existing deterministic
-composition oracle, not live proof of the new Hosted target.
+composition oracle, not live proof of the new Hosted target. Its ordinary
+execution owner is the root source-test graph through
+`test/endpoint-dashboard-certification.test.mjs`; package certification must
+not invoke the same source-level oracle again.
 `scripts/relay-certification.mjs` distinguishes controlled and live transport
 proof; transport certification alone does not prove a semantic GitHub effect.
 
@@ -136,6 +139,12 @@ Build/package reuse must bind exact source revision, relevant inputs,
 dependency/toolchain/configuration identity, and produced artifact identity.
 No stale dist directory, prior package version, or arbitrary cached tarball
 can satisfy current verification.
+
+Routine source certification is bound to the exact checked-out candidate.
+It may read that candidate identity, but it must not fetch or rewrite Git refs
+to compare against a moving remote branch during the proof. Remote-main
+freshness belongs to the workflow/admission boundary that selected the
+candidate, not to a deterministic source oracle.
 
 Independent consumers may share a prepared immutable artifact. Concurrent
 build/pack jobs must not write the same mutable output directory. Establish

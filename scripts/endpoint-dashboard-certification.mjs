@@ -14,8 +14,6 @@ import { register } from "tsx/esm/api";
 register();
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CERTIFIED_EPIC_INTEGRATION_SHA = "a443f8eeed7da97b25b91f946905c37e249539ba";
-const MAIN_REF = "origin/main";
 const API_URL = "https://api.example.test";
 const ENDPOINT_URL = "https://hosted.example.test";
 const DASHBOARD_ORIGIN = "https://dashboard.example.test";
@@ -50,42 +48,10 @@ function run(command, args) {
   }
 }
 
-function hasCommit(ref) {
-  try {
-    execFileSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], {
-      cwd: repoRoot,
-      stdio: "ignore",
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function ensureCertificationRefs() {
-  const shallow = run("git", ["rev-parse", "--is-shallow-repository"]) === "true";
-  if (!shallow && hasCommit(CERTIFIED_EPIC_INTEGRATION_SHA) && hasCommit(MAIN_REF)) return;
-  if (shallow) {
-    run("git", ["fetch", "--no-tags", "--unshallow", "origin"]);
-  }
-  run("git", ["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
-}
-
-function gitState() {
-  ensureCertificationRefs();
-  requireCondition(hasCommit(CERTIFIED_EPIC_INTEGRATION_SHA), "certified Epic integration commit is unavailable");
-  const epicHeadSha = run("git", ["rev-parse", `${CERTIFIED_EPIC_INTEGRATION_SHA}^{commit}`]);
-  const currentMainSha = run("git", ["rev-parse", `${MAIN_REF}^{commit}`]);
-  const headSha = run("git", ["rev-parse", "HEAD"]);
-  requireCondition(
-    run("git", ["merge-base", "HEAD", CERTIFIED_EPIC_INTEGRATION_SHA]) === epicHeadSha,
-    "revision does not contain the certified Epic integration commit",
-  );
-  requireCondition(
-    run("git", ["merge-base", "HEAD", MAIN_REF]) === currentMainSha,
-    "revision is not based on current origin/main",
-  );
-  return Object.freeze({ epicHeadSha, currentMainSha, headSha });
+function candidateState() {
+  const candidateSha = run("git", ["rev-parse", "HEAD"]);
+  requireCondition(/^[0-9a-f]{40}$/u.test(candidateSha), "checked-out candidate revision is unavailable");
+  return Object.freeze({ candidateSha });
 }
 
 async function loadModules() {
@@ -1034,7 +1000,7 @@ async function certifyWorkerFirstRouting(modules) {
 }
 
 export async function runEndpointDashboardCertification() {
-  const state = gitState();
+  const state = candidateState();
   const modules = await loadModules();
   const shared = await certifySharedHosted(modules);
   await certifyWebhook(modules);
@@ -1046,8 +1012,7 @@ export async function runEndpointDashboardCertification() {
     version: 1,
     profile: "endpoint-dashboard",
     certificationStatus: "passed",
-    epicHeadSha: state.epicHeadSha,
-    currentMainSha: state.currentMainSha,
+    candidateSha: state.candidateSha,
     branch: BRANCH_NAME,
     evidence: {
       bounded: true,
