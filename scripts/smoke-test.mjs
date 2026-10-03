@@ -418,7 +418,7 @@ function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, b
     if (
       implementationHelp.status !== 0 ||
       !(implementationHelp.stdout ?? "").includes("Usage: inari impl <command>") ||
-      !/(?:^|\\n)  authorize\\t/u.test(implementationHelp.stdout ?? "")
+      !/(?:^|\n)  authorize\t/u.test(implementationHelp.stdout ?? "")
     )
       fail(`installed ${name} does not expose the Implementation CLI namespace`);
 
