@@ -141,6 +141,57 @@ test("control requests keep 10 seconds while executions can finish after 10 seco
   assert.equal(timers.pendingCount, 0);
 });
 
+test("provider-backed branch policy can complete after the generic 10 second control deadline", async () => {
+  const timers = manualTimers();
+  const admission = client.createLocalAdmissionClient({
+    endpoint: TEST_ENDPOINT,
+    timers: timers.timers,
+    fetchImpl: async (input) => {
+      assert.equal(new URL(String(input)).pathname, client.LOCAL_ADMISSION_CLIENT_BRANCH_POLICY_PATH);
+      timers.advanceBy(13_800);
+      return jsonResponse({ ok: true, branchPolicy: {} });
+    },
+  });
+
+  const policy = await admission.readBranchPolicy({ id: "1330755860", name: "yohn-jp/gh-inari" }, 1232);
+
+  assert.deepEqual(policy, {});
+  assert.deepEqual(timers.delays, [60_000]);
+  assert.equal(timers.now, 13_800);
+  assert.equal(timers.pendingCount, 0);
+});
+
+test("provider-backed branch policy remains bounded at 60 seconds", async () => {
+  const timers = manualTimers();
+  const admission = client.createLocalAdmissionClient({
+    endpoint: TEST_ENDPOINT,
+    timers: timers.timers,
+    fetchImpl: (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal === undefined || signal === null) {
+          reject(new Error("expected deadline signal"));
+          return;
+        }
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+  });
+  const result = admission
+    .readBranchPolicy({ id: "1330755860", name: "yohn-jp/gh-inari" }, 1232)
+    .then(
+      () => new Error("branch policy unexpectedly succeeded"),
+      (error: unknown) => error,
+    );
+
+  timers.advanceBy(60_000);
+  const error = await result;
+
+  assert.ok(error instanceof client.LocalAdmissionClientError);
+  assert.equal(error.code, "ADMISSION_REQUEST_TIMEOUT");
+  assert.deepEqual(timers.delays, [60_000]);
+  assert.equal(timers.pendingCount, 0);
+});
+
 test("execution deadline expiry reports an unknown outcome without retrying", async () => {
   const timers = manualTimers();
   let calls = 0;
