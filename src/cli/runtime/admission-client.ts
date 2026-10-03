@@ -2,11 +2,16 @@ import { randomUUID } from "node:crypto";
 import {
   changeMutationRequest,
   changeReadRequest,
+  normalizeChangeExecutionEvidence,
   type ChangeExecutionPort,
   type ChangeMutationRequest,
   type ChangeReadRequest,
 } from "../../change-execution-port.js";
-import type { AuthorizedExecutionOperation, AuthorizedExecutionResult } from "../../authorized-execution.js";
+import type {
+  AuthorizedExecutionOperation,
+  AuthorizedExecutionPhase,
+  AuthorizedExecutionResult,
+} from "../../authorized-execution.js";
 import type { LocalSessionBinding } from "../../local-control/session-binding.js";
 import { validateExecutionIntent, type ExecutionIntent } from "../../local-control/execution-intent.js";
 import { readLocalJson, validateLocalCliConfig, type LocalAdmissionRoute } from "../../local-control/config.js";
@@ -41,12 +46,20 @@ const MAX_CONTROL_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTION_TIMEOUT_MS = 60_000;
 const MAX_EXECUTION_TIMEOUT_MS = 60_000;
 
+export interface LocalAdmissionExecutionFailureDetails {
+  readonly phase: string;
+  readonly message: string;
+  readonly diagnostics?: readonly unknown[];
+  readonly evidence?: unknown;
+}
+
 export interface LocalAdmissionFailureDetails {
   readonly endpoint: "repository" | "branch-policy" | "pull-request-context" | "session" | "execution";
   readonly status: number;
   readonly stage?: RuntimeFailure["stage"];
   readonly reason?: RuntimeFailure["reason"];
   readonly category?: RuntimeFailureCategory;
+  readonly executionFailure?: LocalAdmissionExecutionFailureDetails;
 }
 
 export class LocalAdmissionClientError extends Error {
@@ -435,6 +448,84 @@ export function createSessionExecutionIntent(
   return validation.intent;
 }
 
+function isAuthorizedExecutionPhase(value: unknown): value is AuthorizedExecutionPhase {
+  return (
+    value === "authentication" ||
+    value === "request" ||
+    value === "authorization" ||
+    value === "evidence" ||
+    value === "execution" ||
+    value === "conflict" ||
+    value === "verification" ||
+    value === "recovery-required"
+  );
+}
+
+function boundedExecutionFailure(value: unknown, operation: string): LocalAdmissionExecutionFailureDetails | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    value.code !== "SESSION_EXECUTION_FAILED" ||
+    !isAuthorizedExecutionPhase(value.phase) ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    value.message.length > 240 ||
+    /[\u0000-\u001f\u007f]/u.test(value.message)
+  ) {
+    return undefined;
+  }
+
+  let diagnostics: readonly unknown[] | undefined;
+  if (value.diagnostics !== undefined) {
+    if (!Array.isArray(value.diagnostics) || value.diagnostics.length > 16) return undefined;
+    const projected = [];
+    for (const diagnostic of value.diagnostics) {
+      if (
+        !isRecord(diagnostic) ||
+        diagnostic.version !== 1 ||
+        typeof diagnostic.code !== "string" ||
+        diagnostic.code.length === 0 ||
+        diagnostic.code.length > 128 ||
+        typeof diagnostic.path !== "string" ||
+        diagnostic.path.length > 512 ||
+        typeof diagnostic.message !== "string" ||
+        diagnostic.message.length === 0 ||
+        diagnostic.message.length > 1024 ||
+        /[\u0000-\u001f\u007f]/u.test(diagnostic.code) ||
+        /[\u0000-\u001f\u007f]/u.test(diagnostic.path) ||
+        /[\u0000-\u001f\u007f]/u.test(diagnostic.message)
+      ) {
+        return undefined;
+      }
+      projected.push(
+        Object.freeze({
+          version: 1,
+          code: diagnostic.code,
+          path: diagnostic.path,
+          message: diagnostic.message,
+        }),
+      );
+    }
+    diagnostics = Object.freeze(projected);
+  }
+
+  let evidence: unknown;
+  if (value.evidence !== undefined) {
+    if (!operation.startsWith("change.")) return undefined;
+    try {
+      evidence = normalizeChangeExecutionEvidence(operation.slice("change.".length), value.evidence);
+    } catch {
+      return undefined;
+    }
+  }
+
+  return Object.freeze({
+    phase: value.phase,
+    message: value.message,
+    ...(diagnostics === undefined ? {} : { diagnostics }),
+    ...(evidence === undefined ? {} : { evidence }),
+  });
+}
+
 function authorizedResult(value: unknown, operation: string): AuthorizedExecutionResult {
   if (
     !isRecord(value) ||
@@ -448,9 +539,18 @@ function authorizedResult(value: unknown, operation: string): AuthorizedExecutio
     );
   }
   if (value.status !== "succeeded") {
+    const executionFailure = boundedExecutionFailure(value.failure, operation);
+    if (executionFailure === undefined) {
+      throw new LocalAdmissionClientError(
+        "ADMISSION_RESPONSE_INVALID",
+        "Admission returned an invalid execution failure.",
+      );
+    }
     throw new LocalAdmissionClientError(
-      "ADMISSION_EXECUTION_DENIED",
-      "Admission did not authorize the Change operation.",
+      "ADMISSION_EXECUTION_FAILED",
+      `${executionFailure.message} (phase: ${executionFailure.phase})`,
+      200,
+      { endpoint: "execution", status: 200, executionFailure },
     );
   }
   return value as unknown as AuthorizedExecutionResult;

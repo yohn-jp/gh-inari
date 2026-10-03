@@ -7,6 +7,10 @@ import * as launcher from "./session-launcher.js";
 import * as client from "./admission-client.js";
 import type { LocalSessionBinding } from "../../local-control/session-binding.js";
 import type { ExecutionIntent } from "../../local-control/execution-intent.js";
+import { changeMutationRequest } from "../../change-execution-port.js";
+import { validateGovernedRootIssueEvidence } from "../../change.js";
+import { renderIssueArtifact } from "../../artifact.js";
+import { issueContractFixture } from "../../contract/fixtures.js";
 
 const TEST_ENDPOINT = "http://127.0.0.1:43123";
 const TEST_SESSION_ID = "session-1211";
@@ -373,6 +377,192 @@ test("bounded HTTP denial mapping remains unchanged", async () => {
     assert.equal(error.code, "ADMISSION_REQUEST_DENIED");
     assert.equal(error.status, 403);
     assert.equal(error.details?.category, "denied");
+    return true;
+  });
+});
+
+test("HTTP-successful semantic execution failures preserve bounded owner evidence", async () => {
+  for (const phase of ["execution", "conflict", "verification", "recovery-required"] as const) {
+    const admission = client.createLocalAdmissionClient({
+      endpoint: TEST_ENDPOINT,
+      fetchImpl: async () =>
+        jsonResponse({
+          ok: true,
+          result: {
+            version: 1,
+            operation: "change.ready",
+            status: "failed",
+            failure: {
+              code: "SESSION_EXECUTION_FAILED",
+              phase,
+              message: "Session-authorized Change execution failed closed.",
+              diagnostics: [
+                {
+                  version: 1,
+                  code: "CHANGE_INVALID_PLAN",
+                  path: "$.projection",
+                  message: "Bounded owner diagnostic.",
+                  ignoredSecret: "must-not-cross",
+                },
+              ],
+              evidence: {
+                version: 1,
+                operation: "ready",
+                outcome: "failed",
+                issuer: "app:inari",
+                effects: [],
+                failure: {
+                  kind: "MARK_PULL_REQUEST_READY",
+                  code: "CHANGE_EFFECT_FAILED",
+                  message: "Bounded effect failure.",
+                },
+              },
+              rawProviderBody: "must-not-cross",
+            },
+          },
+        }),
+    });
+    const port = client.createAdmissionChangeExecutionPort(admission, TEST_SESSION_BINDING);
+
+    await assert.rejects(port.execute(changeMutationRequest("ready", 1350)), (error: unknown) => {
+      assert.ok(error instanceof client.LocalAdmissionClientError);
+      assert.equal(error.code, "ADMISSION_EXECUTION_FAILED");
+      assert.match(error.message, new RegExp(`phase: ${phase}`, "u"));
+      assert.equal(error.details?.endpoint, "execution");
+      assert.equal(error.details?.status, 200);
+      assert.equal(error.details?.executionFailure?.phase, phase);
+      assert.deepEqual(error.details?.executionFailure?.diagnostics, [
+        {
+          version: 1,
+          code: "CHANGE_INVALID_PLAN",
+          path: "$.projection",
+          message: "Bounded owner diagnostic.",
+        },
+      ]);
+      assert.deepEqual(error.details?.executionFailure?.evidence, {
+        version: 1,
+        operation: "ready",
+        outcome: "failed",
+        issuer: "app:inari",
+        effects: [],
+        failure: {
+          kind: "MARK_PULL_REQUEST_READY",
+          code: "CHANGE_EFFECT_FAILED",
+          message: "Bounded effect failure.",
+        },
+      });
+      assert.equal(JSON.stringify(error.details).includes("must-not-cross"), false);
+      return true;
+    });
+  }
+});
+
+test("canonical Issue body missing its trailing newline keeps the validation diagnostic instead of a denial", async () => {
+  const identity = { repositoryHost: "github.com", repositoryId: "1361000001", rootIssue: 1361 } as const;
+  const contract = {
+    ...issueContractFixture,
+    provenance: {
+      authority: "repository-default-branch" as const,
+      repository: {
+        host: identity.repositoryHost,
+        owner: "acme",
+        name: "inari",
+        nameWithOwner: "acme/inari",
+        repositoryId: identity.repositoryId,
+      },
+      ref: "main",
+      treeSha: "governance-generation-1361",
+      template: {
+        path: issueContractFixture.templateIdentity.path,
+        ref: "main",
+        sha: "issue-template-1361",
+        digest: "issue-template-digest-1361",
+      },
+    },
+  };
+  const canonicalBody = renderIssueArtifact(contract, {
+    problem: "A governed Change root Issue.",
+    category: "feature",
+    affected_areas: ["contracts"],
+    acceptance: ["tests"],
+  });
+  assert.equal(canonicalBody.endsWith("\n"), true);
+  assert.deepEqual(validateGovernedRootIssueEvidence({ contract, body: canonicalBody }, identity, "main"), []);
+
+  // Exactly one trailing newline is missing; canonical Core validation must keep rejecting it.
+  const diagnostics = validateGovernedRootIssueEvidence(
+    { contract, body: canonicalBody.slice(0, -1) },
+    identity,
+    "main",
+  );
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.path, "$.governedIssue.body");
+
+  const admission = client.createLocalAdmissionClient({
+    endpoint: TEST_ENDPOINT,
+    fetchImpl: async () =>
+      jsonResponse({
+        ok: true,
+        result: {
+          version: 1,
+          operation: "change.issue",
+          status: "failed",
+          failure: {
+            code: "SESSION_EXECUTION_FAILED",
+            phase: "conflict",
+            message: "Session-authorized Change execution failed closed.",
+            diagnostics,
+          },
+        },
+      }),
+  });
+  const port = client.createAdmissionChangeExecutionPort(admission, TEST_SESSION_BINDING);
+
+  await assert.rejects(port.execute(changeMutationRequest("issue", 1361)), (error: unknown) => {
+    assert.ok(error instanceof client.LocalAdmissionClientError);
+    assert.notEqual(error.code, "ADMISSION_EXECUTION_DENIED");
+    assert.equal(error.code, "ADMISSION_EXECUTION_FAILED");
+    assert.deepEqual(error.details?.executionFailure?.diagnostics, diagnostics);
+    // The CLI error shape forwards `details` as JSON, so the reason must survive serialization.
+    const forwarded = JSON.parse(JSON.stringify(error.details)) as typeof error.details;
+    assert.equal(forwarded?.executionFailure?.phase, "conflict");
+    assert.deepEqual(forwarded?.executionFailure?.diagnostics, diagnostics);
+    return true;
+  });
+});
+
+test("malformed semantic failure evidence fails closed without leaking raw payload detail", async () => {
+  const admission = client.createLocalAdmissionClient({
+    endpoint: TEST_ENDPOINT,
+    fetchImpl: async () =>
+      jsonResponse({
+        ok: true,
+        result: {
+          version: 1,
+          operation: "change.ready",
+          status: "failed",
+          failure: {
+            code: "SESSION_EXECUTION_FAILED",
+            phase: "execution",
+            message: "Session-authorized Change execution failed closed.",
+            evidence: {
+              version: 1,
+              operation: "ready",
+              outcome: "failed",
+              effects: [],
+              secret: "provider-token-must-not-cross",
+            },
+          },
+        },
+      }),
+  });
+  const port = client.createAdmissionChangeExecutionPort(admission, TEST_SESSION_BINDING);
+
+  await assert.rejects(port.execute(changeMutationRequest("ready", 1350)), (error: unknown) => {
+    assert.ok(error instanceof client.LocalAdmissionClientError);
+    assert.equal(error.code, "ADMISSION_RESPONSE_INVALID");
+    assert.equal(error.message.includes("provider-token-must-not-cross"), false);
+    assert.equal(JSON.stringify(error.details ?? {}).includes("provider-token-must-not-cross"), false);
     return true;
   });
 });
