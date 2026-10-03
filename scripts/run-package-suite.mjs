@@ -1823,7 +1823,6 @@ async function main() {
       stdio: "inherit",
     });
     await certifyInstalledSetupConsole(tarballPath, packageJson.name);
-    run(process.execPath, ["scripts/endpoint-dashboard-certification.mjs"], { stdio: "inherit" });
   } finally {
     fs.rmSync(tarballPath, { force: true });
   }
