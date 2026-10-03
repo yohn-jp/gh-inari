@@ -269,7 +269,7 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "2.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/server": "2.1.0",
     "@yohn-jp/cli-canon": "0.2.0",
     "ajv": "8.20.0",
     "mdast-util-from-markdown": "2.0.3",
