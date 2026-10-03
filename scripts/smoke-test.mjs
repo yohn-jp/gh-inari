@@ -25,7 +25,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json
 
 export const REQUIRED_BIN_NAMES = Object.freeze(["inari", "gh-inari"]);
 export const CERTIFICATION_ENTRY_COMMANDS = Object.freeze([
-  Object.freeze({ name: "runtime identity", args: ["--version", "--json"] }),
+  Object.freeze({ name: "runtime identity", args: ["version", "--json"] }),
   Object.freeze({ name: "canonical preflight", args: ["--diagnose", "--json"] }),
   Object.freeze({ name: "Skill discovery", args: ["skill", "--json"] }),
 ]);
@@ -234,6 +234,12 @@ export function validateVersionOutput(output, expectedPackage) {
   return output;
 }
 
+export function validatePackageIdentityOutput(output, expectedPackage) {
+  if (!isDeepStrictEqual(output, { name: expectedPackage.name, version: expectedPackage.version }))
+    fail("installed executable returned an invalid package identity contract");
+  return output;
+}
+
 export function validatePreflightOutput(output, expectedPackage) {
   validateVersionOutput(output, expectedPackage);
   if (output.canonical?.invocation !== "inari" || output.canonical?.status !== "ready")
@@ -417,8 +423,8 @@ function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, b
     });
     if (
       implementationHelp.status !== 0 ||
-      !(implementationHelp.stdout ?? "").includes("Usage: inari impl") ||
-      !(implementationHelp.stdout ?? "").includes("impl authorize")
+      !(implementationHelp.stdout ?? "").includes("Usage: inari impl <command>") ||
+      !/(?:^|\n)  authorize\t/u.test(implementationHelp.stdout ?? "")
     )
       fail(`installed ${name} does not expose the Implementation CLI namespace`);
 
@@ -456,14 +462,20 @@ function checkInstalledLaunchers(consumerDirectory, installedPackageDirectory, b
     }
 
     const versionResult = invoke(launcher, ["--version"], { cwd: consumerDirectory, env: environment });
-    if (versionResult.status !== 0 || versionResult.stdout.trim() !== `${packageJson.name} ${packageJson.version}`)
+    if (versionResult.status !== 0 || versionResult.stdout.trim() !== packageJson.version)
       fail(`installed ${name} --version returned an unexpected result`);
 
-    const versionJson = jsonOutput(
+    const packageIdentity = jsonOutput(
       invoke(launcher, ["--version", "--json"], { cwd: consumerDirectory, env: environment }),
       `${name} --version --json`,
     );
-    validateVersionOutput(versionJson, packageJson);
+    validatePackageIdentityOutput(packageIdentity, packageJson);
+
+    const runtimeIdentity = jsonOutput(
+      invoke(launcher, ["version", "--json"], { cwd: consumerDirectory, env: environment }),
+      `${name} version --json`,
+    );
+    validateVersionOutput(runtimeIdentity, packageJson);
 
     const preflight = jsonOutput(
       invoke(launcher, ["--diagnose", "--json"], { cwd: consumerDirectory, env: environment }),
@@ -951,11 +963,11 @@ function certifyNpxFallback(rootDirectory, tarballPath, externalExecutables) {
   fs.mkdirSync(emptyBinDirectory);
   const environment = freshEnvironment(rootDirectory, emptyBinDirectory, externalExecutables);
   const result = jsonOutput(
-    invoke(executablePath("npx"), ["--yes", `--package=${tarballPath}`, "gh-inari", "--version", "--json"], {
+    invoke(executablePath("npx"), ["--yes", `--package=${tarballPath}`, "gh-inari", "version", "--json"], {
       cwd: consumerDirectory,
       env: environment,
     }),
-    "npx packed gh-inari --version --json",
+    "npx packed gh-inari version --json",
   );
   validateVersionOutput(result, packageJson);
   if (fs.readFileSync(packageFile, "utf8") !== packageContents)
