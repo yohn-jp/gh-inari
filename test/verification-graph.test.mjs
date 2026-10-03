@@ -54,7 +54,7 @@ test("Endpoint/Dashboard source certification has one owner and does not mutate 
   );
 
   const packageSuite = fs.readFileSync(path.join(repositoryRoot, "scripts/run-package-suite.mjs"), "utf8");
-  assert.equal(packageSuite.includes('scripts/endpoint-dashboard-certification.mjs'), false);
+  assert.equal(packageSuite.includes("scripts/endpoint-dashboard-certification.mjs"), false);
 
   const certification = fs.readFileSync(
     path.join(repositoryRoot, "scripts/endpoint-dashboard-certification.mjs"),
