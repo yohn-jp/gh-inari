@@ -41,12 +41,20 @@ const MAX_CONTROL_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTION_TIMEOUT_MS = 60_000;
 const MAX_EXECUTION_TIMEOUT_MS = 60_000;
 
+export interface LocalAdmissionExecutionFailureDetails {
+  readonly phase: string;
+  readonly message: string;
+  readonly diagnostics?: readonly unknown[];
+  readonly evidence?: unknown;
+}
+
 export interface LocalAdmissionFailureDetails {
   readonly endpoint: "repository" | "branch-policy" | "pull-request-context" | "session" | "execution";
   readonly status: number;
   readonly stage?: RuntimeFailure["stage"];
   readonly reason?: RuntimeFailure["reason"];
   readonly category?: RuntimeFailureCategory;
+  readonly executionFailure?: LocalAdmissionExecutionFailureDetails;
 }
 
 export class LocalAdmissionClientError extends Error {
@@ -435,6 +443,26 @@ export function createSessionExecutionIntent(
   return validation.intent;
 }
 
+function boundedExecutionFailure(value: unknown): LocalAdmissionExecutionFailureDetails | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    value.code !== "SESSION_EXECUTION_FAILED" ||
+    typeof value.phase !== "string" ||
+    typeof value.message !== "string"
+  ) {
+    return undefined;
+  }
+  const diagnostics =
+    Array.isArray(value.diagnostics) && value.diagnostics.length <= 16 ? Object.freeze([...value.diagnostics]) : undefined;
+  const evidence = isRecord(value.evidence) ? value.evidence : undefined;
+  return Object.freeze({
+    phase: value.phase,
+    message: value.message,
+    ...(diagnostics === undefined ? {} : { diagnostics }),
+    ...(evidence === undefined ? {} : { evidence }),
+  });
+}
+
 function authorizedResult(value: unknown, operation: string): AuthorizedExecutionResult {
   if (
     !isRecord(value) ||
@@ -448,9 +476,18 @@ function authorizedResult(value: unknown, operation: string): AuthorizedExecutio
     );
   }
   if (value.status !== "succeeded") {
+    const executionFailure = boundedExecutionFailure(value.failure);
+    if (executionFailure === undefined) {
+      throw new LocalAdmissionClientError(
+        "ADMISSION_RESPONSE_INVALID",
+        "Admission returned an invalid execution failure.",
+      );
+    }
     throw new LocalAdmissionClientError(
-      "ADMISSION_EXECUTION_DENIED",
-      "Admission did not authorize the Change operation.",
+      "ADMISSION_EXECUTION_FAILED",
+      `${executionFailure.message} (phase: ${executionFailure.phase})`,
+      200,
+      { endpoint: "execution", status: 200, executionFailure },
     );
   }
   return value as unknown as AuthorizedExecutionResult;
