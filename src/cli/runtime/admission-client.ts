@@ -2,11 +2,16 @@ import { randomUUID } from "node:crypto";
 import {
   changeMutationRequest,
   changeReadRequest,
+  normalizeChangeExecutionEvidence,
   type ChangeExecutionPort,
   type ChangeMutationRequest,
   type ChangeReadRequest,
 } from "../../change-execution-port.js";
-import type { AuthorizedExecutionOperation, AuthorizedExecutionResult } from "../../authorized-execution.js";
+import {
+  AUTHORIZED_EXECUTION_PHASES,
+  type AuthorizedExecutionOperation,
+  type AuthorizedExecutionResult,
+} from "../../authorized-execution.js";
 import type { LocalSessionBinding } from "../../local-control/session-binding.js";
 import { validateExecutionIntent, type ExecutionIntent } from "../../local-control/execution-intent.js";
 import { readLocalJson, validateLocalCliConfig, type LocalAdmissionRoute } from "../../local-control/config.js";
@@ -443,18 +448,67 @@ export function createSessionExecutionIntent(
   return validation.intent;
 }
 
-function boundedExecutionFailure(value: unknown): LocalAdmissionExecutionFailureDetails | undefined {
+function boundedExecutionFailure(
+  value: unknown,
+  operation: string,
+): LocalAdmissionExecutionFailureDetails | undefined {
   if (!isRecord(value)) return undefined;
   if (
     value.code !== "SESSION_EXECUTION_FAILED" ||
     typeof value.phase !== "string" ||
-    typeof value.message !== "string"
+    !AUTHORIZED_EXECUTION_PHASES.includes(value.phase as (typeof AUTHORIZED_EXECUTION_PHASES)[number]) ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    value.message.length > 240 ||
+    /[\u0000-\u001f\u007f]/u.test(value.message)
   ) {
     return undefined;
   }
-  const diagnostics =
-    Array.isArray(value.diagnostics) && value.diagnostics.length <= 16 ? Object.freeze([...value.diagnostics]) : undefined;
-  const evidence = isRecord(value.evidence) ? value.evidence : undefined;
+
+  let diagnostics: readonly unknown[] | undefined;
+  if (value.diagnostics !== undefined) {
+    if (!Array.isArray(value.diagnostics) || value.diagnostics.length > 16) return undefined;
+    const projected = [];
+    for (const diagnostic of value.diagnostics) {
+      if (
+        !isRecord(diagnostic) ||
+        diagnostic.version !== 1 ||
+        typeof diagnostic.code !== "string" ||
+        diagnostic.code.length === 0 ||
+        diagnostic.code.length > 128 ||
+        typeof diagnostic.path !== "string" ||
+        diagnostic.path.length > 512 ||
+        typeof diagnostic.message !== "string" ||
+        diagnostic.message.length === 0 ||
+        diagnostic.message.length > 1024 ||
+        /[\u0000-\u001f\u007f]/u.test(diagnostic.code) ||
+        /[\u0000-\u001f\u007f]/u.test(diagnostic.path) ||
+        /[\u0000-\u001f\u007f]/u.test(diagnostic.message)
+      ) {
+        return undefined;
+      }
+      projected.push(
+        Object.freeze({
+          version: 1,
+          code: diagnostic.code,
+          path: diagnostic.path,
+          message: diagnostic.message,
+        }),
+      );
+    }
+    diagnostics = Object.freeze(projected);
+  }
+
+  let evidence: unknown;
+  if (value.evidence !== undefined) {
+    if (!operation.startsWith("change.")) return undefined;
+    try {
+      evidence = normalizeChangeExecutionEvidence(operation.slice("change.".length), value.evidence);
+    } catch {
+      return undefined;
+    }
+  }
+
   return Object.freeze({
     phase: value.phase,
     message: value.message,
@@ -476,7 +530,7 @@ function authorizedResult(value: unknown, operation: string): AuthorizedExecutio
     );
   }
   if (value.status !== "succeeded") {
-    const executionFailure = boundedExecutionFailure(value.failure);
+    const executionFailure = boundedExecutionFailure(value.failure, operation);
     if (executionFailure === undefined) {
       throw new LocalAdmissionClientError(
         "ADMISSION_RESPONSE_INVALID",
