@@ -39,7 +39,32 @@ test("routine verification serializes Dashboard output before package consumers"
 
   assert.notEqual(dashboardOutputCheck, -1, "package suite must reject missing Dashboard build output");
   assert.ok(installedPackageCertification > dashboardOutputCheck);
-  assert.ok(endpointCertification > dashboardOutputCheck);
+  assert.equal(endpointCertification, -1, "package suite must not own the source-level Endpoint/Dashboard oracle");
+});
+
+test("Endpoint/Dashboard source certification has one owner and does not mutate Git refs", () => {
+  assert.ok(
+    packageManifest.scripts.test.includes('"test/**/*.test.mjs"'),
+    "root routine tests must discover the Endpoint/Dashboard certification wrapper",
+  );
+  assert.equal(
+    packageManifest.scripts.test.includes("certifies the composed Endpoint and Dashboard boundary"),
+    false,
+    "root routine tests must not skip the Endpoint/Dashboard certification",
+  );
+
+  const packageSuite = fs.readFileSync(path.join(repositoryRoot, "scripts/run-package-suite.mjs"), "utf8");
+  assert.equal(packageSuite.includes('scripts/endpoint-dashboard-certification.mjs'), false);
+
+  const certification = fs.readFileSync(
+    path.join(repositoryRoot, "scripts/endpoint-dashboard-certification.mjs"),
+    "utf8",
+  );
+  assert.ok(certification.includes('const candidateSha = run("git", ["rev-parse", "HEAD"]);'));
+  assert.equal(certification.includes("CERTIFIED_EPIC_INTEGRATION_SHA"), false);
+  assert.equal(certification.includes('const MAIN_REF = "origin/main"'), false);
+  assert.equal(certification.includes('"--unshallow"'), false);
+  assert.equal(certification.includes("+refs/heads/main:refs/remotes/origin/main"), false);
 });
 
 test("routine package verification preserves package certification and leaves release preparation explicit", () => {
@@ -56,7 +81,7 @@ test("routine package verification preserves package certification and leaves re
   assert.ok(packageSuite.includes('run("npm", ["pack", "--json", "--ignore-scripts"])'));
   assert.ok(packageSuite.includes('["scripts/package-runtime-certification.mjs", "--tarball"'));
   assert.ok(packageSuite.includes("await certifyInstalledSetupConsole(tarballPath, packageJson.name)"));
-  assert.ok(packageSuite.includes('["scripts/endpoint-dashboard-certification.mjs"]'));
+  assert.equal(packageSuite.includes('["scripts/endpoint-dashboard-certification.mjs"]'), false);
 
   assert.equal(packageManifest.scripts["certify:release"], "node scripts/release-preparation-certification.mjs");
   const releaseWorkflow = fs.readFileSync(
