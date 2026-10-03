@@ -947,11 +947,10 @@ async function certifyDashboardBoundary(modules) {
   );
   const dashboardDist = path.join(repoRoot, "apps", "dashboard", "dist");
   const onboardingAsset = path.join(dashboardDist, ".well-known", "inari");
-  if (
-    !fs.existsSync(path.join(dashboardDist, "index.html")) ||
-    !fs.existsSync(path.join(dashboardDist, "browser.js")) ||
-    !fs.existsSync(onboardingAsset)
-  ) {
+  if (!fs.existsSync(path.join(dashboardDist, "index.html")) || !fs.existsSync(path.join(dashboardDist, "browser.js"))) {
+    execFileSync("pnpm", ["--dir", "apps/dashboard", "build"], { cwd: repoRoot, stdio: "inherit" });
+  }
+  if (!fs.existsSync(onboardingAsset) || !fs.existsSync(path.join(dashboardDist, "_headers"))) {
     execFileSync("pnpm", ["run", "hosted-worker:build"], { cwd: repoRoot, stdio: "inherit" });
   }
   const shell = fs.readFileSync(path.join(dashboardDist, "index.html"), "utf8");
