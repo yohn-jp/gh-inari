@@ -3353,6 +3353,85 @@ function printImplementationResult(result: Record<string, unknown>, json: boolea
   console.log(JSON.stringify(result, null, json ? 0 : 2));
 }
 
+function implementationOperationalViolations(value: unknown, readiness?: unknown): readonly Record<string, string>[] {
+  const project = (entries: unknown): Record<string, string>[] => {
+    if (!Array.isArray(entries)) return [];
+    return entries.flatMap((entry): Record<string, string>[] => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+      const violation = entry as Record<string, unknown>;
+      const summary: Record<string, string> = {};
+      if (typeof violation.code === "string") summary.code = violation.code;
+      if (typeof violation.path === "string") summary.path = violation.path;
+      if (typeof violation.message === "string") summary.message = violation.message;
+      return Object.keys(summary).length === 0 ? [] : [summary];
+    });
+  };
+  const readinessRecord =
+    typeof readiness === "object" && readiness !== null && !Array.isArray(readiness)
+      ? (readiness as Record<string, unknown>)
+      : undefined;
+  const readinessViolations = project(readinessRecord?.diagnostics);
+  const violations = project(value);
+  const relevantViolations =
+    readinessViolations.length === 0
+      ? violations
+      : violations.filter((entry) => entry.code !== "IMPLEMENTATION_AUTHORIZATION_NOT_READY");
+  const unique = new Map<string, Record<string, string>>();
+  for (const violation of [...relevantViolations, ...readinessViolations]) {
+    const key = `${violation.code ?? ""}\u0000${violation.path ?? ""}\u0000${violation.message ?? ""}`;
+    unique.set(key, violation);
+  }
+  return [...unique.values()].sort(
+    (left, right) =>
+      (left.path ?? "").localeCompare(right.path ?? "", "en-US") ||
+      (left.code ?? "").localeCompare(right.code ?? "", "en-US") ||
+      (left.message ?? "").localeCompare(right.message ?? "", "en-US"),
+  );
+}
+
+function printImplementationOperationalResult(result: Record<string, unknown>, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(result));
+    return;
+  }
+
+  const implementation =
+    typeof result.implementation === "object" && result.implementation !== null && !Array.isArray(result.implementation)
+      ? (result.implementation as Record<string, unknown>)
+      : undefined;
+  const identity =
+    typeof implementation?.number === "number" ? `Implementation #${implementation.number}` : "Implementation";
+  const repository = typeof implementation?.repository === "string" ? ` in ${implementation.repository}` : "";
+  const state =
+    result.operation === "impl.authorize"
+      ? result.authorized === true
+        ? "AUTHORIZED"
+        : "NOT AUTHORIZED"
+      : result.valid === true
+        ? "VALID"
+        : "INVALID";
+  console.log(`${identity}${repository}: ${state}`);
+  console.log(`Valid: ${result.valid === true ? "yes" : "no"}`);
+  if (typeof result.authorized === "boolean") console.log(`Authorized: ${result.authorized ? "yes" : "no"}`);
+  if (typeof result.current === "boolean") console.log(`Current: ${result.current ? "yes" : "no"}`);
+  if (typeof result.readiness === "string") console.log(`Readiness: ${result.readiness}`);
+
+  const violations = Array.isArray(result.violations) ? result.violations : [];
+  if (violations.length === 0) {
+    console.log("Violations: none");
+    return;
+  }
+  console.log("Violations:");
+  for (const entry of violations) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    const violation = entry as Record<string, unknown>;
+    const code = typeof violation.code === "string" ? violation.code : "violation";
+    const path = typeof violation.path === "string" ? ` (${violation.path})` : "";
+    const message = typeof violation.message === "string" ? `: ${violation.message}` : "";
+    console.log(`- ${code}${path}${message}`);
+  }
+}
+
 async function runImplementationCommand(
   command: string | undefined,
   rest: readonly string[],
@@ -3526,7 +3605,31 @@ async function runImplementationCommand(
       canonical: bodyProjection,
       mutation: false,
     };
-    printImplementationResult(result, json);
+    if (parsed.options.detail === true) printImplementationResult(result, json);
+    else {
+      const lifecycle = implementationLifecycle(evidence, evidence.body, input, base);
+      const readiness = lifecycle.readiness;
+      const readinessClassification =
+        typeof readiness === "object" && readiness !== null && !Array.isArray(readiness)
+          ? (readiness as Record<string, unknown>).classification
+          : undefined;
+      printImplementationOperationalResult(
+        {
+          ok: bodyProjection.valid === true,
+          operation: "impl.validate",
+          implementation: evidence.reference,
+          valid: bodyProjection.valid === true,
+          authorized: lifecycle.authorized === true,
+          current: lifecycle.current === true,
+          ...(typeof readinessClassification === "string" ? { readiness: readinessClassification } : {}),
+          violations: implementationOperationalViolations(
+            bodyProjection.valid === true ? lifecycle.violations : bodyProjection.violations,
+            readiness,
+          ),
+        },
+        json,
+      );
+    }
     return bodyProjection.valid === true ? 0 : EXIT_VALIDATION;
   }
 
@@ -3601,7 +3704,21 @@ async function runImplementationCommand(
     base: base === undefined ? { available: false } : { available: true, evidence: base },
     mutation: false,
   };
-  printImplementationResult(result, json);
+  if (parsed.options.detail === true) printImplementationResult(result, json);
+  else
+    printImplementationOperationalResult(
+      {
+        ok: authorization.valid,
+        operation: "impl.authorize",
+        implementation: evidence.reference,
+        valid: bodyProjection.valid === true,
+        authorized: authorizationProjection.authorized,
+        current: authorizationProjection.current,
+        ...(authorization.readiness === undefined ? {} : { readiness: authorization.readiness.classification }),
+        violations: implementationOperationalViolations(authorization.violations, authorization.readiness),
+      },
+      json,
+    );
   return authorization.valid ? 0 : EXIT_VALIDATION;
 }
 
