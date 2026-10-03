@@ -227,6 +227,17 @@ async function invoke(
   argv: readonly string[],
   adapter: ImplementationCliAdapter,
 ): Promise<{ readonly exitCode: number; readonly output: Record<string, unknown> }> {
+  const captured = await invokeOutput(argv, adapter);
+  return {
+    exitCode: captured.exitCode,
+    output: JSON.parse(captured.lines.at(-1) ?? "{}") as Record<string, unknown>,
+  };
+}
+
+async function invokeOutput(
+  argv: readonly string[],
+  adapter: ImplementationCliAdapter,
+): Promise<{ readonly exitCode: number; readonly lines: readonly string[] }> {
   const lines: string[] = [];
   const originalLog = console.log;
   try {
@@ -235,7 +246,7 @@ async function invoke(
       createAdapter: () => adapter,
       repositoryRoot: process.cwd(),
     });
-    return { exitCode, output: JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown> };
+    return { exitCode, lines };
   } finally {
     console.log = originalLog;
   }
@@ -329,17 +340,117 @@ test("impl validate and authorize use the canonical body and #572 Core", async (
   const validated = await invoke(["impl", "validate", "42", "--json"], adapter);
   assert.equal(validated.exitCode, 0);
   assert.equal(validated.output.valid, true);
-  assert.equal((validated.output.canonical as Record<string, unknown>).valid, true);
+  assert.equal(validated.output.authorized, false);
+  assert.equal(validated.output.current, false);
+  assert.equal(validated.output.canonical, undefined);
+  assert.deepEqual(validated.output.violations, []);
+
+  const detailedValidation = await invoke(["impl", "validate", "42", "--detail", "--json"], adapter);
+  assert.equal(detailedValidation.exitCode, 0);
+  assert.equal((detailedValidation.output.canonical as Record<string, unknown>).valid, true);
+  assert.equal((detailedValidation.output.current as Record<string, unknown>).body, implementationBody());
 
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-authorize-cli-"));
   try {
     const readinessPath = await writeReadinessFrom(directory, dependencyReadinessEvidence("satisfied"));
     const authorized = await invoke(["impl", "authorize", "42", "--from", readinessPath, "--json"], adapter);
     assert.equal(authorized.exitCode, 0);
-    const authorization = authorized.output.authorization as Record<string, unknown>;
-    assert.equal(authorization.authorized, true);
-    assert.equal((authorization.record as Record<string, unknown>).kind, "implementation-authorization");
-    assert.equal(authorized.output.mutation, false);
+    assert.equal(authorized.output.valid, true);
+    assert.equal(authorized.output.authorized, true);
+    assert.equal(authorized.output.current, true);
+    assert.equal(authorized.output.readiness, "READY");
+    assert.equal(authorized.output.authorization, undefined);
+    assert.equal(authorized.output.canonical, undefined);
+    assert.deepEqual(authorized.output.violations, []);
+    const repeated = await invoke(["impl", "authorize", "42", "--from", readinessPath, "--json"], adapter);
+    assert.deepEqual(repeated.output, authorized.output);
+
+    const detailed = await invoke(["impl", "authorize", "42", "--from", readinessPath, "--detail", "--json"], adapter);
+    assert.equal(detailed.exitCode, 0);
+    assert.equal((detailed.output.authorization as Record<string, unknown>).authorized, true);
+    assert.equal(
+      ((detailed.output.authorization as Record<string, unknown>).record as Record<string, unknown>).kind,
+      "implementation-authorization",
+    );
+    assert.equal((detailed.output.canonical as Record<string, unknown>).valid, true);
+
+    const authorizationPath = path.join(directory, "authorization.json");
+    await writeFile(
+      authorizationPath,
+      JSON.stringify((detailed.output.authorization as Record<string, unknown>).record),
+      "utf8",
+    );
+    const revalidated = await invoke(["impl", "validate", "42", "--from", authorizationPath, "--json"], adapter);
+    assert.equal(revalidated.output.valid, true);
+    assert.equal(revalidated.output.authorized, true);
+    assert.equal(revalidated.output.current, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("impl validate and authorize human output is compact and actionable", async () => {
+  const adapter = new ImplementationCliAdapter(implementationBody());
+  const validated = await invokeOutput(["impl", "validate", "42"], adapter);
+  assert.equal(validated.exitCode, 0);
+  const validationText = validated.lines.join("\n");
+  assert.match(validationText, /Implementation #42 in acme\/inari: VALID/u);
+  assert.match(validationText, /Authorized: no/u);
+  assert.match(validationText, /Current: no/u);
+  assert.match(validationText, /Violations: none/u);
+  assert.doesNotMatch(validationText, /canonical|objective|Expose the Implementation CLI/u);
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-authorize-human-cli-"));
+  try {
+    const readinessPath = await writeReadinessFrom(directory, dependencyReadinessEvidence("blocked"));
+    const authorized = await invokeOutput(["impl", "authorize", "42", "--from", readinessPath], adapter);
+    assert.equal(authorized.exitCode, 2);
+    const authorizationText = authorized.lines.join("\n");
+    assert.match(authorizationText, /Implementation #42 in acme\/inari: NOT AUTHORIZED/u);
+    assert.match(authorizationText, /Valid: yes/u);
+    assert.match(authorizationText, /Authorized: no/u);
+    assert.match(authorizationText, /Readiness: BLOCKED/u);
+    assert.match(authorizationText, /READINESS_DEPENDENCY_UNSATISFIED/u);
+    assert.doesNotMatch(authorizationText, /implementation-authorization|canonical contract|"record"/u);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("impl validate compact JSON retains actionable canonical violations", async () => {
+  const adapter = new ImplementationCliAdapter("This is not an Implementation contract.");
+  const validated = await invoke(["impl", "validate", "42", "--json"], adapter);
+  assert.equal(validated.exitCode, 2);
+  assert.equal(validated.output.ok, false);
+  assert.equal(validated.output.valid, false);
+  assert.equal(validated.output.canonical, undefined);
+  assert.ok((validated.output.violations as Array<Record<string, unknown>>).length > 0);
+  assert.ok(
+    (validated.output.violations as Array<Record<string, unknown>>).every(
+      (entry) => typeof entry.code === "string" && typeof entry.path === "string" && typeof entry.message === "string",
+    ),
+  );
+});
+
+test("impl validate marks a supplied stale authorization as non-current with an actionable violation", async () => {
+  const originalBody = implementationBody();
+  const staleAuthorization = implementationAuthorizationRecord(originalBody);
+  const changedBody = originalBody.replace("Expose the Implementation CLI.", "Expose the updated Implementation CLI.");
+  const adapter = new ImplementationCliAdapter(changedBody);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-validate-stale-cli-"));
+  try {
+    const authorizationPath = path.join(directory, "authorization.json");
+    await writeFile(authorizationPath, JSON.stringify(staleAuthorization), "utf8");
+    const validated = await invoke(["impl", "validate", "42", "--from", authorizationPath, "--json"], adapter);
+    assert.equal(validated.exitCode, 0);
+    assert.equal(validated.output.valid, true);
+    assert.equal(validated.output.authorized, false);
+    assert.equal(validated.output.current, false);
+    assert.ok(
+      (validated.output.violations as Array<Record<string, unknown>>).some(
+        (entry) => entry.code === "IMPLEMENTATION_MODIFIED_AFTER_AUTHORIZATION",
+      ),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -349,14 +460,13 @@ test("impl authorize rejects when the dependency readiness evidence is unavailab
   const adapter = new ImplementationCliAdapter(implementationBody());
   const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
   assert.equal(authorized.exitCode, 2);
-  const authorization = authorized.output.authorization as Record<string, unknown>;
-  assert.equal(authorization.authorized, false);
+  assert.equal(authorized.output.authorized, false);
+  assert.equal(authorized.output.readiness, "INVALID");
   assert.ok(
-    (authorization.violations as Array<Record<string, unknown>>).some(
-      (entry) => entry.code === "IMPLEMENTATION_AUTHORIZATION_NOT_READY",
+    (authorized.output.violations as Array<Record<string, unknown>>).some(
+      (entry) => entry.code === "READINESS_DEPENDENCY_EVIDENCE_MISSING",
     ),
   );
-  assert.equal(authorized.output.mutation, false);
 });
 
 test("impl authorize fails closed on a blocked dependency and mints no authorization record", async () => {
@@ -366,14 +476,14 @@ test("impl authorize fails closed on a blocked dependency and mints no authoriza
     const readinessPath = await writeReadinessFrom(directory, dependencyReadinessEvidence("blocked"));
     const authorized = await invoke(["impl", "authorize", "42", "--from", readinessPath, "--json"], adapter);
     assert.equal(authorized.exitCode, 2);
-    const authorization = authorized.output.authorization as Record<string, unknown>;
-    assert.equal(authorization.authorized, false);
-    assert.equal(authorization.record, undefined);
-    assert.ok(
-      (authorization.violations as Array<Record<string, unknown>>).some(
-        (entry) => entry.code === "IMPLEMENTATION_AUTHORIZATION_NOT_READY",
-      ),
+    assert.equal(authorized.output.authorized, false);
+    assert.equal(authorized.output.readiness, "BLOCKED");
+    const blocked = (authorized.output.violations as Array<Record<string, unknown>>).find(
+      (entry) => entry.code === "READINESS_DEPENDENCY_UNSATISFIED",
     );
+    assert.ok(blocked);
+    assert.equal(typeof blocked.path, "string");
+    assert.equal(typeof blocked.message, "string");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -386,9 +496,13 @@ test("impl authorize fails closed on stale dependency evidence", async () => {
     const readinessPath = await writeReadinessFrom(directory, dependencyReadinessEvidence("stale"));
     const authorized = await invoke(["impl", "authorize", "42", "--from", readinessPath, "--json"], adapter);
     assert.equal(authorized.exitCode, 2);
-    const authorization = authorized.output.authorization as Record<string, unknown>;
-    assert.equal(authorization.authorized, false);
-    assert.equal(authorization.record, undefined);
+    assert.equal(authorized.output.authorized, false);
+    assert.equal(authorized.output.readiness, "INVALID");
+    assert.ok(
+      (authorized.output.violations as Array<Record<string, unknown>>).some(
+        (entry) => entry.code === "READINESS_DEPENDENCY_STALE",
+      ),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -399,7 +513,7 @@ test("impl authorize replay stays idempotent for a current authorization and doe
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-authorize-replay-cli-"));
   try {
     const readyPath = await writeReadinessFrom(directory, dependencyReadinessEvidence("satisfied"));
-    const first = await invoke(["impl", "authorize", "42", "--from", readyPath, "--json"], adapter);
+    const first = await invoke(["impl", "authorize", "42", "--from", readyPath, "--detail", "--json"], adapter);
     assert.equal(first.exitCode, 0);
     const record = (first.output.authorization as Record<string, unknown>).record;
 
@@ -409,7 +523,7 @@ test("impl authorize replay stays idempotent for a current authorization and doe
       JSON.stringify({ authorization: record, readiness: dependencyReadinessEvidence("satisfied") }),
       "utf8",
     );
-    const replay = await invoke(["impl", "authorize", "42", "--from", replayPath, "--json"], adapter);
+    const replay = await invoke(["impl", "authorize", "42", "--from", replayPath, "--detail", "--json"], adapter);
     assert.equal(replay.exitCode, 0);
     assert.deepEqual((replay.output.authorization as Record<string, unknown>).record, record);
 
@@ -419,7 +533,10 @@ test("impl authorize replay stays idempotent for a current authorization and doe
       JSON.stringify({ authorization: record, readiness: dependencyReadinessEvidence("blocked") }),
       "utf8",
     );
-    const invalidated = await invoke(["impl", "authorize", "42", "--from", invalidatedPath, "--json"], adapter);
+    const invalidated = await invoke(
+      ["impl", "authorize", "42", "--from", invalidatedPath, "--detail", "--json"],
+      adapter,
+    );
     assert.equal(invalidated.exitCode, 2);
     assert.deepEqual((invalidated.output.authorization as Record<string, unknown>).record, record);
   } finally {
@@ -431,11 +548,13 @@ test("impl authorize omitting --from entirely fails closed the same as empty evi
   const adapter = new ImplementationCliAdapter(implementationBody());
   const authorized = await invoke(["impl", "authorize", "42", "--json"], adapter);
   assert.equal(authorized.exitCode, 2);
-  const authorization = authorized.output.authorization as Record<string, unknown>;
-  assert.equal(authorization.authorized, false);
-  assert.equal(authorization.record, undefined);
-  const readiness = authorization.readiness as Record<string, unknown>;
-  assert.equal(readiness.classification, "INVALID");
+  assert.equal(authorized.output.authorized, false);
+  assert.equal(authorized.output.readiness, "INVALID");
+  assert.ok(
+    (authorized.output.violations as Array<Record<string, unknown>>).some(
+      (entry) => entry.code === "READINESS_DEPENDENCY_EVIDENCE_MISSING",
+    ),
+  );
 });
 
 test("impl authorize surfaces free-form prerequisites as unverified without blocking or auto-satisfying them", async () => {
@@ -443,7 +562,10 @@ test("impl authorize surfaces free-form prerequisites as unverified without bloc
   const directory = await mkdtemp(path.join(os.tmpdir(), "inari-implementation-authorize-prereq-cli-"));
   try {
     const readinessPath = await writeReadinessFrom(directory, dependencyReadinessEvidence("satisfied"));
-    const authorized = await invoke(["impl", "authorize", "42", "--from", readinessPath, "--json"], adapter);
+    const authorized = await invoke(
+      ["impl", "authorize", "42", "--from", readinessPath, "--detail", "--json"],
+      adapter,
+    );
     assert.equal(authorized.exitCode, 0);
     assert.equal((authorized.output.authorization as Record<string, unknown>).authorized, true);
     const readiness = (authorized.output.authorization as Record<string, unknown>).readiness as Record<string, unknown>;
@@ -472,9 +594,7 @@ test("impl inspect uses provider relationship authority and detects stale base e
     const staleAdapter = new ImplementationCliAdapter(implementationBody(), { ...BRANCH, sha: "b".repeat(40) });
     const stale = await invoke(["impl", "authorize", "42", "--json"], staleAdapter);
     assert.equal(stale.exitCode, 2);
-    const violations = (stale.output.authorization as Record<string, unknown>).violations as Array<
-      Record<string, unknown>
-    >;
+    const violations = stale.output.violations as Array<Record<string, unknown>>;
     assert.ok(violations.some((entry) => entry.code === "IMPLEMENTATION_AUTHORIZATION_BASE_REVISION_MISMATCH"));
   } finally {
     await rm(directory, { recursive: true, force: true });

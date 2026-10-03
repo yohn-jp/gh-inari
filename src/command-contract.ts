@@ -9,7 +9,7 @@
 import { defineCommands, option as canonOption, positional as canonPositional } from "@yohn-jp/cli-canon";
 import { z } from "zod";
 
-export const COMMAND_CONTRACT_VERSION = "1.18.0" as const;
+export const COMMAND_CONTRACT_VERSION = "1.19.0" as const;
 export const COMMAND_CONTRACT_ID = `urn:inari:command-contract:${COMMAND_CONTRACT_VERSION}` as const;
 
 export const AGENT_INVOCATION_CONTRACT = {
@@ -321,6 +321,7 @@ const PR_REVIEW_OPTIONS = ["help", "json", "repository", "expectedHead", "review
 const PR_MERGE_OPTIONS = ["help", "json", "repository", "expectedHead", "expectedBase", "mergeStrategy"] as const;
 const PR_ROUTING_OPTIONS = ["help", "json", "from"] as const;
 const IMPLEMENTATION_OPTIONS = ["help", "json", "repository", "from", "capability"] as const;
+const IMPLEMENTATION_OPERATIONAL_OPTIONS = [...IMPLEMENTATION_OPTIONS, "detail"] as const;
 const IMPLEMENTATION_VERIFY_OPTIONS = [...IMPLEMENTATION_OPTIONS, "pullRequest", "executionEvidence"] as const;
 
 const option = (
@@ -792,7 +793,7 @@ export const COMMAND_OPTIONS = {
     ["--detail"],
     "boolean",
     "none",
-    "Show every setup step, owner observation and diagnostic.",
+    "Show full canonical, governed, and diagnostic evidence when supported.",
   ),
   yes: option(
     "yes",
@@ -1579,8 +1580,8 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "impl",
     "validate",
     ["impl", "validate"],
-    "Validate an existing Implementation body against the canonical contract without mutation.",
-    IMPLEMENTATION_OPTIONS,
+    "Validate an existing Implementation body and report its operational status without mutation.",
+    IMPLEMENTATION_OPERATIONAL_OPTIONS,
     "<number>",
   ),
   command(
@@ -1588,8 +1589,8 @@ export const INARI_COMMANDS: readonly CommandDefinition[] = [
     "impl",
     "authorize",
     ["impl", "authorize"],
-    "Authorize one current canonical Implementation body through the #572 Core boundary.",
-    IMPLEMENTATION_OPTIONS,
+    "Authorize one current canonical Implementation body and report its operational status through Core.",
+    IMPLEMENTATION_OPERATIONAL_OPTIONS,
     "<number>",
   ),
   command(

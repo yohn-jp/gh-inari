@@ -71,6 +71,15 @@ test("Implementation command projection is a complete view of the command author
   assert.ok(verify);
   assert.match(verify.usage, /--from <path>/u);
   assert.match(verify.usage, /--pr <number>/u);
+
+  const validate = getCommand("impl.validate");
+  const authorize = getCommand("impl.authorize");
+  assert.equal(validate.optionIds.includes("detail"), true);
+  assert.equal(authorize.optionIds.includes("detail"), true);
+  assert.equal(getCommand("impl.show").optionIds.includes("detail"), false);
+  assert.equal(getCommand("impl.inspect").optionIds.includes("detail"), false);
+  assert.match(commandUsage(validate), /--detail/u);
+  assert.match(commandUsage(authorize), /--detail/u);
 });
 
 test("Skill Implementation workflow tracks every authoritative impl command", () => {
