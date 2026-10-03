@@ -7,10 +7,10 @@ import {
   type ChangeMutationRequest,
   type ChangeReadRequest,
 } from "../../change-execution-port.js";
-import {
-  AUTHORIZED_EXECUTION_PHASES,
-  type AuthorizedExecutionOperation,
-  type AuthorizedExecutionResult,
+import type {
+  AuthorizedExecutionOperation,
+  AuthorizedExecutionPhase,
+  AuthorizedExecutionResult,
 } from "../../authorized-execution.js";
 import type { LocalSessionBinding } from "../../local-control/session-binding.js";
 import { validateExecutionIntent, type ExecutionIntent } from "../../local-control/execution-intent.js";
@@ -448,12 +448,24 @@ export function createSessionExecutionIntent(
   return validation.intent;
 }
 
+function isAuthorizedExecutionPhase(value: unknown): value is AuthorizedExecutionPhase {
+  return (
+    value === "authentication" ||
+    value === "request" ||
+    value === "authorization" ||
+    value === "evidence" ||
+    value === "execution" ||
+    value === "conflict" ||
+    value === "verification" ||
+    value === "recovery-required"
+  );
+}
+
 function boundedExecutionFailure(value: unknown, operation: string): LocalAdmissionExecutionFailureDetails | undefined {
   if (!isRecord(value)) return undefined;
   if (
     value.code !== "SESSION_EXECUTION_FAILED" ||
-    typeof value.phase !== "string" ||
-    !AUTHORIZED_EXECUTION_PHASES.includes(value.phase as (typeof AUTHORIZED_EXECUTION_PHASES)[number]) ||
+    !isAuthorizedExecutionPhase(value.phase) ||
     typeof value.message !== "string" ||
     value.message.length === 0 ||
     value.message.length > 240 ||
