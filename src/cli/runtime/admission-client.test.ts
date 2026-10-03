@@ -409,7 +409,7 @@ test("HTTP-successful semantic execution failures preserve bounded owner evidenc
                 issuer: "app:inari",
                 effects: [],
                 failure: {
-                  kind: "UPDATE_PULL_REQUEST",
+                  kind: "MARK_PULL_REQUEST_READY",
                   code: "CHANGE_EFFECT_FAILED",
                   message: "Bounded effect failure.",
                 },
@@ -443,7 +443,7 @@ test("HTTP-successful semantic execution failures preserve bounded owner evidenc
         issuer: "app:inari",
         effects: [],
         failure: {
-          kind: "UPDATE_PULL_REQUEST",
+          kind: "MARK_PULL_REQUEST_READY",
           code: "CHANGE_EFFECT_FAILED",
           message: "Bounded effect failure.",
         },
