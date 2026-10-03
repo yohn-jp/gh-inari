@@ -947,7 +947,10 @@ async function certifyDashboardBoundary(modules) {
   );
   const dashboardDist = path.join(repoRoot, "apps", "dashboard", "dist");
   const onboardingAsset = path.join(dashboardDist, ".well-known", "inari");
-  if (!fs.existsSync(path.join(dashboardDist, "index.html")) || !fs.existsSync(path.join(dashboardDist, "browser.js"))) {
+  if (
+    !fs.existsSync(path.join(dashboardDist, "index.html")) ||
+    !fs.existsSync(path.join(dashboardDist, "browser.js"))
+  ) {
     execFileSync("pnpm", ["--dir", "apps/dashboard", "build"], { cwd: repoRoot, stdio: "inherit" });
   }
   if (!fs.existsSync(onboardingAsset) || !fs.existsSync(path.join(dashboardDist, "_headers"))) {
