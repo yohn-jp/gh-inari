@@ -176,12 +176,10 @@ test("provider-backed branch policy remains bounded at 60 seconds", async () => 
         signal.addEventListener("abort", () => reject(signal.reason), { once: true });
       }),
   });
-  const result = admission
-    .readBranchPolicy({ id: "1330755860", name: "yohn-jp/gh-inari" }, 1232)
-    .then(
-      () => new Error("branch policy unexpectedly succeeded"),
-      (error: unknown) => error,
-    );
+  const result = admission.readBranchPolicy({ id: "1330755860", name: "yohn-jp/gh-inari" }, 1232).then(
+    () => new Error("branch policy unexpectedly succeeded"),
+    (error: unknown) => error,
+  );
 
   timers.advanceBy(60_000);
   const error = await result;
