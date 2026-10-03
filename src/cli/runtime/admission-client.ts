@@ -448,10 +448,7 @@ export function createSessionExecutionIntent(
   return validation.intent;
 }
 
-function boundedExecutionFailure(
-  value: unknown,
-  operation: string,
-): LocalAdmissionExecutionFailureDetails | undefined {
+function boundedExecutionFailure(value: unknown, operation: string): LocalAdmissionExecutionFailureDetails | undefined {
   if (!isRecord(value)) return undefined;
   if (
     value.code !== "SESSION_EXECUTION_FAILED" ||
