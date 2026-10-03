@@ -2003,10 +2003,23 @@ async function runSetupApplicationCommand(
       JSON.stringify(
         result.kind === "result"
           ? { ok: result.result.outcome === "succeeded", operation, kind: result.kind, result: result.result }
-          : { ok: result.kind === "state", operation, kind: result.kind, state: result.state },
+          : result.kind === "handoff"
+            ? {
+                ok: true,
+                operation,
+                kind: result.kind,
+                state: result.state,
+                handoff: {
+                  actionId: result.action.id,
+                  owner: result.action.owner,
+                  command: result.command,
+                },
+              }
+            : { ok: result.kind === "state", operation, kind: result.kind, state: result.state },
       ),
     );
   } else console.log(result.output);
+  if (result.kind === "handoff") return 0;
   if (result.kind === "state") return 0;
   if (result.kind === "result") return result.result.outcome === "succeeded" ? 0 : EXIT_REMOTE;
   return result.kind === "input-required" ? EXIT_VALIDATION : EXIT_USAGE;

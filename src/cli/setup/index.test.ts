@@ -52,6 +52,49 @@ test("compact state gives one next action and input prose; detail reports observ
   assert.match(renderSetupHelp(state), /Issuer App ID: text \(required\)/);
 });
 
+test("starting the Runtime hands off to its canonical owner without dispatching in the short-lived CLI", async () => {
+  const runtimeAction = {
+    ...action,
+    id: "composition.start-runtime:abc",
+    kind: "composition.start-runtime",
+    owner: "composition" as const,
+    title: "Start the local Runtime",
+    inputs: [],
+    confirmation: { required: false, summary: "Start the local Runtime Supervisor." },
+    command: { executable: "inari", argv: ["runtime", "supervise"] },
+  };
+  const runtimeState = {
+    ...state,
+    stage: "trusted",
+    actions: [runtimeAction],
+    nextAction: { kind: "perform", step: "health", actionId: runtimeAction.id, reconcile: false },
+  } as SetupState;
+  const application: SetupApplication = {
+    state: async () => runtimeState,
+    perform: async () => {
+      throw new Error("the observe-only CLI must not dispatch Runtime start");
+    },
+  };
+
+  const handoff = await runSetupAction(application, repository, { execute: true });
+  assert.equal(handoff.kind, "handoff");
+  if (handoff.kind !== "handoff") return;
+  assert.equal(handoff.action.owner, "composition");
+  assert.deepEqual(handoff.command, { executable: "inari", argv: ["runtime", "supervise"] });
+  assert.match(handoff.output, /short-lived CLI does not own long-running Runtime children/u);
+  assert.match(handoff.output, /Run the canonical Runtime supervisor command:\n  inari runtime supervise/u);
+
+  const jsonHandoff = await runSetupAction(application, repository, { execute: true, json: true });
+  assert.equal(jsonHandoff.kind, "handoff");
+  if (jsonHandoff.kind !== "handoff") return;
+  assert.deepEqual(JSON.parse(jsonHandoff.output), {
+    outcome: "handoff",
+    actionId: runtimeAction.id,
+    owner: "composition",
+    command: { executable: "inari", argv: ["runtime", "supervise"] },
+  });
+});
+
 test("non-TTY and JSON do not prompt; explicit input and confirmation dispatch exactly once", async () => {
   let calls = 0;
   let prompts = 0;

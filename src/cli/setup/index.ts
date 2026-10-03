@@ -101,6 +101,13 @@ export interface SetupRunOptions {
 export type SetupRunResult =
   | { readonly kind: "state"; readonly state: SetupState; readonly output: string }
   | { readonly kind: "result"; readonly result: SetupActionResult; readonly output: string }
+  | {
+      readonly kind: "handoff";
+      readonly state: SetupState;
+      readonly action: SetupAction;
+      readonly command: StructuredCommand;
+      readonly output: string;
+    }
   | { readonly kind: "input-required" | "cancelled"; readonly state: SetupState; readonly output: string };
 
 /** Explicit execution only. JSON and non-TTY calls never prompt. */
@@ -123,6 +130,17 @@ export async function runSetupAction(
       state,
       output: options.json ? JSON.stringify(state) : renderSetupState(state, options.detail),
     };
+  if (action.kind === "composition.start-runtime" && action.command !== undefined) {
+    return {
+      kind: "handoff",
+      state,
+      action,
+      command: action.command,
+      output: options.json
+        ? JSON.stringify({ outcome: "handoff", actionId: action.id, owner: action.owner, command: action.command })
+        : `${renderSetupState(state, options.detail)}\nThe short-lived CLI does not own long-running Runtime children. Run the canonical Runtime supervisor command:\n  ${renderShellCommand(action.command)}`,
+    };
+  }
   const inputs: Record<string, string | boolean> = { ...options.inputs };
   const enrollmentFiles: Record<string, string> = { ...options.enrollmentFiles };
   for (const input of action.inputs) {

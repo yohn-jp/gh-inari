@@ -402,10 +402,29 @@ async function certifyGoldenPath(scenario) {
       state = ok(cli(["setup", "status", ...setupArgs]), "status after trust").state;
       assert.equal(dimension(state, "repository-trust").status, "trusted");
       assert.equal(nextKind(state), "composition.start-runtime");
-      // A short-lived CLI never claims to own the long-running Runtime.
-      const unowned = cli(["setup", "next", ...setupArgs, "--yes"]);
-      assert.notEqual(unowned.status, 0);
-      assert.equal(lastJson(unowned).result.diagnostics[0].code, "SETUP_RUNTIME_OWNER_REQUIRED");
+      // `next` returns the same canonical next action and hands Runtime start to
+      // its long-running owner instead of attempting it through the short-lived CLI.
+      const statusBeforeHandoff = ok(cli(["setup", "status", ...setupArgs]), "status before Runtime handoff");
+      const handoff = ok(cli(["setup", "next", ...setupArgs, "--yes"]), "Runtime start handoff");
+      assert.equal(handoff.ok, true);
+      assert.equal(handoff.kind, "handoff");
+      assert.equal(handoff.state.stage, statusBeforeHandoff.state.stage);
+      assert.deepEqual(handoff.state.generation, statusBeforeHandoff.state.generation);
+      assert.deepEqual(handoff.state.nextAction, statusBeforeHandoff.state.nextAction);
+      assert.deepEqual(handoff.handoff, {
+        actionId: handoff.state.nextAction.actionId,
+        owner: "composition",
+        command: { executable: "inari", argv: ["runtime", "supervise"] },
+      });
+
+      const humanArgs = ["--repository", REPOSITORY, "--repository-id", REPOSITORY_ID];
+      const humanStatus = cli(["setup", "status", ...humanArgs]);
+      const humanHandoff = cli(["setup", "next", ...humanArgs]);
+      assert.equal(humanStatus.status, 0, humanStatus.stderr);
+      assert.equal(humanHandoff.status, 0, humanHandoff.stderr);
+      assert.ok(humanHandoff.stdout.startsWith(humanStatus.stdout.trimEnd()));
+      assert.match(humanHandoff.stdout, /short-lived CLI does not own long-running Runtime children/u);
+      assert.match(humanHandoff.stdout, /inari runtime supervise/u);
 
       // ---- 2. Fresh shell -> Runtime ------------------------------------------
       // A new shell: only the config home (plus the provider stand-in). No Issuer
@@ -440,6 +459,7 @@ async function certifyGoldenPath(scenario) {
       processes.push(supervisor);
       assert.equal(dimension(state, "health").status, "healthy");
       assert.equal(state.stage, "task-ready");
+      assert.deepEqual(state.generation, statusBeforeHandoff.state.generation);
       // ---- 3. Canonical Implementation and branch -----------------------------
       // The maintainer files the governed Implementation from the repository template,
       // pinned to the current protected default-branch revision.
