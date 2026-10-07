@@ -207,11 +207,13 @@ import {
 import type { SetupTerminalIO } from "./cli/setup/index.js";
 import { superviseLocalRuntime } from "./local-control/supervisor.js";
 import {
+  authorizedResult,
   createAdmissionChangeExecutionPort,
   createLocalAdmissionClient,
   createSessionExecutionIntent,
   configuredLocalAdmissionTopology,
   requireConfiguredLocalAdmissionRoute,
+  LocalAdmissionClientError,
 } from "./cli/runtime/admission-client.js";
 import {
   closeLocalSession,
@@ -222,7 +224,6 @@ import {
 import {
   validateBranchAdvanceSemanticRequest,
   type BranchAdvanceSemanticRequest,
-  type BranchAdvanceSemanticResult,
 } from "./agent-authority/branch-advance.js";
 import { projectPublishTreeDelta, resolveLocalRepositoryNameWithOwner } from "./change-publish-projection.js";
 import { resolveLocalRepositoryContext } from "./github/local-repository-context.js";
@@ -249,6 +250,7 @@ import {
 } from "./semantic-pr-mutation.js";
 import { compareSemanticBranchProjection, tryObserveSemanticBranch } from "./semantic-branch-observation.js";
 import { validateLocalBranchPolicyInput } from "./cli/runtime/branch-observation.js";
+import { isSecretSafeBoundedText } from "./change-failure-diagnostics.js";
 import { GitHubIssueRelationObservationAdapter } from "./github/issue-relation-observation-adapter.js";
 import {
   LocalSemanticPullRequestExecutor,
@@ -2417,6 +2419,346 @@ async function readLocalPublishProjection(
   return current.projection;
 }
 
+interface LocalAdmissionOperationEvidence {
+  readonly effectOutcome: "applied" | "not-applied" | "unknown";
+  readonly branchAdvance?: Readonly<Record<string, unknown>>;
+  readonly publication?: Readonly<Record<string, unknown>>;
+}
+
+interface LocalAdmissionExecutionResolution {
+  readonly raw: unknown;
+  readonly result?: ReturnType<typeof authorizedResult>;
+  readonly failure?: LocalAdmissionClientError;
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function unknownAdmissionEffect(operation: string, causeCode: string): CliError {
+  return new CliError(
+    "ADMISSION_EFFECT_UNKNOWN",
+    "Admission did not provide a valid execution outcome. Inspect the provider state before retrying.",
+    undefined,
+    { operation, effectOutcome: "unknown", causeCode },
+  );
+}
+
+function isAmbiguousAdmissionExecutionFailure(error: unknown): error is LocalAdmissionClientError {
+  return (
+    error instanceof LocalAdmissionClientError &&
+    ([
+      "ADMISSION_EXECUTION_TIMEOUT",
+      "ADMISSION_TRANSPORT_FAILED",
+      "ADMISSION_RESPONSE_INVALID",
+      "ADMISSION_RESPONSE_TOO_LARGE",
+    ].includes(error.code) ||
+      (error.details?.endpoint === "execution" && error.details.stage === "provider-execution"))
+  );
+}
+
+function preserveUnknownProviderExecutionFailure(
+  error: LocalAdmissionClientError,
+  operation: "branch.advance" | "pullRequest.publish",
+): CliError {
+  const details = error.details ?? { endpoint: "execution" as const, status: error.status ?? 500 };
+  const message = isSecretSafeBoundedText(error.message, 512)
+    ? error.message
+    : "The Admission provider execution outcome is unknown.";
+  return new CliError(error.code, message, undefined, {
+    ...details,
+    operation,
+    effectOutcome: "unknown",
+    causeCode: error.code,
+  });
+}
+
+async function resolveLocalAdmissionExecution(
+  context: LocalAdmissionSessionContext,
+  operation: "branch.advance" | "pullRequest.publish",
+  request: unknown,
+): Promise<LocalAdmissionExecutionResolution> {
+  const intent = createSessionExecutionIntent(context.binding, operation, request);
+  let raw: unknown;
+  try {
+    raw = await context.client.executeIntent(intent, context.sessionId);
+  } catch (error: unknown) {
+    if (isAmbiguousAdmissionExecutionFailure(error)) {
+      if (
+        error instanceof LocalAdmissionClientError &&
+        error.details?.endpoint === "execution" &&
+        error.details.stage === "provider-execution"
+      ) {
+        throw preserveUnknownProviderExecutionFailure(error, operation);
+      }
+      throw unknownAdmissionEffect(operation, error.code);
+    }
+    throw error;
+  }
+  try {
+    return { raw, result: authorizedResult(raw, operation) };
+  } catch (error: unknown) {
+    if (error instanceof LocalAdmissionClientError && error.code === "ADMISSION_EXECUTION_FAILED") {
+      return { raw, failure: error };
+    }
+    if (isAmbiguousAdmissionExecutionFailure(error)) throw unknownAdmissionEffect(operation, error.code);
+    throw error;
+  }
+}
+
+function projectLocalAdmissionExecutionFailure(
+  error: LocalAdmissionClientError,
+  operation: "branch.advance" | "pullRequest.publish",
+  evidence: LocalAdmissionOperationEvidence,
+): CliError {
+  const executionFailure = error.details?.executionFailure;
+  if (executionFailure === undefined) {
+    return new CliError(error.code, "Admission reported an execution failure without bounded owner details.");
+  }
+  const ownerMessage = isSecretSafeBoundedText(executionFailure.message, 240)
+    ? executionFailure.message
+    : "Session execution failed.";
+  const diagnostics = executionFailure.diagnostics;
+  const safeDiagnostics =
+    Array.isArray(diagnostics) &&
+    diagnostics.length <= 16 &&
+    diagnostics.every(
+      (candidate) =>
+        isRecordValue(candidate) &&
+        hasOnlyKeys(candidate, new Set(["version", "code", "path", "message"])) &&
+        candidate.version === 1 &&
+        isSecretSafeBoundedText(candidate.code, 128) &&
+        isSecretSafeBoundedText(candidate.path, 512) &&
+        isSecretSafeBoundedText(candidate.message, 1024),
+    )
+      ? diagnostics
+      : undefined;
+  return new CliError(error.code, `${ownerMessage} (phase: ${executionFailure.phase})`, undefined, {
+    endpoint: "execution",
+    status: 200,
+    operation,
+    effectOutcome: evidence.effectOutcome,
+    executionFailure: {
+      code: "SESSION_EXECUTION_FAILED",
+      phase: executionFailure.phase,
+      message: ownerMessage,
+      ...(safeDiagnostics === undefined ? {} : { diagnostics: safeDiagnostics }),
+    },
+    ...(evidence.branchAdvance === undefined ? {} : { branchAdvance: evidence.branchAdvance }),
+    ...(evidence.publication === undefined ? {} : { publication: evidence.publication }),
+  });
+}
+
+function projectLocalPrPublicationEvidence(
+  value: unknown,
+  repositoryName: string,
+): LocalAdmissionOperationEvidence | undefined {
+  if (!isRecordValue(value)) return undefined;
+  const allowed = new Set([
+    "version",
+    "kind",
+    "ok",
+    "classification",
+    "outcome",
+    "pullRequest",
+    "routing",
+    "diagnostics",
+    "effects",
+  ]);
+  if (
+    !hasOnlyKeys(value, allowed) ||
+    value.version !== 1 ||
+    value.kind !== "pr-publication" ||
+    !["created", "returned-existing", "failed"].includes(value.classification as string) ||
+    value.outcome !== value.classification ||
+    value.ok !== (value.classification !== "failed") ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length > 16 ||
+    !Array.isArray(value.effects) ||
+    value.effects.length !== 1
+  ) {
+    return undefined;
+  }
+
+  const diagnostics: { readonly code: string; readonly path: string; readonly message: string }[] = [];
+  for (const candidate of value.diagnostics) {
+    if (
+      !isRecordValue(candidate) ||
+      !hasOnlyKeys(candidate, new Set(["code", "path", "message"])) ||
+      !isSecretSafeBoundedText(candidate.code, 128) ||
+      !isSecretSafeBoundedText(candidate.path, 512) ||
+      !isSecretSafeBoundedText(candidate.message, 1024)
+    ) {
+      return undefined;
+    }
+    diagnostics.push({ code: candidate.code, path: candidate.path, message: candidate.message });
+  }
+
+  const effect = value.effects[0];
+  if (
+    !isRecordValue(effect) ||
+    !hasOnlyKeys(effect, new Set(["kind", "status"])) ||
+    effect.kind !== "CREATE_PULL_REQUEST" ||
+    (effect.status !== "succeeded" && effect.status !== "not-attempted") ||
+    (value.classification === "created" && effect.status !== "succeeded") ||
+    (value.classification === "returned-existing" && effect.status !== "not-attempted")
+  ) {
+    return undefined;
+  }
+
+  let pullRequest: Readonly<{ readonly number: number; readonly url: string }> | undefined;
+  if (value.pullRequest !== undefined) {
+    if (
+      !isRecordValue(value.pullRequest) ||
+      !hasOnlyKeys(value.pullRequest, new Set(["number", "url"])) ||
+      !Number.isSafeInteger(value.pullRequest.number) ||
+      (value.pullRequest.number as number) < 1 ||
+      typeof value.pullRequest.url !== "string" ||
+      value.pullRequest.url.length > 2048
+    ) {
+      return undefined;
+    }
+    let url: URL;
+    try {
+      url = new URL(value.pullRequest.url);
+    } catch {
+      return undefined;
+    }
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== "github.com" ||
+      url.username.length > 0 ||
+      url.password.length > 0 ||
+      url.port.length > 0 ||
+      url.search.length > 0 ||
+      url.hash.length > 0 ||
+      url.pathname.toLocaleLowerCase("en-US") !==
+        `/${repositoryName}/pull/${value.pullRequest.number}`.toLocaleLowerCase("en-US")
+    ) {
+      return undefined;
+    }
+    pullRequest = { number: value.pullRequest.number as number, url: url.toString() };
+  }
+
+  let routing: unknown;
+  if (value.routing !== undefined) {
+    const validatedRouting = tryAdaptIntegrationRouting(value.routing);
+    if (!validatedRouting.valid || validatedRouting.projection === undefined) return undefined;
+    routing = validatedRouting.projection;
+  }
+
+  const publication = {
+    version: 1,
+    kind: "pr-publication",
+    ok: value.ok,
+    classification: value.classification,
+    outcome: value.outcome,
+    ...(pullRequest === undefined ? {} : { pullRequest }),
+    ...(routing === undefined ? {} : { routing }),
+    diagnostics,
+    effects: [{ kind: "CREATE_PULL_REQUEST", status: effect.status }],
+  };
+  if (JSON.stringify(publication).length > 16_384) return undefined;
+  return {
+    effectOutcome:
+      effect.status === "succeeded" ? "applied" : value.classification === "failed" ? "unknown" : "not-applied",
+    publication,
+  };
+}
+
+function projectLocalBranchAdvanceEvidence(
+  value: unknown,
+  branch: string,
+  expectedHead: string,
+): LocalAdmissionOperationEvidence | undefined {
+  if (!isRecordValue(value)) return undefined;
+  const allowed = new Set([
+    "version",
+    "operation",
+    "status",
+    "outcome",
+    "branch",
+    "expectedHead",
+    "resultingHead",
+    "provenance",
+    "failure",
+  ]);
+  const outcomes = ["advanced", "idempotent", "stale", "failed", "recovery-required"];
+  if (
+    !hasOnlyKeys(value, allowed) ||
+    value.version !== 1 ||
+    value.operation !== "branch.advance" ||
+    value.branch !== branch ||
+    value.expectedHead !== expectedHead ||
+    !/^[0-9a-f]{40}$/iu.test(expectedHead) ||
+    !outcomes.includes(value.outcome as string)
+  ) {
+    return undefined;
+  }
+  const succeeded = value.outcome === "advanced" || value.outcome === "idempotent";
+  if (value.status !== (succeeded ? "succeeded" : "failed")) return undefined;
+  let resultingHead: string | undefined;
+  if (value.resultingHead !== undefined) {
+    if (typeof value.resultingHead !== "string" || !/^[0-9a-f]{40}$/iu.test(value.resultingHead)) return undefined;
+    resultingHead = value.resultingHead.toLowerCase();
+  }
+  if (succeeded && resultingHead === undefined) return undefined;
+
+  let failure: Readonly<{ readonly code: string; readonly reason: string; readonly message: string }> | undefined;
+  if (value.failure !== undefined) {
+    const reasons = [
+      "request",
+      "authorization",
+      "branch-state",
+      "protected-path",
+      "stale-head",
+      "provider",
+      "verification",
+      "recovery-required",
+    ];
+    if (
+      !isRecordValue(value.failure) ||
+      !hasOnlyKeys(value.failure, new Set(["code", "reason", "message"])) ||
+      value.failure.code !== "BRANCH_ADVANCE_FAILED" ||
+      !reasons.includes(value.failure.reason as string) ||
+      !isSecretSafeBoundedText(value.failure.message, 240)
+    ) {
+      return undefined;
+    }
+    failure = {
+      code: "BRANCH_ADVANCE_FAILED",
+      reason: value.failure.reason as string,
+      message: value.failure.message,
+    };
+  }
+  if ((value.status === "failed") !== (failure !== undefined)) return undefined;
+
+  const advance = {
+    version: 1,
+    operation: "branch.advance",
+    status: value.status,
+    outcome: value.outcome,
+    branch,
+    expectedHead,
+    ...(resultingHead === undefined ? {} : { resultingHead }),
+    ...(failure === undefined ? {} : { failure }),
+  };
+  if (JSON.stringify(advance).length > 16_384) return undefined;
+  const effectOutcome = succeeded
+    ? "applied"
+    : value.outcome === "recovery-required" ||
+        failure?.reason === "provider" ||
+        failure?.reason === "verification" ||
+        failure?.reason === "recovery-required"
+      ? "unknown"
+      : "not-applied";
+  return { effectOutcome, branchAdvance: advance };
+}
+
 async function runLocalAdmissionChangePublishCommand(
   issue: number,
   parsed: ParsedArgs,
@@ -2459,34 +2801,35 @@ async function runLocalAdmissionChangePublishCommand(
       },
     );
   }
-  const intent = createSessionExecutionIntent(context.binding, "branch.advance", validated.value);
-  const raw = await context.client.executeIntent(intent, context.sessionId);
-  if (
-    typeof raw !== "object" ||
-    raw === null ||
-    Array.isArray(raw) ||
-    (raw as Record<string, unknown>).operation !== "branch.advance"
-  ) {
-    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid branch.advance result.");
+  const execution = await resolveLocalAdmissionExecution(context, "branch.advance", validated.value);
+  if (execution.failure !== undefined) {
+    const record = isRecordValue(execution.raw) ? execution.raw : undefined;
+    const evidence = projectLocalBranchAdvanceEvidence(record?.branchAdvance, canonicalBranch, expectedHead) ?? {
+      effectOutcome: "unknown" as const,
+    };
+    throw projectLocalAdmissionExecutionFailure(execution.failure, "branch.advance", evidence);
   }
-  const authorized = raw as { readonly status?: unknown; readonly branchAdvance?: BranchAdvanceSemanticResult };
-  const advance = authorized.branchAdvance;
-  if (authorized.status !== "succeeded" || advance === undefined || advance.status !== "succeeded") {
-    if (advance?.status === "failed") {
-      console.log(
-        JSON.stringify({
-          ok: false,
-          operation: "change.publish",
-          issue,
-          branch: advance.branch,
-          expectedHead: advance.expectedHead,
-          commit: treeDelta.commit,
-          outcome: advance.outcome,
-        }),
-      );
-      return EXIT_REMOTE;
-    }
-    throw new CliError("ADMISSION_EXECUTION_DENIED", "Admission did not authorize branch.advance.");
+  const advanceResult = execution.result?.branchAdvance;
+  const evidence = projectLocalBranchAdvanceEvidence(advanceResult, canonicalBranch, expectedHead);
+  if (evidence?.branchAdvance === undefined) {
+    throw unknownAdmissionEffect("branch.advance", "ADMISSION_RESPONSE_INVALID");
+  }
+  const advance = evidence.branchAdvance;
+  if (advance.status !== "succeeded") {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        operation: "change.publish",
+        issue,
+        branch: advance.branch,
+        expectedHead: advance.expectedHead,
+        commit: treeDelta.commit,
+        outcome: advance.outcome,
+        effectOutcome: evidence.effectOutcome,
+        ...(advance.failure === undefined ? {} : { failure: advance.failure }),
+      }),
+    );
+    return EXIT_REMOTE;
   }
   const resultBranch = advance.branch;
   const resultingHead = advance.resultingHead;
@@ -2606,33 +2949,35 @@ async function publishPullRequestThroughLocalAdmission(
       "ADMISSION_SESSION_REPOSITORY_MISMATCH",
       "The PR publication repository does not match the selected Session.",
     );
-  const intent = createSessionExecutionIntent(context.binding, "pullRequest.publish", input);
-  const raw = await context.client.executeIntent(intent, context.sessionId);
-  if (
-    typeof raw !== "object" ||
-    raw === null ||
-    Array.isArray(raw) ||
-    (raw as Record<string, unknown>).operation !== "pullRequest.publish"
-  )
-    throw new CliError("ADMISSION_RESPONSE_INVALID", "Admission returned an invalid PR publication result.");
-  const result = raw as {
-    readonly status?: unknown;
-    readonly publication?: { readonly ok?: boolean; readonly classification?: string };
-    readonly provenance?: { readonly app?: unknown };
-  };
-  const publication = result.publication;
+  const execution = await resolveLocalAdmissionExecution(context, "pullRequest.publish", input);
+  if (execution.failure !== undefined) {
+    const record = isRecordValue(execution.raw) ? execution.raw : undefined;
+    const evidence = projectLocalPrPublicationEvidence(record?.publication, context.binding.repository.name) ?? {
+      effectOutcome: "unknown" as const,
+    };
+    throw projectLocalAdmissionExecutionFailure(execution.failure, "pullRequest.publish", evidence);
+  }
+  const result = execution.result;
+  const evidence = projectLocalPrPublicationEvidence(result?.publication, context.binding.repository.name);
+  if (result === undefined || result.status !== "succeeded" || evidence?.publication === undefined) {
+    throw unknownAdmissionEffect("pullRequest.publish", "ADMISSION_RESPONSE_INVALID");
+  }
+  const publication = evidence.publication;
+  if (publication.classification === "failed") {
+    throw unknownAdmissionEffect("pullRequest.publish", "ADMISSION_RESPONSE_INVALID");
+  }
   console.log(
     JSON.stringify({
       ...(typeof publication === "object" && publication !== null ? publication : {}),
-      ok: result.status === "succeeded" && publication?.ok === true,
+      ok: publication.ok === true,
       operation: "pr.publish",
       route: "local-admission",
       session: context.sessionId,
       mutation: publication?.classification === "created",
     }),
   );
-  if (result.status === "succeeded" && publication?.ok === true) return 0;
-  return publication === undefined ? EXIT_VALIDATION : EXIT_REMOTE;
+  if (publication.ok === true) return 0;
+  return EXIT_REMOTE;
 }
 
 /**
@@ -6096,6 +6441,14 @@ function classifyExitCode(error: unknown): number {
   if (isGitHubAdapterError(error)) return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code === "ADMISSION_OWNER_UNAVAILABLE") return EXIT_REMOTE;
   if (isObjectWithCode(error) && error.code === "ADMISSION_INTERNAL_FAILURE") return EXIT_INTERNAL;
+  if (isObjectWithCode(error) && error.code === "ADMISSION_EFFECT_UNKNOWN") return EXIT_REMOTE;
+  if (
+    isObjectWithCode(error) &&
+    error.code === "ADMISSION_EXECUTION_FAILED" &&
+    isRecordValue(error.details) &&
+    (error.details.operation === "branch.advance" || error.details.operation === "pullRequest.publish")
+  )
+    return EXIT_REMOTE;
   if (
     isObjectWithCode(error) &&
     typeof error.code === "string" &&
