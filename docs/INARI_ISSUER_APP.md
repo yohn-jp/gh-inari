@@ -163,7 +163,13 @@ repository's binding.
 ## 10. Execution and trusted code
 
 Normal execution uses user-owned Admission -> Executor. Independent Direct
-App and Hosted provider execution are retired target paths.
+App execution remains temporarily frozen compatibility under its existing
+explicit selection contract, outside the Local Admission lock. Existing
+Hosted/remote contracts remain unchanged only where still exposed; this
+decision does not restore previously removed routes or tools. Hosted/remote
+target details remain deferred and are not claimed as implemented, deployed,
+or certified live. Local Admission failure never silently falls back to a
+frozen route.
 
 Existing Actions protected-context validation belongs to that historical
 adapter, not the universal new trust model. Any retained adapter must feed the

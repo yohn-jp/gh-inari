@@ -125,8 +125,10 @@ Current reference modules include:
 Semantic Branch/PR planning, provider normalization, Session/remote caller
 admission, and transport protocols remain outside the machine implementation.
 
-Retiring Direct App does not delete a shared machine or planning helper merely
-because that profile historically called it.
+Future separately approved Direct App convergence does not delete a shared
+machine or planning helper merely because that profile historically called
+it. Direct App remains temporarily frozen compatibility outside the Local
+Admission lock.
 
 ## 4. Pure lifecycle machine
 
@@ -586,13 +588,16 @@ The current architecture renewal requires:
 1. Source/task/publication identity to be supplied consistently by every
    canonical caller;
 2. local and remote caller evidence to converge before operation execution;
-3. Hosted and retired Direct App code to stop owning parallel sequencing;
+3. the approved Hosted/Direct App convergence to stop owning parallel
+   sequencing after replacement-path proof; this is deferred from the Local
+   Admission lock and is not authorized by this Issue;
 4. public results to preserve bounded failure and recovery evidence;
 5. continuous packed composition to prove the resulting path.
 
 Do not revive the earlier imperative executor or create a second lifecycle
-machine to ease a migration. Retain a bounded adapter only while it feeds the
-same canonical machinery and has an explicit retirement condition.
+machine to ease a migration. Any future adapter retirement requires a
+separate explicit owner decision; this target does not set an expiry for
+existing compatibility.
 
 ## 19. Non-goals
 

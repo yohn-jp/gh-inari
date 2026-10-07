@@ -5,8 +5,11 @@ Status: normative domain contract under
 
 This document preserves the detailed lifecycle, publication, idempotency,
 compensation, provenance, and recovery contract. It replaces the former
-Implementation-root identity and independent deployment assumptions with the
-approved Source Change / Implementation task separation.
+Implementation-root identity assumption with the approved Source Change /
+Implementation task separation. Independent Direct App and Hosted convergence
+remain deferred from the Local Admission lock; existing compatibility
+selection and readers retain their current contracts where still exposed.
+Previously removed Hosted routes/tools are not restored.
 
 The target is not a claim that every current producer and consumer has already
 migrated. In particular, the Local #1213 binding correction is not proof of
@@ -525,9 +528,12 @@ Runtime verifies the configured issuer, subject, repository, App/installation,
 Relay target, time, and replay/request binding, then performs its own semantic
 admission. Eligibility does not grant all write capabilities.
 
-No independent Direct App executor or Hosted repository engine remains the
-target. Transport loss does not authorize execution elsewhere or through an
-ambient credential.
+The approved future target routes remote operations into common
+Admission/Executor. The existing explicit DirectApp execution route remains
+temporarily frozen compatibility outside the Local Admission lock. Hosted
+repository/remote convergence is deferred; any currently exposed contracts
+remain unchanged, and removed surfaces are not restored. Transport loss does
+not authorize execution elsewhere or through an ambient credential.
 
 ## 18. Actions and workflow integration
 
@@ -660,25 +666,33 @@ completion authority.
 
 Compatibility is directional: old data may be interpreted by an explicit
 versioned reader and adopted only when identity and semantics are proven.
-An old execution architecture is not retained merely because its serialized
-format still needs to be read.
+Existing explicit DirectApp compatibility remains under its current selection
+contract. A serialized-format reader does not authorize new execution
+selection or alter that compatibility.
 
-Direct App selection and independent Hosted semantic/provider execution are
-retired. Shared Core and effect helpers remain when the canonical Executor
+Direct App selection remains temporarily frozen compatibility under its
+existing contract. Hosted/remote convergence remains deferred; any currently
+exposed public contracts retain their current behavior. The Local Admission
+lock does not authorize removal, deprecation, disablement, migration, or
+expiry of those existing contracts, and does not restore removed Hosted
+surfaces. Shared Core and effect helpers remain when the canonical Executor
 uses them. No migration silently destroys user keys, owner state, active
 Sessions, or historical provenance.
 
 ## 27. Convergence sequence
 
 Freeze Source/task/publication identity before changing consumers. Establish
-current common Admission and owner binding. Route local and remote inputs to
-the same semantic operation composition. Prove standalone and Issue/Epic
-integration publication independently.
+current common Admission and owner binding. The approved target routes local
+and remote inputs to the same semantic operation composition. Prove standalone
+and Issue/Epic integration publication independently; remote convergence is
+deferred from the Local Admission lock.
 
 Preserve the existing Saga, ready, abort, and merge-policy contracts while
-replacing only their obsolete identity/transport composition. Remove old
-execution entry points after replacement public-path proof. Enable live
-provider enforcement only after the governed path and recovery are verified.
+replacing only their obsolete identity/transport composition. The approved
+target removes frozen execution entry points after replacement public-path
+proof. That convergence is deferred from the Local Admission lock, and this
+issue authorizes no removal or deployment change. Enable live provider
+enforcement only after the governed path and recovery are verified.
 
 ## 28. Verification matrix
 

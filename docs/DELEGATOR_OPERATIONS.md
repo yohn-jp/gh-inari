@@ -311,6 +311,9 @@ their versioned behavior until approved migration.
 
 These representation/API adapters do not retain independent Direct App
 execution, a Hosted Session engine, or a second trust source.
+Independent Direct App compatibility remains separately frozen under its
+existing explicit selection contract; that adapter statement does not remove
+or deprecate it.
 
 ## 16. Operator evidence
 

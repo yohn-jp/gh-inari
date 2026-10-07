@@ -87,8 +87,11 @@ mutations, and installation credentials never become caller credentials.
 ### 3.5 Interfaces
 
 CLI, MCP, Console, HTTP, and Relay bind these contracts to input and transport.
-They do not select weaker authorization semantics. Direct App is retired as
-an independent execution profile.
+They do not select weaker authorization semantics. Independent Direct App
+execution remains temporarily frozen compatibility under its existing
+selection contract; it is outside the active Local Admission lock. Local
+failure never silently selects it, and the freeze does not remove, deprecate,
+disable, or expire existing compatibility.
 
 ## 4. Trust topology
 
@@ -104,7 +107,7 @@ protected repository trust and policy
   -> authoritative reread and verification
 ```
 
-Remote human-operated work:
+Approved but deferred remote human-operated target:
 
 ```text
 GitHub user authorization through Inari Access
@@ -145,8 +148,10 @@ certificate binds an ephemeral public key. The associated private key remains
 with its client-side signer. A credential bundle containing that key is
 secret; the certificate alone is not sufficient for PoP authentication.
 
-Keeping a decoder does not retain the retired Direct App engine or make
-manual secret-bundle transfer the remote Golden Path.
+Keeping a decoder does not define manual secret-bundle transfer as the remote
+Golden Path. Existing Direct App execution compatibility is separately frozen
+under its current selection contract; it does not make that engine part of the
+active Local Admission lock.
 
 ### Provider credential
 
@@ -734,9 +739,11 @@ uncertainty remain distinguishable in public diagnostics.
 
 ## 15. Deployment and persistence boundary
 
-Normal execution belongs to the user-owned Runtime. Hosted provides
-transient authentication/attestation and Relay. No independent Direct App
-execution deployment remains a target.
+Local execution belongs to the user-owned Runtime. Hosted's transient
+authentication/attestation and Relay model remains an approved deferred
+target. Independent Direct App execution remains temporarily frozen
+compatibility under its existing selection contract; it is not the active
+Local Admission lock target.
 
 Hosted needs no durable user profile, repository membership, Runtime
 registration, or semantic Session database. Service configuration and
@@ -848,7 +855,8 @@ App permission alone does not enforce every Inari semantic restriction.
 An independently supplied PAT or administrator credential is outside Inari's
 ability to constrain its owner. Repository protection, provenance checks,
 credential hygiene, and execution isolation remain defense in depth. Do not
-claim the retirement of Direct App prevents all out-of-band GitHub access.
+claim the freeze of Direct App compatibility prevents all out-of-band GitHub
+access.
 
 ### 18.11 Inari Access private-key compromise
 
@@ -916,10 +924,15 @@ semantic executor, acquire provider credentials, or issue Inari Sessions.
 Local pure tools may use Core on already supplied data; private reads and
 effects retain their respective authorization gates.
 
-The independent Direct App endpoint and old Hosted repository/work backend
-are retired target architectures. Existing format readers do not justify
-retaining their execution engines. Actions, where a real supported adapter
-remains, cannot become a second trust or lifecycle authority.
+Convergence of the independent Direct App endpoint and old Hosted
+repository/work backend is outside the active Local Admission lock. The
+existing explicit DirectApp route remains temporarily frozen under its
+current contract.
+Hosted/remote target convergence is deferred, and any currently exposed
+Hosted/remote contracts remain unchanged. This does not restore previously
+removed routes or tools. Existing format readers do not authorize new
+selection behavior. Actions, where a supported adapter remains, cannot become
+a second trust or lifecycle authority.
 
 See [Native MCP](./NATIVE_MCP_ISSUER_GATEWAY.md) for catalog and transport
 boundaries, not a second authorization model.
@@ -927,17 +940,21 @@ boundaries, not a second authorization model.
 ## 21. Migration and proof
 
 First fix the Source/task/publication joins and caller-evidence contract at
-common Admission. Preserve the current local path while adding remote
-assertion verification and subject/operation admission under explicit scope.
+common Admission. The approved remote assertion verification and
+subject/operation admission target remains deferred from this local lock.
 
-Then route Hosted delivery into that common path, prove provider binding and
-credential isolation, and retire independent Direct App composition and its
-public selection flags. Preserve shared cryptography/Core/effect helpers
-needed by the canonical Executor.
+The approved future target routes Hosted delivery into that common path,
+proves provider binding and credential isolation, and retires independent
+Direct App composition and its public selection flags after replacement
+public-path proof. This target is deferred from the Local Admission lock; this
+issue preserves current selection and authorizes no retirement or deployment
+change. Preserve shared cryptography/Core/effect helpers needed by the
+canonical Executor.
 
-For each retained legacy representation, record its version, consumer,
-canonical output, validation, and retirement condition. Never reinterpret
-old stored identity or destroy private keys/configuration during a read.
+When a compatibility change is separately authorized, document the affected
+version, consumer, canonical output, validation, and safe migration or refusal
+behavior. Never reinterpret old stored identity or destroy private
+keys/configuration during a read.
 
 Certification must include positive and denied local/remote operations,
 wrong repository/Source/task/App/Relay, expired/revoked trust, replay,

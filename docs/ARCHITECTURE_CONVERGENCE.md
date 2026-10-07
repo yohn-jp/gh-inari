@@ -18,6 +18,36 @@ A useful domain document contains responsibility, identity, input/output,
 invariants, negative cases, recovery, compatibility, and proof obligations.
 A short overview cannot substitute for those contracts.
 
+## Local Admission lock closure
+
+The product owner accepted Local Admission as the sole active development and
+lock target on 2026-10-08 JST. The canonical support matrix is in
+[Product Architecture Canon](./ARCHITECTURE.md#11-current-support-and-lock-boundary).
+This decision defers Hosted/remote/DirectApp convergence; it does not delete,
+deprecate, disable, or set an expiry for existing compatibility contracts
+that remain exposed. It does not restore previously removed Hosted routes or
+tools.
+
+The local lock has this finite closure checklist:
+
+- [ ] Deliver P1-01 CLI projection of semantic execution failures and P1-02
+      bounded Admission-to-Executor transport, with their required focused proof.
+- [ ] Keep callable local and explicit DirectApp selection aligned with the
+      support matrix; local denial or unavailability has no implicit fallback.
+- [ ] Run canonical `pnpm run verify` and required CI on the exact release
+      candidate SHA; distinguish source, built, packed, process, browser, and live
+      evidence.
+- [ ] Prove the distributed artifact's installed CLI/public exports and
+      upgrade from 0.19.1 preserve the existing configuration, Session, and
+      compatibility readers that remain in scope.
+- [ ] Publish the corresponding 0.19.x patch from that certified cutoff, with
+      the release tag, npm artifact, and release notes identifying the same fix
+      set (P1-04).
+- [ ] After those gates, move Local Admission to maintenance mode. P2-01 and
+      P2-02 are post-lock work and do not block this transition.
+
+This checklist does not claim that any gate is complete.
+
 Existing historical release and certification records keep their revision and
 meaning. The explicitly historical NATIVE_MCP_ISSUER_GATEWAY_LEGACY document
 is retained unchanged; its content is not current authorization guidance.
@@ -149,8 +179,9 @@ NATIVE_MCP_ISSUER_GATEWAY retains typed catalog/projection, protocol and result
 boundaries, legacy envelope validation, MCP Apps presentation, and capability
 limits. It removes MCP as an independent authorization/execution plane.
 
-CLOUDFLARE_WORKER_DEPLOYMENT classifies the supported Hosted target and safe
-retirement of Direct App. It does not disable a live deployment.
+CLOUDFLARE_WORKER_DEPLOYMENT preserves the approved Hosted target as deferred
+detail and classifies Direct App as temporarily frozen compatibility. It does
+not disable a live deployment or make either path a local lock prerequisite.
 
 ### Contributor and verification entrypoints
 
@@ -237,12 +268,17 @@ Complete eligible CLI Canon migration in bounded route families. The older
 indefinite touch-driven instruction must be reconciled with the approved
 finite completion target. Domain/security/path access does not move to Canon.
 
-### Retired architecture removal
+### Deferred convergence for frozen architectures
 
-Remove independent Direct App execution and the old Hosted repository/work
-backend after replacement public-path proof. Inventory remaining adapters by
-actual consumer and semantics. Old format readability is not a reason for
-retaining old authorization engines.
+The approved future architecture retains the common Admission/Executor
+replacement direction and removes the competing Direct App/Hosted execution
+paths after replacement public-path proof. The existing Direct App route
+remains temporarily frozen under its explicit-selection contract. Hosted
+repository/work convergence and any remaining exposed Hosted/remote
+compatibility are outside the local lock; no removed surface is restored.
+This issue defers that target work and authorizes no removal or deployment
+change. Preserve valid domain and security detail while marking future target
+statements deferred.
 
 ### Verification and operations
 
@@ -293,10 +329,14 @@ packaging, exact-head CI, and live operations.
 
 ## 7. Compatibility inventory rule
 
-Each retained adapter states its exact old input/version, canonical output,
-consumer, validations, and retirement condition. New work may not select the
-old engine. No migration silently re-roots records, widens grants, regenerates
-keys, deletes user configuration, or changes live deployment.
+Existing public exports, configuration/Session readers, and explicit
+compatibility selection retain their current contracts where those surfaces
+remain exposed. New Local Admission work uses the active path; local failure
+never selects a frozen route implicitly. Any future compatibility change
+requires a separate explicit owner decision and must state the affected
+input/version, consumers, validation, and safe migration or refusal behavior.
+No migration silently re-roots records, widens grants, regenerates keys,
+deletes user configuration, or changes live deployment.
 
 Historical evidence remains historical. A disabled public trust record,
 release note, old certification, or legacy design is not rewritten to make

@@ -3,6 +3,9 @@
 Status: approved remote caller-evidence architecture under
 [Product Architecture Canon](./ARCHITECTURE.md).
 
+This remote architecture is deferred from the Local Admission lock and is not
+a prerequisite for it.
+
 This is a target contract, not an assertion that the current package or Hosted
 deployment implements the protocol. Its versioned wire schema, cryptographic
 encoding, trust bootstrap, and public-client integration must be frozen and

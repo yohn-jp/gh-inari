@@ -3,7 +3,7 @@
 Status: deployment classification under
 [Product Architecture Canon](./ARCHITECTURE.md).
 
-## Supported target
+## Deferred Hosted target
 
 Cloudflare may host the authenticated public ingress, Runtime Relay, and
 optional static remote UI described in
@@ -11,31 +11,41 @@ optional static remote UI described in
 Repository semantics, Admission, provider execution, and private owner state
 remain on the user-owned Runtime.
 
+This approved placement remains deferred from the Local Admission lock. This
+section does not claim the target is implemented, certified, or deployed.
+
 Hosted may hold its service-owned OAuth configuration and assertion-signing
 key. It must not hold Inari Access execution keys/installation tokens, Runtime
 Authority keys, or persistent user access/refresh credentials.
 
-## Retired Direct App deployment
+## Temporarily frozen Direct App compatibility
 
-The independent App-credential Worker historically implemented by
-`src/worker.ts` and `wrangler.toml` is not a target deployment. It must not be
-advertised as an alternative when canonical Runtime/Relay execution is
-unavailable.
+The independent App-credential Worker code in `src/worker.ts` and
+`wrangler.toml` is outside the active local lock target; this document does
+not classify its current deployed state. Existing explicit DirectApp
+selection, exported APIs, and configuration/Session readers remain frozen
+under their current contracts. This decision does not delete, deprecate,
+disable, or set an expiry for them. Local Admission failure never silently
+selects the compatibility route.
 
-Existing source/configuration may remain until the governed retirement is
-implemented. This document does not disable a live Worker, remove secrets,
-revoke an App, delete shared Core code, or claim migration completed.
+No migration or deployment change is authorized by this classification. It
+does not disable a Worker if one is configured, remove secrets, revoke an App,
+or claim a migration completed.
 
-## Controlled retirement
+## Deferred convergence
 
-Inventory actual deployed versions, public entrypoints, consumers, configured
-secrets, and required rollback evidence under operator authority. Prove the
-replacement ingress into common Admission/Executor before cutting over.
+The approved future target inventories deployed versions, public entrypoints,
+consumers, configured secrets, and rollback evidence under operator authority;
+proves replacement ingress into common Admission/Executor; then removes
+independent execution selection and provider custody from Hosted. It retains
+only shared libraries used by the canonical Executor and bounded old-
+representation readers with explicit consumers.
 
-Remove independent execution selection and provider custody from Hosted.
-Retain only shared libraries used by the canonical Executor and bounded old-
-representation readers with explicit consumers. Historical release records
-retain their original revision and are not current setup instructions.
+This convergence remains deferred and is not a local lock prerequisite. This
+Issue authorizes no deployment, secret, selection, or provider-custody change.
+Existing compatibility remains under its current contracts. Historical
+release records retain their original revision and are not current setup
+instructions.
 
 Disabling a deployment or removing its secrets requires explicit operational
 authorization and verification. No documentation update performs those actions.

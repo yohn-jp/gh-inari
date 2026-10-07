@@ -8,8 +8,10 @@ It does not add a command namespace, lifecycle engine, credential model,
 private repository database, or second recovery classifier.
 
 The detailed status/next-action/recovery and installed-package proof obligations
-remain here. The approved target replaces old Implementation-root and
+remain here. The approved future target replaces old Implementation-root and
 Direct App/Actions-required composition, not these evidence requirements.
+That convergence is deferred from the Local Admission lock; current explicit
+DirectApp compatibility remains under its existing contract.
 
 ## 1. Outcome
 
@@ -19,7 +21,9 @@ and receive a verified result or one bounded next action.
 
 The workflow includes onboarding, normal operation, retry, abort, and recovery.
 Local and remote clients differ in authentication and transport. They reach
-the same user-owned Admission/Executor and semantic contracts.
+the same user-owned Admission/Executor and semantic contracts. The remote
+composition remains an approved but deferred target, outside the Local
+Admission lock.
 
 Issue, Source Change, Implementation task, Session, leaf publication, and
 integration publication are not a single identity despite the short lifecycle
