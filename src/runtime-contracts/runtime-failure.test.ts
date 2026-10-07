@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runtimeFailureFromError } from "./runtime-failure.js";
+import { runtimeFailure, runtimeFailureFromError } from "./runtime-failure.js";
 
 const broker = (stage: string, providerFailure?: unknown) =>
   Object.assign(new Error("failed closed"), { code: "GITHUB_APP_CREDENTIAL_BROKER_FAILED", stage, providerFailure });
@@ -23,4 +23,16 @@ test("#1180 a retryable provider outage at installation-token is unavailable, no
     runtimeFailureFromError(broker("installation-token"), "repository-resolution").category,
     "binding-mismatch",
   );
+});
+
+test("#1372 Executor deadlines have fixed bounded reasons, including unknown dispatched outcomes", () => {
+  const request = runtimeFailure("trust-evidence", "EXECUTOR_REQUEST_TIMEOUT");
+  assert.equal(request.category, "unavailable");
+  assert.match(request.message, /bounded deadline/u);
+
+  const execution = runtimeFailure("provider-execution", "EXECUTOR_EXECUTION_TIMEOUT");
+  assert.equal(execution.category, "unavailable");
+  assert.match(execution.message, /deadline/u);
+  assert.match(execution.message, /outcome is unknown/u);
+  assert.match(execution.message, /may have completed/u);
 });

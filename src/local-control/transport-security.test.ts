@@ -10,15 +10,19 @@ import {
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { chmod, copyFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { createServer as createTcpServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { createServer as createSecureServer } from "node:https";
 import { test } from "node:test";
 import { localComponentDirectory } from "./config.js";
+import { LocalExecutorClient, type LocalExecutorClientOptions } from "./executor-client.js";
 import {
   clearLocalRuntimeEndpoint,
   publishLocalRuntimeEndpoint,
   type LocalRuntimeEndpoint,
 } from "./runtime-discovery.js";
+import { loadLocalMtlsIdentity } from "./transport-security.js";
 
 const ADMISSION_ID = "adm_0123456789abcdef";
 const WRONG_ADMISSION_ID = "adm_fedcba9876543210";
@@ -243,6 +247,44 @@ async function createCertificates(directory: string): Promise<{
   };
 }
 
+function manualDeadlineTimers(): {
+  readonly timers: NonNullable<LocalExecutorClientOptions["timers"]>;
+  readonly fire: () => void;
+  readonly scheduledDelays: () => number[];
+  readonly activeCount: () => number;
+} {
+  type Entry = { readonly callback: () => void; readonly delay: number; cleared: boolean; fired: boolean };
+  const entries: Entry[] = [];
+  const timers = {
+    setTimeout: ((callback: () => void, delay = 0) => {
+      const entry: Entry = { callback, delay, cleared: false, fired: false };
+      entries.push(entry);
+      return entry as unknown as ReturnType<typeof globalThis.setTimeout>;
+    }) as typeof globalThis.setTimeout,
+    clearTimeout: ((timer?: ReturnType<typeof globalThis.setTimeout>) => {
+      const entry = timer as unknown as Entry | undefined;
+      if (entry !== undefined) entry.cleared = true;
+    }) as typeof globalThis.clearTimeout,
+  };
+  return {
+    timers,
+    fire() {
+      const entry = entries.find((candidate) => !candidate.cleared && !candidate.fired);
+      assert.ok(entry, "expected an active Executor deadline timer");
+      entry.fired = true;
+      entry.callback();
+    },
+    scheduledDelays: () => entries.map((entry) => entry.delay),
+    activeCount: () => entries.filter((entry) => !entry.cleared && !entry.fired).length,
+  };
+}
+
+function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((finish) => (resolve = finish));
+  return { promise, resolve };
+}
+
 async function installComponentIdentity(
   configHome: string,
   component: "admission" | "executor",
@@ -461,6 +503,178 @@ test(
         server.child.kill("SIGTERM");
         await exitResult(server);
       }
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "real local mTLS Executor requests time out and close stalled TLS handshakes, headers, and partial bodies",
+  { timeout: 20_000 },
+  async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "inari-local-mtls-deadline-"));
+    const configHome = path.join(root, "config");
+    await mkdir(configHome, { mode: 0o700 });
+    const certificates = await createCertificates(root);
+    await installComponentIdentity(configHome, "admission", certificates.admission, certificates.ca);
+    const transport = loadLocalMtlsIdentity("admission", ADMISSION_ID, EXECUTOR_ID, { INARI_CONFIG_HOME: configHome });
+    const sockets = new Set<import("node:net").Socket>();
+    let pending: Promise<unknown> | undefined;
+    let server: ReturnType<typeof createTcpServer> | undefined;
+
+    try {
+      const handshake = manualDeadlineTimers();
+      const clientHello = deferred<void>();
+      const handshakeSocketClosed = deferred<void>();
+      server = createTcpServer((socket) => {
+        sockets.add(socket);
+        socket.once("data", () => clientHello.resolve());
+        socket.once("close", () => handshakeSocketClosed.resolve());
+      });
+      server.on("connection", (socket) => sockets.add(socket));
+      await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", resolve));
+      const handshakeAddress = server.address();
+      assert.ok(handshakeAddress !== null && typeof handshakeAddress !== "string");
+      const handshakeClient = new LocalExecutorClient({
+        id: EXECUTOR_ID,
+        endpoint: `https://127.0.0.1:${handshakeAddress.port}`,
+        transport,
+        timeoutMs: 41,
+        timers: handshake.timers,
+      });
+      pending = handshakeClient.verifyReady();
+      void pending.catch(() => {});
+      await clientHello.promise;
+      assert.deepEqual(handshake.scheduledDelays(), [41]);
+      handshake.fire();
+      await assert.rejects(pending, (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal("code" in error ? error.code : undefined, "EXECUTOR_TIMEOUT");
+        return true;
+      });
+      await handshakeSocketClosed.promise;
+      const handshakeServer = server;
+      server = undefined;
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => handshakeServer.close(() => resolve()));
+      sockets.clear();
+
+      async function runSecureStall(mode: "headers" | "body", timeoutMs: number): Promise<void> {
+        const deadline = manualDeadlineTimers();
+        const requestReceived = deferred<void>();
+        const bodyChunkRead = deferred<number>();
+        const responseClosed = deferred<void>();
+        const secureServer = createSecureServer(
+          {
+            key: certificates.executor.privateKeyPem,
+            cert: certificates.executor.certificatePem,
+            ca: certificates.ca.certificatePem,
+            requestCert: true,
+            rejectUnauthorized: true,
+          },
+          (_request, response) => {
+            requestReceived.resolve();
+            response.once("close", () => responseClosed.resolve());
+            if (mode === "body") {
+              response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+              response.write('{"ok":true,"version":"mtls",');
+            }
+          },
+        );
+        secureServer.on("connection", (socket) => {
+          sockets.add(socket);
+          socket.once("close", () => sockets.delete(socket));
+        });
+        await new Promise<void>((resolve) => secureServer.listen(0, "127.0.0.1", resolve));
+        const address = secureServer.address();
+        assert.ok(address !== null && typeof address !== "string");
+        const client = new LocalExecutorClient({
+          id: EXECUTOR_ID,
+          endpoint: `https://127.0.0.1:${address.port}`,
+          transport,
+          timeoutMs,
+          timers: deadline.timers,
+          onResponseBodyChunkRead: (byteLength) => bodyChunkRead.resolve(byteLength),
+        });
+        const request = client.verifyReady();
+        void request.catch(() => {});
+        pending = request;
+        try {
+          await requestReceived.promise;
+          if (mode === "body") assert.ok((await bodyChunkRead.promise) > 0);
+          assert.deepEqual(deadline.scheduledDelays(), [timeoutMs]);
+          deadline.fire();
+          await assert.rejects(request, (error: unknown) => {
+            assert.ok(error instanceof Error);
+            assert.equal("code" in error ? error.code : undefined, "EXECUTOR_TIMEOUT");
+            return true;
+          });
+          await responseClosed.promise;
+        } finally {
+          for (const socket of sockets) socket.destroy();
+          await new Promise<void>((resolve) => secureServer.close(() => resolve()));
+        }
+      }
+
+      await runSecureStall("headers", 42);
+      await runSecureStall("body", 43);
+
+      const successDeadline = manualDeadlineTimers();
+      const successRequestReceived = deferred<void>();
+      const successSockets = new Set<import("node:net").Socket>();
+      const successServer = createSecureServer(
+        {
+          key: certificates.executor.privateKeyPem,
+          cert: certificates.executor.certificatePem,
+          ca: certificates.ca.certificatePem,
+          requestCert: true,
+          rejectUnauthorized: true,
+        },
+        (_request, response) => {
+          successRequestReceived.resolve();
+          response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          response.end(
+            JSON.stringify({
+              ok: true,
+              version: "mtls",
+              component: "executor",
+              executorId: EXECUTOR_ID,
+              protocol: 1,
+              readiness: "ready",
+            }),
+          );
+        },
+      );
+      successServer.on("connection", (socket) => {
+        successSockets.add(socket);
+        socket.once("close", () => successSockets.delete(socket));
+      });
+      await new Promise<void>((resolve) => successServer.listen(0, "127.0.0.1", resolve));
+      const successAddress = successServer.address();
+      assert.ok(successAddress !== null && typeof successAddress !== "string");
+      const successClient = new LocalExecutorClient({
+        id: EXECUTOR_ID,
+        endpoint: `https://127.0.0.1:${successAddress.port}`,
+        transport,
+        timeoutMs: 44,
+        timers: successDeadline.timers,
+      });
+      try {
+        const ready = await successClient.verifyReady();
+        await successRequestReceived.promise;
+        assert.equal(ready.executorId, EXECUTOR_ID);
+        assert.deepEqual(successDeadline.scheduledDelays(), [44]);
+        assert.equal(successDeadline.activeCount(), 0);
+      } finally {
+        for (const socket of successSockets) socket.destroy();
+        await new Promise<void>((resolve) => successServer.close(() => resolve()));
+      }
+    } finally {
+      if (server !== undefined) {
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((resolve) => server?.close(() => resolve()));
+      }
+      await pending?.catch(() => {});
       await rm(root, { recursive: true, force: true });
     }
   },

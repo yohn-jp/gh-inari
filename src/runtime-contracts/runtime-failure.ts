@@ -155,8 +155,13 @@ export const RUNTIME_FAILURE_REASONS = Object.freeze({
     "The Executor endpoint identity does not match the Admission configuration.",
   ),
   EXECUTOR_PROTOCOL_INVALID: reason("internal", "The Executor response did not match the wire protocol."),
+  EXECUTOR_REQUEST_TIMEOUT: reason("unavailable", "The Executor request exceeded its bounded deadline."),
   // Provider execution.
   EXECUTOR_EXECUTION_FAILED: reason("unavailable", "The Executor could not complete the authorized provider effect."),
+  EXECUTOR_EXECUTION_TIMEOUT: reason(
+    "unavailable",
+    "The Executor execution deadline expired after dispatch; the provider effect may have completed, so the outcome is unknown.",
+  ),
   // Generic fallbacks.
   RUNTIME_OWNER_UNAVAILABLE: reason("unavailable", "The Runtime owner is unavailable."),
   RUNTIME_INTERNAL_FAILURE: reason("internal", "The Runtime owner failed internally."),

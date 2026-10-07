@@ -1,4 +1,5 @@
 import { request as httpsRequest } from "node:https";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
 import type { AuthorizedExecution, AuthorizedExecutionResult } from "../authorized-execution.js";
 import type { RepositoryIdentity } from "../github/effect-authorizer.js";
@@ -18,7 +19,12 @@ import {
   type LocalExecutorGovernedContractRequest,
 } from "./executor-http.js";
 import { verifyLocalMtlsPeerIdentity, type LocalMtlsIdentity } from "./transport-security.js";
-import { validateRuntimeFailure, type RuntimeFailure } from "../runtime-contracts/runtime-failure.js";
+import {
+  runtimeFailure,
+  validateRuntimeFailure,
+  type RuntimeFailure,
+  type RuntimeFailureStage,
+} from "../runtime-contracts/runtime-failure.js";
 import { validateImplementationTaskTerminationRecord } from "../implementation-task-termination.js";
 
 export interface LocalExecutorClientOptions {
@@ -26,6 +32,34 @@ export interface LocalExecutorClientOptions {
   readonly endpoint: string;
   readonly fetch?: typeof globalThis.fetch;
   readonly transport?: LocalMtlsIdentity;
+  /** Deadline for readiness and other local control requests. */
+  readonly timeoutMs?: number;
+  /** Deadline for provider-backed repository, evidence, policy and contract reads. */
+  readonly providerTimeoutMs?: number;
+  /** Deadline for a dispatched authorized execution request. */
+  readonly executionTimeoutMs?: number;
+  /** Injectable timer seam for deterministic transport deadline tests. */
+  readonly timers?: Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
+  /** Optional response progress observer; reports byte counts without exposing body data. */
+  readonly onResponseBodyChunkRead?: (byteLength: number) => void;
+}
+
+const DEFAULT_CONTROL_TIMEOUT_MS = 10_000;
+const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
+const DEFAULT_EXECUTION_TIMEOUT_MS = 60_000;
+const MAX_CONTROL_TIMEOUT_MS = 60_000;
+const MAX_PROVIDER_TIMEOUT_MS = 60_000;
+const MAX_EXECUTION_TIMEOUT_MS = 60_000;
+
+type RequestBudget = "control" | "provider" | "execution";
+
+interface RequestResources {
+  readonly timeoutError: LocalExecutorClientError;
+  readonly onResponseBodyChunkRead?: (byteLength: number) => void;
+  timedOut: boolean;
+  request?: ClientRequest;
+  incoming?: IncomingMessage;
+  reader?: ReadableStreamDefaultReader<Uint8Array>;
 }
 
 export interface LocalExecutorHealth {
@@ -38,7 +72,8 @@ export interface LocalExecutorHealth {
 }
 
 export class LocalExecutorClientError extends Error {
-  readonly code: "EXECUTOR_UNAVAILABLE" | "EXECUTOR_IDENTITY_MISMATCH" | "EXECUTOR_PROTOCOL_INVALID";
+  readonly code:
+    "EXECUTOR_UNAVAILABLE" | "EXECUTOR_IDENTITY_MISMATCH" | "EXECUTOR_PROTOCOL_INVALID" | "EXECUTOR_TIMEOUT";
   /** Bounded Executor owner diagnostic, forwarded only when it validates against the catalog. */
   readonly runtimeFailure?: RuntimeFailure;
 
@@ -112,26 +147,45 @@ function validTaskTerminationObservation(
   );
 }
 
-async function readJson(response: Response): Promise<unknown> {
-  if (!/^application\/json(?:\s*;|\s*$)/iu.test(response.headers.get("content-type") ?? ""))
+function boundedTimeout(value: number | undefined, fallback: number, maximum: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum)
+    throw new RangeError(`Executor ${name} timeout is invalid.`);
+  return value;
+}
+
+function cancelResponseBody(response: Response): void {
+  void response.body?.cancel().catch(() => {});
+}
+
+async function readJson(response: Response, resources: RequestResources): Promise<unknown> {
+  if (!/^application\/json(?:\s*;|\s*$)/iu.test(response.headers.get("content-type") ?? "")) {
+    cancelResponseBody(response);
     throw new LocalExecutorClientError("EXECUTOR_PROTOCOL_INVALID", "Executor response is not JSON.");
+  }
   if (response.body === null)
     throw new LocalExecutorClientError("EXECUTOR_PROTOCOL_INVALID", "Executor response body is empty.");
   const reader = response.body.getReader();
+  resources.reader = reader;
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
     while (true) {
       const chunk = await reader.read();
       if (chunk.done) break;
+      resources.onResponseBodyChunkRead?.(chunk.value.byteLength);
       total += chunk.value.byteLength;
       if (total > MAX_LOCAL_EXECUTOR_BODY_BYTES) {
-        await reader.cancel().catch(() => {});
+        void reader.cancel().catch(() => {});
         throw new LocalExecutorClientError("EXECUTOR_PROTOCOL_INVALID", "Executor response exceeds the size limit.");
       }
       chunks.push(chunk.value);
     }
+  } catch (error: unknown) {
+    if (error instanceof LocalExecutorClientError) throw error;
+    throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Executor response body could not be read.");
   } finally {
+    if (resources.reader === reader) resources.reader = undefined;
     reader.releaseLock();
   }
   try {
@@ -150,6 +204,11 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
   private readonly endpoint: URL;
   private readonly fetcher: typeof globalThis.fetch;
   private readonly transport: LocalMtlsIdentity | undefined;
+  private readonly controlTimeoutMs: number;
+  private readonly providerTimeoutMs: number;
+  private readonly executionTimeoutMs: number;
+  private readonly timers: Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
+  private readonly onResponseBodyChunkRead: ((byteLength: number) => void) | undefined;
 
   constructor(options: LocalExecutorClientOptions) {
     if (typeof options.id !== "string" || !/^exec_[A-Za-z0-9_-]{16,64}$/u.test(options.id))
@@ -181,6 +240,26 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
     this.endpoint = endpoint;
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.transport = options.transport;
+    this.controlTimeoutMs = boundedTimeout(
+      options.timeoutMs,
+      DEFAULT_CONTROL_TIMEOUT_MS,
+      MAX_CONTROL_TIMEOUT_MS,
+      "control",
+    );
+    this.providerTimeoutMs = boundedTimeout(
+      options.providerTimeoutMs,
+      DEFAULT_PROVIDER_TIMEOUT_MS,
+      MAX_PROVIDER_TIMEOUT_MS,
+      "provider",
+    );
+    this.executionTimeoutMs = boundedTimeout(
+      options.executionTimeoutMs,
+      DEFAULT_EXECUTION_TIMEOUT_MS,
+      MAX_EXECUTION_TIMEOUT_MS,
+      "execution",
+    );
+    this.timers = options.timers ?? globalThis;
+    this.onResponseBodyChunkRead = options.onResponseBodyChunkRead;
   }
 
   private url(path: string): string {
@@ -190,30 +269,88 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
   private async request(
     path: string,
     init?: RequestInit,
+    budget: RequestBudget = "control",
+    timeoutStage: RuntimeFailureStage = "trust-evidence",
+    timeoutReason: "EXECUTOR_REQUEST_TIMEOUT" | "EXECUTOR_EXECUTION_TIMEOUT" = "EXECUTOR_REQUEST_TIMEOUT",
   ): Promise<{ readonly response: Response; readonly body: unknown }> {
-    let response: Response;
+    const timeoutMs =
+      budget === "control"
+        ? this.controlTimeoutMs
+        : budget === "provider"
+          ? this.providerTimeoutMs
+          : this.executionTimeoutMs;
+    const timeoutError = new LocalExecutorClientError(
+      "EXECUTOR_TIMEOUT",
+      budget === "execution"
+        ? "Executor execution response deadline expired; the provider effect outcome is unknown."
+        : "Executor request exceeded its bounded deadline.",
+      runtimeFailure(timeoutStage, timeoutReason),
+    );
+    const controller = new AbortController();
+    const resources: RequestResources = {
+      timeoutError,
+      onResponseBodyChunkRead: this.onResponseBodyChunkRead,
+      timedOut: false,
+    };
+    let rejectDeadline!: (error: LocalExecutorClientError) => void;
+    const deadline = new Promise<never>((_resolve, reject) => (rejectDeadline = reject));
+    const timer = this.timers.setTimeout(() => {
+      resources.timedOut = true;
+      controller.abort(timeoutError);
+      void resources.reader?.cancel().catch(() => {});
+      resources.incoming?.destroy();
+      resources.request?.destroy();
+      rejectDeadline(timeoutError);
+    }, timeoutMs);
+
+    const operation = (async (): Promise<{ readonly response: Response; readonly body: unknown }> => {
+      let response: Response;
+      try {
+        response =
+          this.transport === undefined
+            ? await this.fetcher(this.url(path), { ...init, redirect: "error", signal: controller.signal })
+            : await this.requestOverMtls(path, init, this.transport, resources);
+      } catch {
+        if (resources.timedOut) throw timeoutError;
+        throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Configured Executor endpoint is unavailable.");
+      }
+      if (resources.timedOut) {
+        cancelResponseBody(response);
+        throw timeoutError;
+      }
+      if (response.url.length > 0 && new URL(response.url).origin !== this.endpoint.origin) {
+        cancelResponseBody(response);
+        throw new LocalExecutorClientError(
+          "EXECUTOR_IDENTITY_MISMATCH",
+          "Executor response came from another endpoint.",
+        );
+      }
+      const body = await readJson(response, resources);
+      if (response.status !== 200 && record(body) && body.ok === false && record(body.error)) {
+        const failure = validateRuntimeFailure(body.error.failure);
+        throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Executor refused the request.", failure);
+      }
+      return { response, body };
+    })();
+
     try {
-      response =
-        this.transport === undefined
-          ? await this.fetcher(this.url(path), { ...init, redirect: "error" })
-          : await this.requestOverMtls(path, init, this.transport);
-    } catch {
-      throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Configured Executor endpoint is unavailable.");
+      return await Promise.race([operation, deadline]);
+    } catch (error: unknown) {
+      if (resources.timedOut) throw timeoutError;
+      throw error;
+    } finally {
+      this.timers.clearTimeout(timer);
+      resources.reader = undefined;
+      resources.incoming = undefined;
+      resources.request = undefined;
     }
-    if (response.url.length > 0 && new URL(response.url).origin !== this.endpoint.origin)
-      throw new LocalExecutorClientError("EXECUTOR_IDENTITY_MISMATCH", "Executor response came from another endpoint.");
-    const body = await readJson(response);
-    if (response.status !== 200 && record(body) && body.ok === false && record(body.error)) {
-      const failure = validateRuntimeFailure(body.error.failure);
-      throw new LocalExecutorClientError("EXECUTOR_UNAVAILABLE", "Executor refused the request.", failure);
-    }
-    return { response, body };
   }
 
   private requestOverMtls(
     path: string,
     init: RequestInit | undefined,
     transport: LocalMtlsIdentity,
+    resources: RequestResources,
   ): Promise<Response> {
     const url = new URL(path, this.endpoint);
     const headers = new Headers(init?.headers);
@@ -222,7 +359,14 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
       requestHeaders[name] = value;
     });
     return new Promise<Response>((resolve, reject) => {
-      const request = httpsRequest(
+      let settled = false;
+      let request: ClientRequest;
+      const onError = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      request = httpsRequest(
         {
           protocol: url.protocol,
           hostname: url.hostname,
@@ -240,6 +384,16 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
               : new Error("Executor TLS identity does not match configuration."),
         },
         (incoming) => {
+          resources.incoming = incoming;
+          if (resources.timedOut) {
+            incoming.destroy();
+            return;
+          }
+          if (settled) {
+            incoming.destroy();
+            return;
+          }
+          settled = true;
           const responseHeaders = new Headers();
           for (const [name, value] of Object.entries(incoming.headers)) {
             if (Array.isArray(value)) responseHeaders.set(name, value.join(", "));
@@ -253,10 +407,16 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
           );
         },
       );
-      request.once("error", reject);
+      resources.request = request;
+      request.once("error", onError);
+      request.once("close", () => request.off("error", onError));
       const body = init?.body;
-      if (typeof body === "string" || Buffer.isBuffer(body) || body instanceof Uint8Array) request.write(body);
-      request.end();
+      if (resources.timedOut) {
+        request.destroy();
+      } else {
+        if (typeof body === "string" || Buffer.isBuffer(body) || body instanceof Uint8Array) request.write(body);
+        request.end();
+      }
     });
   }
 
@@ -272,7 +432,7 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
   }
 
   async verifyReady(): Promise<LocalExecutorHealth> {
-    const { response, body } = await this.request(LOCAL_EXECUTOR_HEALTH_PATH, { method: "GET" });
+    const { response, body } = await this.request(LOCAL_EXECUTOR_HEALTH_PATH, { method: "GET" }, "control");
     this.assertIdentity(body);
     if (
       response.status !== 200 ||
@@ -290,11 +450,16 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(repositoryNameWithOwner)) {
       throw new LocalExecutorClientError("EXECUTOR_PROTOCOL_INVALID", "Repository locator is invalid.");
     }
-    const { response, body } = await this.request(LOCAL_EXECUTOR_REPOSITORY_PATH, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ version: LOCAL_EXECUTOR_PROTOCOL_VERSION, repositoryNameWithOwner }),
-    });
+    const { response, body } = await this.request(
+      LOCAL_EXECUTOR_REPOSITORY_PATH,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: LOCAL_EXECUTOR_PROTOCOL_VERSION, repositoryNameWithOwner }),
+      },
+      "provider",
+      "repository-resolution",
+    );
     this.assertIdentity(body);
     const repository = record(body.repository) ? body.repository : undefined;
     if (
@@ -320,11 +485,16 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
   }
 
   async readEvidence(request: LocalExecutorEvidenceRequest): Promise<unknown> {
-    const { response, body } = await this.request(LOCAL_EXECUTOR_EVIDENCE_PATH, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    });
+    const { response, body } = await this.request(
+      LOCAL_EXECUTOR_EVIDENCE_PATH,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      },
+      "provider",
+      "trust-evidence",
+    );
     this.assertIdentity(body);
     if (
       response.status !== 200 ||
@@ -358,11 +528,16 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
   }
 
   async readGovernedContract(request: LocalExecutorGovernedContractRequest): Promise<unknown> {
-    const { response, body } = await this.request(LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    });
+    const { response, body } = await this.request(
+      LOCAL_EXECUTOR_GOVERNED_CONTRACT_PATH,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      },
+      "provider",
+      "trust-evidence",
+    );
     this.assertIdentity(body);
     if (
       response.status !== 200 ||
@@ -376,11 +551,16 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
   }
 
   async readBranchPolicy(request: LocalExecutorBranchPolicyRequest): Promise<unknown> {
-    const { response, body } = await this.request(LOCAL_EXECUTOR_BRANCH_POLICY_PATH, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    });
+    const { response, body } = await this.request(
+      LOCAL_EXECUTOR_BRANCH_POLICY_PATH,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      },
+      "provider",
+      "trust-evidence",
+    );
     this.assertIdentity(body);
     if (
       response.status !== 200 ||
@@ -394,11 +574,17 @@ export class LocalExecutorClient implements ExecutorExecutionPort {
   }
 
   async execute(execution: AuthorizedExecution): Promise<AuthorizedExecutionResult> {
-    const { response, body } = await this.request(LOCAL_EXECUTOR_EXECUTIONS_PATH, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(execution),
-    });
+    const { response, body } = await this.request(
+      LOCAL_EXECUTOR_EXECUTIONS_PATH,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(execution),
+      },
+      "execution",
+      "provider-execution",
+      "EXECUTOR_EXECUTION_TIMEOUT",
+    );
     this.assertIdentity(body);
     if (
       response.status !== 200 ||
