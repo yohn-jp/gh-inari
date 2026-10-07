@@ -49,6 +49,7 @@ import {
 import { projectChangeFromGitHubEvidence, type ChangeProjectionResult } from "./change.js";
 import { renderImplementationIssueBody } from "./implementation-contract.js";
 import { verifyChangeProvenanceRecord } from "./change-provenance-record.js";
+import { runtimeFailure } from "./runtime-contracts/runtime-failure.js";
 import type { AuthorizedExecutionResult } from "./authorized-execution.js";
 import { createAppUserCredential } from "./github/app-user-credential.js";
 import { FileAppUserCredentialStore } from "./github/app-user-credential-store.js";
@@ -522,6 +523,119 @@ function writeAdmissionRoute(environment: NodeJS.ProcessEnv, endpoint: string): 
     environment,
   );
   publishLocalRuntimeEndpoint("admission", id, Number(new URL(endpoint).port), environment);
+}
+
+async function localAdmissionOutcomeFixture(): Promise<{
+  readonly root: string;
+  readonly repositoryRoot: string;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly issue: number;
+  readonly branch: string;
+  readonly baseHead: string;
+  readonly head: string;
+  readonly setExecutionResult: (operation: string, result: unknown) => void;
+  readonly setExecutionFailure: (operation: string, status: number, failure: unknown) => void;
+  stopAdmission(): Promise<void>;
+  close(): Promise<void>;
+}> {
+  const { root, environment } = await temporaryEnvironment();
+  const repositoryRoot = path.join(root, "repository");
+  await mkdir(repositoryRoot);
+  const { baseHead, head } = await gitRepository(repositoryRoot);
+  const issue = 1029;
+  const branch = "feat/1029-local-cli-admission-path";
+  const sessionId = "sess_cli-outcome-1371";
+  const local = localAuthority(environment);
+  const results = new Map<string, unknown>();
+  const failures = new Map<string, { readonly status: number; readonly failure: unknown }>();
+  const projection = localChangeProjection(issue, "123456789", branch, baseHead);
+  const admission = await startAdmissionTestServer(async (request) => {
+    const intent = request.body as { readonly operation?: unknown };
+    if (intent.operation === "change.show") {
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          result: { version: 1, operation: "change.show", status: "succeeded", projection },
+        },
+      };
+    }
+    const failure = typeof intent.operation === "string" ? failures.get(intent.operation) : undefined;
+    if (failure !== undefined) {
+      return { status: failure.status, body: { ok: false, error: { failure: failure.failure } } };
+    }
+    if (typeof intent.operation !== "string" || !results.has(intent.operation)) {
+      return { status: 500, body: { ok: false } };
+    }
+    return { status: 200, body: { ok: true, result: results.get(intent.operation) } };
+  });
+  writeAdmissionRoute(environment, admission.endpoint);
+  const binding = localSessionBinding(sessionId, issue, "123456789", "acme/inari", {
+    authority: local.authority,
+    keyPair: local.keyPair,
+    branch,
+  });
+  storeLocalSessionBinding(binding, environment);
+  environment.INARI_SESSION_ID = sessionId;
+
+  const publicationPath = path.join(root, "publication.json");
+  const implementation = {
+    repositoryHost: "github.com",
+    repositoryId: "123456789",
+    repository: "acme/inari",
+    number: issue,
+  };
+  await writeFile(
+    publicationPath,
+    JSON.stringify({
+      version: 1,
+      kind: "pr-publication",
+      repository: { repositoryHost: "github.com", repositoryId: "123456789", repository: "acme/inari" },
+      workIdentity: { implementation },
+      routing: {
+        version: 1,
+        kind: "integration-routing",
+        mode: "standalone",
+        role: "implementation",
+        implementation,
+        branches: { default: "main", implementation: branch },
+      },
+      expectedHead: branch,
+      expectedBase: "main",
+      headRevision: head,
+      title: "feat: local admission PR",
+      body: `Closes #${issue}`,
+    }),
+  );
+  let admissionStopped = false;
+
+  return {
+    root,
+    repositoryRoot,
+    environment,
+    issue,
+    branch,
+    baseHead,
+    head,
+    setExecutionResult(operation, result) {
+      results.set(operation, result);
+    },
+    setExecutionFailure(operation, status, failure) {
+      failures.set(operation, { status, failure });
+    },
+    async stopAdmission() {
+      if (admissionStopped) return;
+      await admission.close();
+      admissionStopped = true;
+    },
+    async close() {
+      if (!admissionStopped) {
+        await admission.close();
+        admissionStopped = true;
+      }
+      await rm(root, { recursive: true, force: true });
+    },
+  };
 }
 
 function authorityValidator(value: unknown): Delegator {
@@ -1222,7 +1336,6 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
       if (execution.operation === "change.show")
         return { version: 1, operation: "change.show", status: "succeeded", projection };
       assert.equal(execution.operation, "pullRequest.publish");
-      const request = execution.request as { readonly title: string; readonly body: string };
       return {
         version: 1,
         operation: "pullRequest.publish",
@@ -1236,10 +1349,6 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
           pullRequest: {
             number: 2029,
             url: "https://github.com/acme/inari/pull/2029",
-            title: request.title,
-            body: request.body,
-            head: branch,
-            base: "main",
           },
           diagnostics: [],
           effects: [{ kind: "CREATE_PULL_REQUEST", status: "succeeded" }],
@@ -1510,6 +1619,521 @@ test("#1181 local pr publish and pr create go through the selected Admission Ses
     for (const server of [admissionServer, executorServer])
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     await rm(configRoot, { recursive: true, force: true });
+  }
+});
+
+test("Local Admission PR publish keeps bounded owner failure details and marks an absent publication outcome unknown", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    fixture.setExecutionResult("pullRequest.publish", {
+      version: 1,
+      operation: "pullRequest.publish",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "execution",
+        message: "Bearer provider-token-must-not-cross",
+        diagnostics: [
+          {
+            version: 1,
+            code: "PR_PUBLICATION_PROVIDER_FAILED",
+            path: "$.provider",
+            message: "Provider publication failed.",
+          },
+        ],
+        rawProviderBody: "provider-token-must-not-cross",
+      },
+    });
+    const result = await capture(
+      ["pr", "publish", "--from", path.join(fixture.root, "publication.json"), "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly code: string;
+        readonly details: {
+          readonly effectOutcome?: string;
+          readonly executionFailure?: {
+            readonly code?: string;
+            readonly phase?: string;
+            readonly diagnostics?: readonly unknown[];
+          };
+        };
+      };
+    };
+    assert.equal(output.error.code, "ADMISSION_EXECUTION_FAILED");
+    assert.equal(output.error.details.executionFailure?.code, "SESSION_EXECUTION_FAILED");
+    assert.equal(output.error.details.executionFailure?.phase, "execution");
+    assert.deepEqual(output.error.details.executionFailure?.diagnostics, [
+      {
+        version: 1,
+        code: "PR_PUBLICATION_PROVIDER_FAILED",
+        path: "$.provider",
+        message: "Provider publication failed.",
+      },
+    ]);
+    assert.equal(output.error.details.effectOutcome, "unknown");
+    assert.equal(result.stdout.includes("provider-token-must-not-cross"), false);
+    assert.equal(result.stdout.includes('"mutation":false'), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission PR verification failure keeps validated publication effect evidence", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    fixture.setExecutionResult("pullRequest.publish", {
+      version: 1,
+      operation: "pullRequest.publish",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "verification",
+        message: "Published pull request verification failed closed.",
+      },
+      publication: {
+        version: 1,
+        kind: "pr-publication",
+        ok: true,
+        classification: "created",
+        outcome: "created",
+        pullRequest: { number: 73, url: "https://github.com/acme/inari/pull/73" },
+        diagnostics: [],
+        effects: [{ kind: "CREATE_PULL_REQUEST", status: "succeeded" }],
+      },
+    });
+    const result = await capture(
+      ["pr", "publish", "--from", path.join(fixture.root, "publication.json"), "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly details: {
+          readonly effectOutcome?: string;
+          readonly publication?: {
+            readonly classification?: string;
+            readonly effects?: readonly { readonly kind: string; readonly status: string }[];
+          };
+        };
+      };
+    };
+    assert.equal(output.error.details.effectOutcome, "applied");
+    assert.equal(output.error.details.publication?.classification, "created");
+    assert.deepEqual(output.error.details.publication?.effects, [{ kind: "CREATE_PULL_REQUEST", status: "succeeded" }]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission PR verification failure rejects credential-bearing publication URLs", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    fixture.setExecutionResult("pullRequest.publish", {
+      version: 1,
+      operation: "pullRequest.publish",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "verification",
+        message: "Published pull request verification failed closed.",
+      },
+      publication: {
+        version: 1,
+        kind: "pr-publication",
+        ok: true,
+        classification: "created",
+        outcome: "created",
+        pullRequest: { number: 73, url: "https://user:private-secret@github.com/acme/inari/pull/73" },
+        diagnostics: [],
+        effects: [{ kind: "CREATE_PULL_REQUEST", status: "succeeded" }],
+      },
+    });
+    const result = await capture(
+      ["pr", "publish", "--from", path.join(fixture.root, "publication.json"), "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly details: { readonly effectOutcome?: string; readonly publication?: unknown };
+      };
+    };
+    assert.equal(output.error.details.effectOutcome, "unknown");
+    assert.equal(output.error.details.publication, undefined);
+    assert.equal(result.stdout.includes("user"), false);
+    assert.equal(result.stdout.includes("private-secret"), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission failed PR publication evidence never turns not-attempted into a no-effect claim", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    fixture.setExecutionResult("pullRequest.publish", {
+      version: 1,
+      operation: "pullRequest.publish",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "execution",
+        message: "PR publication failed closed.",
+      },
+      publication: {
+        version: 1,
+        kind: "pr-publication",
+        ok: false,
+        classification: "failed",
+        outcome: "failed",
+        diagnostics: [
+          {
+            code: "PR_PUBLICATION_CREATE_UNCERTAIN",
+            path: "$.create",
+            message: "Provider create was uncertain and authoritative reread found no exact match.",
+          },
+        ],
+        effects: [{ kind: "CREATE_PULL_REQUEST", status: "not-attempted" }],
+      },
+    });
+    const result = await capture(
+      ["pr", "publish", "--from", path.join(fixture.root, "publication.json"), "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly details: {
+          readonly effectOutcome?: string;
+          readonly publication?: { readonly effects?: readonly { readonly status?: string }[] };
+        };
+      };
+    };
+    assert.equal(output.error.details.effectOutcome, "unknown");
+    assert.equal(output.error.details.publication?.effects?.[0]?.status, "not-attempted");
+    assert.equal(result.stdout.includes('"mutation":false'), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission branch.advance failure is not misreported as admission denial when its outcome is absent", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    fixture.setExecutionResult("branch.advance", {
+      version: 1,
+      operation: "branch.advance",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "verification",
+        message: "Branch postcondition verification failed closed.",
+      },
+    });
+    const result = await capture(
+      ["change", "publish", String(fixture.issue), "--commit", "HEAD", "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly code: string;
+        readonly details: {
+          readonly operation?: string;
+          readonly effectOutcome?: string;
+          readonly executionFailure?: { readonly code?: string; readonly phase?: string };
+        };
+      };
+    };
+    assert.equal(output.error.code, "ADMISSION_EXECUTION_FAILED");
+    assert.equal(output.error.details.operation, "branch.advance");
+    assert.equal(output.error.details.effectOutcome, "unknown");
+    assert.equal(output.error.details.executionFailure?.code, "SESSION_EXECUTION_FAILED");
+    assert.equal(output.error.details.executionFailure?.phase, "verification");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission branch.advance preserves bounded operation-valid recovery evidence", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    fixture.setExecutionResult("branch.advance", {
+      version: 1,
+      operation: "branch.advance",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "recovery-required",
+        message: "Branch provider effect requires recovery.",
+      },
+      branchAdvance: {
+        version: 1,
+        operation: "branch.advance",
+        status: "failed",
+        outcome: "recovery-required",
+        branch: fixture.branch,
+        expectedHead: fixture.baseHead,
+        failure: {
+          code: "BRANCH_ADVANCE_FAILED",
+          reason: "recovery-required",
+          message: "Provider ambiguity requires recovery.",
+        },
+      },
+    });
+    const result = await capture(
+      ["change", "publish", String(fixture.issue), "--commit", "HEAD", "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly details: {
+          readonly effectOutcome?: string;
+          readonly branchAdvance?: { readonly outcome?: string; readonly failure?: { readonly reason?: string } };
+        };
+      };
+    };
+    assert.equal(output.error.details.effectOutcome, "unknown");
+    assert.equal(output.error.details.branchAdvance?.outcome, "recovery-required");
+    assert.equal(output.error.details.branchAdvance?.failure?.reason, "recovery-required");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission PR publish rejects malformed publication evidence without exposing provider data", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    fixture.setExecutionResult("pullRequest.publish", {
+      version: 1,
+      operation: "pullRequest.publish",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "verification",
+        message: "Publication verification failed closed.",
+      },
+      publication: {
+        version: 1,
+        kind: "pr-publication",
+        ok: false,
+        classification: "failed",
+        outcome: "failed",
+        diagnostics: [],
+        effects: [{ kind: "CREATE_PULL_REQUEST", status: "not-attempted" }],
+        rawProviderBody: "provider-body-secret-must-not-cross",
+      },
+    });
+    const result = await capture(
+      ["pr", "publish", "--from", path.join(fixture.root, "publication.json"), "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly details: { readonly effectOutcome?: string; readonly publication?: unknown };
+      };
+    };
+    assert.equal(output.error.details.effectOutcome, "unknown");
+    assert.equal(output.error.details.publication, undefined);
+    assert.equal(result.stdout.includes("provider-body-secret-must-not-cross"), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission branch.advance does not accept Change evidence as branch effect evidence", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    fixture.setExecutionResult("branch.advance", {
+      version: 1,
+      operation: "branch.advance",
+      status: "failed",
+      failure: {
+        code: "SESSION_EXECUTION_FAILED",
+        phase: "execution",
+        message: "Branch advance failed closed.",
+        evidence: {
+          version: 1,
+          operation: "ready",
+          outcome: "failed",
+          effects: [],
+          secret: "change-evidence-must-not-cross",
+        },
+      },
+    });
+    const result = await capture(
+      ["change", "publish", String(fixture.issue), "--commit", "HEAD", "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: { readonly code: string; readonly details?: { readonly effectOutcome?: string } };
+    };
+    assert.equal(output.error.code, "ADMISSION_EFFECT_UNKNOWN");
+    assert.equal(output.error.details?.effectOutcome, "unknown");
+    assert.equal(result.stdout.includes("change-evidence-must-not-cross"), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission transport loss reports an unknown PR effect and gives no retry signal", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    await fixture.stopAdmission();
+    const result = await capture(
+      ["pr", "publish", "--from", path.join(fixture.root, "publication.json"), "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+        readonly details?: {
+          readonly operation?: string;
+          readonly effectOutcome?: string;
+          readonly causeCode?: string;
+        };
+      };
+    };
+    assert.equal(output.error.code, "ADMISSION_EFFECT_UNKNOWN");
+    assert.equal(output.error.details?.operation, "pullRequest.publish");
+    assert.equal(output.error.details?.effectOutcome, "unknown");
+    assert.equal(output.error.details?.causeCode, "ADMISSION_TRANSPORT_FAILED");
+    assert.match(output.error.message, /before retrying/u);
+    assert.equal(result.stdout.includes('"mutation":false'), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Local Admission provider-execution HTTP failures report unknown PR and branch effects", async () => {
+  const providerFailure = runtimeFailure("provider-execution", "EXECUTOR_EXECUTION_FAILED");
+  const prFixture = await localAdmissionOutcomeFixture();
+  try {
+    prFixture.setExecutionFailure("pullRequest.publish", 503, providerFailure);
+    const result = await capture(
+      ["pr", "publish", "--from", path.join(prFixture.root, "publication.json"), "--json"],
+      prFixture.environment,
+      { repositoryRoot: prFixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+        readonly details?: {
+          readonly operation?: string;
+          readonly effectOutcome?: string;
+          readonly causeCode?: string;
+          readonly stage?: string;
+          readonly reason?: string;
+          readonly category?: string;
+        };
+      };
+    };
+    assert.equal(output.error.code, "ADMISSION_OWNER_UNAVAILABLE");
+    assert.equal(output.error.details?.operation, "pullRequest.publish");
+    assert.equal(output.error.details?.effectOutcome, "unknown");
+    assert.equal(output.error.details?.causeCode, "ADMISSION_OWNER_UNAVAILABLE");
+    assert.equal(output.error.details?.stage, "provider-execution");
+    assert.equal(output.error.details?.reason, "EXECUTOR_EXECUTION_FAILED");
+    assert.equal(output.error.details?.category, "unavailable");
+    assert.match(output.error.message, /could not complete the authorized provider effect/u);
+    assert.equal(result.stdout.includes('"mutation":false'), false);
+  } finally {
+    await prFixture.close();
+  }
+
+  const branchFixture = await localAdmissionOutcomeFixture();
+  try {
+    branchFixture.setExecutionFailure("branch.advance", 503, providerFailure);
+    const result = await capture(
+      ["change", "publish", String(branchFixture.issue), "--commit", "HEAD", "--json"],
+      branchFixture.environment,
+      { repositoryRoot: branchFixture.repositoryRoot },
+    );
+    assert.equal(result.exitCode, 3, result.stdout);
+    const output = JSON.parse(result.stdout) as {
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+        readonly details?: {
+          readonly operation?: string;
+          readonly effectOutcome?: string;
+          readonly causeCode?: string;
+          readonly stage?: string;
+          readonly reason?: string;
+          readonly category?: string;
+        };
+      };
+    };
+    assert.equal(output.error.code, "ADMISSION_OWNER_UNAVAILABLE");
+    assert.equal(output.error.details?.operation, "branch.advance");
+    assert.equal(output.error.details?.effectOutcome, "unknown");
+    assert.equal(output.error.details?.causeCode, "ADMISSION_OWNER_UNAVAILABLE");
+    assert.equal(output.error.details?.stage, "provider-execution");
+    assert.equal(output.error.details?.reason, "EXECUTOR_EXECUTION_FAILED");
+    assert.equal(output.error.details?.category, "unavailable");
+    assert.match(output.error.message, /could not complete the authorized provider effect/u);
+    assert.equal(result.stdout.includes('"mutation":false'), false);
+  } finally {
+    await branchFixture.close();
+  }
+});
+
+test("Local Admission PR publication keeps local validation and HTTP admission denial distinct", async () => {
+  const fixture = await localAdmissionOutcomeFixture();
+  try {
+    const invalidPath = path.join(fixture.root, "invalid-publication.json");
+    await writeFile(invalidPath, JSON.stringify({ version: 1, kind: "pr-publication" }));
+    const invalid = await capture(["pr", "publish", "--from", invalidPath, "--json"], fixture.environment, {
+      repositoryRoot: fixture.repositoryRoot,
+    });
+    assert.equal(invalid.exitCode, 2, invalid.stdout);
+    const invalidOutput = JSON.parse(invalid.stdout) as {
+      readonly ok: boolean;
+      readonly operation: string;
+      readonly classification: string;
+      readonly mutation: boolean;
+      readonly diagnostics: readonly unknown[];
+    };
+    assert.equal(invalidOutput.ok, false);
+    assert.equal(invalidOutput.operation, "pr.publish");
+    assert.equal(invalidOutput.classification, "failed");
+    assert.equal(invalidOutput.mutation, false);
+    assert.ok(invalidOutput.diagnostics.length > 0);
+
+    fixture.setExecutionFailure(
+      "pullRequest.publish",
+      403,
+      runtimeFailure("implementation-admission", "ADMISSION_CAPABILITY_DENIED"),
+    );
+    const denied = await capture(
+      ["pr", "publish", "--from", path.join(fixture.root, "publication.json"), "--json"],
+      fixture.environment,
+      { repositoryRoot: fixture.repositoryRoot },
+    );
+    assert.equal(denied.exitCode, 2, denied.stdout);
+    const deniedOutput = JSON.parse(denied.stdout) as { readonly error: { readonly code: string } };
+    assert.equal(deniedOutput.error.code, "ADMISSION_REQUEST_DENIED");
+    assert.equal(denied.stdout.includes('"mutation":false'), false);
+  } finally {
+    await fixture.close();
   }
 });
 

@@ -526,7 +526,8 @@ function boundedExecutionFailure(value: unknown, operation: string): LocalAdmiss
   });
 }
 
-function authorizedResult(value: unknown, operation: string): AuthorizedExecutionResult {
+/** Validate the shared Session-authorized result and project its bounded failure. */
+export function authorizedResult(value: unknown, operation: string): AuthorizedExecutionResult {
   if (
     !isRecord(value) ||
     value.version !== 1 ||
