@@ -3,6 +3,11 @@
 Status: target deployment/transport contract under
 [Product Architecture Canon](./ARCHITECTURE.md).
 
+The Hosted/Relay target is approved future architecture but temporarily frozen
+from implementation and certification while Local Admission is the sole
+active lock target. This document preserves target detail; it does not claim
+current deployment or certification and does not alter existing compatibility.
+
 Hosted is a public authenticated entry point to a user-owned Inari Runtime.
 It is not a second cloud implementation of Inari repository semantics.
 This renewal replaces the earlier Hosted Endpoint/Dashboard repository engine
@@ -222,18 +227,26 @@ is repository-ID-based and some Hosted paths perform provider reads/OAuth/
 webhook reconciliation. Those are existing implementation facts, not the
 approved steady state.
 
-The target changes routing to authenticated Relay identity and moves all
-semantic observation/execution behind the user-owned Runtime. Retire the
-Hosted repository/work reader and webhook-driven semantic backend once the
-replacement public paths are verified.
+The approved future target changes routing to authenticated Relay identity and
+moves all semantic observation/execution behind the user-owned Runtime. This
+convergence is deferred from the Local Admission lock. Retirement of the
+Hosted repository/work reader and webhook-driven semantic backend requires a
+separate explicit owner decision after replacement public paths are verified.
 
 Keep authentication plumbing only where it implements the accepted transient
 assertion boundary. Preserve static asset delivery where useful as presentation.
-Do not retain an old backend because its UI needs a second API.
+The deferred target does not retain an old backend solely because its UI needs
+a second API; this target detail does not authorize current backend removal.
 
-Independent Direct App `src/worker.ts`/`wrangler.toml` deployment is retired.
-Shared broker/Core/crypto helpers may remain when the canonical Executor
-uses them; profile retirement is not indiscriminate code deletion.
+The independent Direct App `src/worker.ts`/`wrangler.toml` deployment is
+outside the Local Admission lock; this document does not classify its live
+state. Existing explicit DirectApp selection remains frozen under its current
+contract. The decision does not remove, deprecate, or disable a deployment if
+one is configured, and local failure never silently selects that route.
+Shared broker/Core/crypto helpers may remain when the canonical Executor uses
+them. The approved long-term target retires the independent deployment after
+replacement public-path proof. This issue defers that step and authorizes no
+deployment change.
 
 ## 13. Deployment procedure and evidence
 

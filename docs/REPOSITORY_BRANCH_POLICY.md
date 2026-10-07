@@ -188,8 +188,11 @@ seams are local Session launch/setup, Change projection, capability targets,
 branch advance, integration routing, release routing, and legacy artifact
 readers. Each must have one naming owner after its slice migrates.
 
-Hosted work-reader naming logic is retired with that semantic backend; it is
-not a second consumer to preserve indefinitely.
+The approved target retires Hosted work-reader naming logic with its semantic
+backend after replacement-path proof. That convergence is deferred from the
+Local Admission lock. Any existing naming compatibility retains its current
+contract; this issue neither removes it nor restores a previously removed
+Hosted surface.
 
 ## 10. Rulesets and shared governance
 

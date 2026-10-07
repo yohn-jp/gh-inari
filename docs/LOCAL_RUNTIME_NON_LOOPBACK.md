@@ -7,6 +7,12 @@ Status: transport/security contract under
 Loopback remains the default. Exposing a listener, authenticating a component,
 and authorizing an Inari operation are separate decisions.
 
+Existing explicit remote/control transport or configuration contracts remain
+unchanged where exposed; new remote and non-loopback Control target work is
+deferred outside the Local Admission lock. This document preserves the
+approved transport/security detail; it does not claim live remote
+certification or restore a removed surface.
+
 ## 1. Baseline local behavior
 
 The existing `INARI_LOCAL_RUNTIME_BIND=0.0.0.0` setup selection records

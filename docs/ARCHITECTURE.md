@@ -33,6 +33,38 @@ onboarding through verified operation and recovery. Merely implementing
 individual ports, closing Issues, passing isolated unit tests, or publishing
 this document does not establish product completion.
 
+## 1.1 Current support and lock boundary
+
+The product owner accepted the Local Admission lock boundary on 2026-10-08
+JST. This is a delivery boundary against the approved architecture, not a
+replacement architecture decision. The table separates the active local lock
+target from temporarily frozen compatibility and deferred target detail.
+
+| Surface               | Current classification                                          | Boundary                                                                                                                                                                                      |
+| --------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local CLI             | Sole active development and lock target                         | For Session-routed local operations, a configured local Admission topology selects the Session route. Existing explicit DirectApp selection retains its current precedence and contract.      |
+| Setup/control host    | Active local lock target                                        | Operates the user-owned local components. This classification does not claim live certification.                                                                                              |
+| Admission             | Active local lock target                                        | Owns local caller authentication and authorization. Denial, failure, or unavailability does not silently reroute execution.                                                                   |
+| Executor              | Active local lock target                                        | Owns provider reads/effects and Inari Access credential custody.                                                                                                                              |
+| Scoped GitHub broker  | Active local lock target                                        | Supplies only the scoped provider capabilities used by Executor.                                                                                                                              |
+| DirectApp             | Temporarily frozen compatibility                                | Existing explicit selection, public exports, and configuration/Session readers retain their current contracts. No removal, deprecation, disablement, migration, or expiry is authorized here. |
+| Hosted                | Temporarily frozen; future target detail deferred               | Existing Hosted contracts remain unchanged only where still exposed. Removed routes/tools are not restored, and no live certification is claimed or required for the local lock.              |
+| Remote                | Temporarily frozen compatibility; future target detail deferred | Existing remote contracts remain unchanged where currently exposed. The approved remote architecture stays documented as deferred target detail.                                              |
+| Unimplemented targets | Deferred and unimplemented                                      | They are not represented as supported or certified and are not prerequisites for this local lock.                                                                                             |
+
+For session-routed local commands, the configured local topology and
+`INARI_SESSION_ID` select Admission. The existing paired
+`--session-credential` and `--app-endpoint` flags retain their explicit
+DirectApp compatibility selection; legacy environment selection retains its
+existing conditions. A missing, denied, or unavailable local Session/Admission
+is an error, never an implicit fallback. This freeze does not invent a new
+compatibility promise or expiry date.
+
+The approved Hosted, Relay, remote, and independent-engine convergence detail
+below remains available as future architecture context. It is deferred from
+the Local Admission lock, and its presence does not claim implementation,
+deployment, or certification.
+
 ## 2. Architecture change authority
 
 ### 2.1 Reserved decisions
@@ -371,16 +403,21 @@ Skill linkage, and eligible lexical paths. Inari owns domain semantics and
 secure filesystem access. The target includes completion of eligible
 migration, not indefinite parallel catalogs or parsers.
 
-### ARC-14: retire competing architectures
+### ARC-14: deferred convergence of competing architectures
 
-Independent Direct App deployment/execution is retired. Old Hosted
-repository/work engines and parallel semantic execution paths are removed
-when the canonical replacement is certified.
+The approved long-term target converges Hosted and remote execution on common
+Admission/Executor and retires independent Direct App and old Hosted
+repository/work engines after replacement proof. That convergence is deferred
+from the Local Admission lock. Existing DirectApp, Hosted, and remote
+compatibility remain under their current contracts where those surfaces still
+exist during this deferral. This issue authorizes no removal or change and
+does not restore already removed Hosted tools or routes.
 
-Bounded old-data readers may decode/adopt into the canonical model. They may
-not retain an old authorization engine or silently reinterpret identity.
+The current decision does not authorize removing or disabling existing public
+exports, configuration/Session readers, explicit selection, deployments, or
+compatibility contracts. No such reader silently reinterprets identity.
 Shared Core, cryptography, or effect code is not deleted merely because its
-filename contains a retired profile name.
+filename contains a frozen profile name.
 
 ### ARC-15: verification has explicit proof ownership
 

@@ -3,6 +3,10 @@
 Status: normative component, port, import, and custody contract under
 [Product Architecture Canon](./ARCHITECTURE.md).
 
+Local Setup/control, Admission, Executor, and scoped GitHub broker boundaries
+are the active lock target. Hosted/remote port detail remains approved but
+deferred; this document does not claim live implementation or certification.
+
 Inari ships as one product and one distribution. Components may be co-located
 or explicitly connected over supported transport without merging their
 responsibilities. Module isolation keeps forbidden private code out of client

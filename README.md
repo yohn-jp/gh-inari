@@ -45,14 +45,21 @@ that migration does not change repository authorization.
 ## Architecture status
 
 The [Product Architecture Canon](./docs/ARCHITECTURE.md) records the approved
-2026-09-27 target. The [convergence ledger](./docs/ARCHITECTURE_CONVERGENCE.md)
+2026-09-27 architecture decisions. The [convergence ledger](./docs/ARCHITECTURE_CONVERGENCE.md)
 distinguishes current implementation, accepted changes, remaining integration,
-and required certification.
+and required certification. The current lock boundary is Local CLI, local
+Setup/control host, Admission, Executor, and its scoped GitHub broker; the
+Canon's support matrix records the complete boundary and its frozen paths.
 
 Documentation of a target is not a claim that every advertised interface or
-live deployment already implements it. In particular, the new Hosted
-assertion/Relay profile and retirement of independent Direct App execution
-require their governed implementation and public-path proof.
+live deployment already implements it. The approved Hosted assertion/Relay
+and independent Direct App retirement details remain deferred. Existing
+DirectApp explicit selection and the Hosted/remote compatibility contracts
+still exposed by the package remain unchanged, including public exports and
+configuration/Session readers. This decision does not restore removed Hosted
+routes or tools. Freeze does not delete, deprecate, disable, or add an expiry
+to existing compatibility. Local Admission denial or unavailability never
+silently selects a frozen route.
 
 ## Design principles
 
@@ -138,7 +145,7 @@ Detailed key/bootstrap/recovery procedures are in
 [Delegator Operations](./docs/DELEGATOR_OPERATIONS.md). Explicit non-loopback
 transport is described in [Remote Runtime Transport](./docs/LOCAL_RUNTIME_NON_LOOPBACK.md).
 
-## Remote access target
+## Deferred remote access target
 
 Hosted authenticates through Inari Access user OAuth, verifies caller and
 repository eligibility, and relays a short-lived signed request-bound
@@ -154,7 +161,9 @@ credentials. Hosted has no repository work database or alternate executor.
 
 See [Hosted Relay](./docs/HOSTED_RELAY_DEPLOYMENT.md) and
 [Repository Access Assertion](./docs/REPOSITORY_ACCESS_ASSERTION.md) for the
-approved boundaries and remaining implementation/certification gates.
+approved future boundaries and remaining implementation/certification gates.
+This target is deferred and is not a prerequisite for the Local Admission lock;
+this description does not claim a live or certified Hosted deployment.
 
 ## Agents, MCP, and packaged Skill
 

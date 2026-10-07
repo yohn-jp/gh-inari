@@ -3,6 +3,10 @@
 Canonical public profile copy for the Inari GitHub App. Detailed contracts are
 in [Inari Access](./INARI_ISSUER_APP.md).
 
+The remote profile below is an approved but deferred target, outside the Local
+Admission lock. This copy does not claim that Hosted or remote execution is
+implemented, deployed, or certified.
+
 ## App name
 
 **Inari Access**

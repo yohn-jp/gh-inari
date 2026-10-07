@@ -133,8 +133,9 @@ state never proves trust, readiness, or provider execution success.
 ## 9. Discovery and protocol versions
 
 Protocol initialization and tool/resource discovery declare the implemented
-capabilities. Version negotiation must not silently downgrade to a retired
-execution profile or broaden authorization to preserve old clients.
+capabilities. Version negotiation must not silently downgrade to a frozen
+compatibility execution profile or broaden authorization to preserve old
+clients.
 
 The stable Relay locator and supported route shape are versioned transport
 contracts. Public metadata does not authorize arbitrary issuer keys, OAuth
@@ -143,19 +144,24 @@ callbacks, or connection replacement.
 Service availability is distinct from Runtime/repository readiness. Report
 unsupported protocol, unavailable Runtime, and denied operation separately.
 
-## 10. Baseline adapters and retirement
+## 10. Baseline adapters and deferred convergence
 
 `ChangeExecutionPort` remains a transport-neutral request/result contract.
 Actions/Direct-App named legacy exports are implementation/API compatibility,
 not independent semantic authority.
 
-Independent Direct App deployment is retired. Shared Core, lifecycle, crypto,
-and effect helpers remain when used by the canonical Executor. A retained
-Actions adapter cannot become another trust root or privileged engine.
+Independent Direct App deployment remains temporarily frozen compatibility
+under its existing selection contract, outside the active Local Admission
+lock. It is not deleted, deprecated, or disabled by this decision. Shared
+Core, lifecycle, crypto, and effect helpers remain when used by the canonical
+Executor. A retained Actions adapter cannot become another trust root or
+privileged engine.
 
-Migrate Hosted MCP dispatch away from constructing a provider-executing local
-Direct App composition. Its only normal route is the user's Admission and
-Executor. Private repository access never depends on public Canon discovery.
+The approved Hosted MCP target routes through the user's Admission and
+Executor, but that convergence remains deferred. Existing explicit DirectApp
+compatibility selection is preserved; local failure never silently chooses
+it. This statement does not restore removed Hosted MCP tools. Private
+repository access never depends on public Canon discovery.
 
 ## 11. Verification
 
