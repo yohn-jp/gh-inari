@@ -12,11 +12,12 @@ import { projectChangeFromGitHubEvidence } from "../change.js";
 import { renderImplementationIssueBody } from "../implementation-contract.js";
 import { createLocalAdmissionClient, LocalAdmissionClientError } from "../cli/runtime/admission-client.js";
 import { createLocalExecutorHttpServer } from "./executor-server.js";
-import { LocalExecutorClient } from "./executor-client.js";
+import { LocalExecutorClient, LocalExecutorClientError } from "./executor-client.js";
 import { createLocalAdmissionHttpServer } from "./admission-server.js";
 import { createLocalSessionBinding, type LocalSessionBinding } from "./session-binding.js";
 import type { LocalAdmissionConfig, LocalExecutorConfig } from "./config.js";
 import type { LocalExecutorEvidenceRequest } from "./executor-http.js";
+import { runtimeFailure } from "../runtime-contracts/runtime-failure.js";
 
 const NOW = new Date("2026-09-01T12:00:00.000Z");
 const REPOSITORY = { id: "123456789", name: "acme/inari" };
@@ -351,6 +352,48 @@ test("execution separates Session state, trust, and evidence failures without di
     assert.equal(malformed.code, "ADMISSION_INTERNAL_FAILURE");
     assert.equal(malformed.details.reason, "ADMISSION_EVIDENCE_MALFORMED");
     assert.equal(runtime.calls.execute, 0);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("a dispatched Executor timeout remains an unavailable unknown outcome, never an authorization denial", async () => {
+  const mode: { current: Mode } = { current: {} };
+  const runtime = await harness(mode);
+  let providerEffects = 0;
+  try {
+    const ready = runtime.binding("session-executor-timeout", { kind: "change.implement", issue: 375 });
+    assert.equal((await runtime.client.registerSession(ready)).status, "active");
+    mode.current = {
+      execute: () => {
+        providerEffects += 1;
+        return new LocalExecutorClientError(
+          "EXECUTOR_TIMEOUT",
+          "Executor execution response deadline expired; the provider effect outcome is unknown.",
+          runtimeFailure("provider-execution", "EXECUTOR_EXECUTION_TIMEOUT"),
+        );
+      },
+    };
+    const result = await failure(
+      runtime.client.executeIntent(
+        {
+          version: 1,
+          requestId: "request-executor-timeout",
+          repository: { repositoryHost: "github.com", repositoryId: REPOSITORY.id },
+          operation: "change.issue",
+          request: { version: 1, operation: "issue", issue: 375 },
+        } as never,
+        ready.sessionId,
+      ),
+    );
+    assert.equal(result.code, "ADMISSION_OWNER_UNAVAILABLE");
+    assert.match(result.message, /execution deadline expired/u);
+    assert.match(result.message, /outcome is unknown/u);
+    assert.match(result.message, /may have completed/u);
+    assert.equal(result.details.stage, "provider-execution");
+    assert.equal(result.details.reason, "EXECUTOR_EXECUTION_TIMEOUT");
+    assert.equal(runtime.calls.execute, 1);
+    assert.equal(providerEffects, 1);
   } finally {
     await runtime.close();
   }
